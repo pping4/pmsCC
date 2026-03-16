@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+﻿import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
@@ -44,31 +44,33 @@ export async function GET() {
   // Room statistics
   const roomStats = {
     total: rooms.length,
-    available: rooms.filter((r: { status: string }) => r.status === 'available').length,
-    occupied: rooms.filter((r: { status: string }) => r.status === 'occupied').length,
-    reserved: rooms.filter((r: { status: string }) => r.status === 'reserved').length,
-    maintenance: rooms.filter((r: { status: string }) => r.status === 'maintenance').length,
-    cleaning: rooms.filter((r: { status: string }) => r.status === 'cleaning').length,
-    checkout: rooms.filter((r: { status: string }) => r.status === 'checkout').length,
-    occupancyRate: Math.round((rooms.filter((r: { status: string }) => r.status === 'occupied').length / rooms.length) * 100),
+    available: rooms.filter((r) => r.status === 'available').length,
+    occupied: rooms.filter((r) => r.status === 'occupied').length,
+    reserved: rooms.filter((r) => r.status === 'reserved').length,
+    maintenance: rooms.filter((r) => r.status === 'maintenance').length,
+    cleaning: rooms.filter((r) => r.status === 'cleaning').length,
+    checkout: rooms.filter((r) => r.status === 'checkout').length,
+    occupancyRate: rooms.length > 0
+      ? Math.round((rooms.filter((r) => r.status === 'occupied').length / rooms.length) * 100)
+      : 0,
   };
 
   // Revenue
-  const paidInvoices = invoices.filter((i: { status: string }) => i.status === 'paid');
+  const paidInvoices = invoices.filter((i) => i.status === 'paid');
   const thisMonthRevenue = paidInvoices
-    .filter((i: { createdAt: Date }) => {
+    .filter((i) => {
       const d = new Date(i.createdAt);
       return d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear();
     })
-    .reduce((sum: number, i: { grandTotal: number | string }) => sum + Number(i.grandTotal), 0);
+    .reduce((sum, i) => sum + Number(i.grandTotal), 0);
 
   const pendingRevenue = invoices
-    .filter((i: { status: string }) => i.status === 'unpaid' || i.status === 'overdue')
-    .reduce((sum: number, i: { grandTotal: number | string }) => sum + Number(i.grandTotal), 0);
+    .filter((i) => i.status === 'unpaid' || i.status === 'overdue')
+    .reduce((sum, i) => sum + Number(i.grandTotal), 0);
 
   // Guest stats
-  const foreignGuests = guests.filter((g: { nationality: string | null }) => g.nationality !== 'Thai');
-  const unreportedTM30 = foreignGuests.filter((g: { tm30Reported: boolean }) => !g.tm30Reported);
+  const foreignGuests = guests.filter((g) => g.nationality !== 'Thai');
+  const unreportedTM30 = foreignGuests.filter((g) => !g.tm30Reported);
 
   return NextResponse.json({
     rooms: roomStats,
@@ -76,8 +78,8 @@ export async function GET() {
     revenue: {
       thisMonth: thisMonthRevenue,
       pending: pendingRevenue,
-      unpaidCount: invoices.filter((i: { status: string }) => i.status === 'unpaid').length,
-      overdueCount: invoices.filter((i: { status: string }) => i.status === 'overdue').length,
+      unpaidCount: invoices.filter((i) => i.status === 'unpaid').length,
+      overdueCount: invoices.filter((i) => i.status === 'overdue').length,
     },
     guests: {
       total: guests.length,
@@ -85,12 +87,12 @@ export async function GET() {
       unreportedTM30: unreportedTM30.length,
     },
     housekeeping: {
-      pending: housekeepingTasks.filter((t: { status: string }) => t.status === 'pending').length,
-      inProgress: housekeepingTasks.filter((t: { status: string }) => t.status === 'in_progress').length,
+      pending: housekeepingTasks.filter((t) => t.status === 'pending').length,
+      inProgress: housekeepingTasks.filter((t) => t.status === 'in_progress').length,
     },
     maintenance: {
-      open: maintenanceTasks.filter((t: { status: string }) => t.status === 'open').length,
-      urgent: maintenanceTasks.filter((t: { priority: string }) => t.priority === 'urgent' || t.priority === 'high').length,
+      open: maintenanceTasks.filter((t) => t.status === 'open').length,
+      urgent: maintenanceTasks.filter((t) => t.priority === 'urgent' || t.priority === 'high').length,
     },
   });
 }
