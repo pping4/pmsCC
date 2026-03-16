@@ -1,18 +1,19 @@
-'use client';
+﻿﻿'use client';
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const navItems = [
-  { href: '/dashboard', label: 'Dashboard', icon: '📊' },
-  { href: '/rooms', label: 'ห้องพัก', icon: '🏠' },
-  { href: '/guests', label: 'ลูกค้า', icon: '👥' },
-  { href: '/bookings', label: 'การจอง', icon: '📅' },
-  { href: '/utilities', label: 'มิเตอร์น้ำ-ไฟ', icon: '⚡' },
-  { href: '/billing', label: 'Billing', icon: '💰' },
-  { href: '/products', label: 'สินค้า/บริการ', icon: '📦' },
-  { href: '/housekeeping', label: 'แม่บ้าน', icon: '🧹' },
-  { href: '/maintenance', label: 'ซ่อมบำรุง', icon: '🔧' },
+  { href: '/dashboard', label: 'Dashboard', icon: '๐“' },
+  { href: '/checkin', label: 'เช็คอิน / เช็คเอาท์', icon: '🚪' },
+  { href: '/rooms', label: 'เธซเนเธญเธเธเธฑเธ', icon: '๐ ' },
+  { href: '/guests', label: 'เธฅเธนเธเธเนเธฒ', icon: '๐‘ฅ' },
+  { href: '/bookings', label: 'เธเธฒเธฃเธเธญเธ', icon: '๐“…' },
+  { href: '/utilities', label: 'เธกเธดเน€เธ•เธญเธฃเนเธเนเธณ-เนเธ', icon: 'โก' },
+  { href: '/billing', label: 'Billing', icon: '๐’ฐ' },
+  { href: '/products', label: 'เธชเธดเธเธเนเธฒ/เธเธฃเธดเธเธฒเธฃ', icon: '๐“ฆ' },
+  { href: '/housekeeping', label: 'เนเธกเนเธเนเธฒเธ', icon: '๐งน' },
+  { href: '/maintenance', label: 'เธเนเธญเธกเธเธณเธฃเธธเธ', icon: '๐”ง' },
 ];
 
 export function Sidebar() {
@@ -40,7 +41,7 @@ export function Sidebar() {
             width: 36, height: 36, borderRadius: 10,
             background: 'linear-gradient(135deg, #1e40af, #3b82f6)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
-          }}>🏨</div>
+          }}>๐จ</div>
           <div>
             <div style={{ fontSize: 16, fontWeight: 800, color: '#111827' }}>PMS</div>
             <div style={{ fontSize: 10, color: '#6b7280' }}>Service Apartment</div>
@@ -85,8 +86,9 @@ export function Sidebar() {
         fontSize: 11,
         color: '#9ca3af',
       }}>
-        PMS v1.0 © 2026
+        PMS v1.0 ยฉ 2026
       </div>
     </div>
   );
 }
+
