@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: pms-service-apartment
+    env: node
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npm start
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: NEXTAUTH_SECRET
+        sync: false
+      - key: NEXTAUTH_URL
+        sync: false
+      - key: NODE_ENV
+        value: production
+databases:
+  - name: pms-db
+    plan: free

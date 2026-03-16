@@ -1,0 +1,42 @@
+{
+    "name":  "pms-service-apartment",
+    "version":  "0.1.0",
+    "private":  true,
+    "scripts":  {
+                    "dev":  "next dev",
+                    "build":  "next build",
+                    "start":  "next start",
+                    "db:push":  "dotenv -e .env.local -- prisma db push",
+                    "db:generate":  "prisma generate",
+                    "db:migrate":  "dotenv -e .env.local -- prisma migrate dev",
+                    "db:seed":  "dotenv -e .env.local -- ts-node --compiler-options \u0027{\"module\":\"CommonJS\"}\u0027 prisma/seed.ts",
+                    "db:studio":  "dotenv -e .env.local -- prisma studio",
+                    "postinstall":  "prisma generate"
+                },
+    "dependencies":  {
+                         "next":  "14.2.3",
+                         "react":  "^18.3.0",
+                         "react-dom":  "^18.3.0",
+                         "@prisma/client":  "^5.14.0",
+                         "next-auth":  "^4.24.7",
+                         "bcryptjs":  "^2.4.3",
+                         "date-fns":  "^3.6.0",
+                         "zod":  "^3.23.8",
+                         "clsx":  "^2.1.1",
+                         "tailwind-merge":  "^2.3.0",
+                         "regenerator-runtime":  "^0.14.1"
+                     },
+    "devDependencies":  {
+                            "typescript":  "^5",
+                            "@types/node":  "^20",
+                            "@types/react":  "^18",
+                            "@types/react-dom":  "^18",
+                            "@types/bcryptjs":  "^2.4.6",
+                            "prisma":  "^5.14.0",
+                            "tailwindcss":  "^3.4.4",
+                            "postcss":  "^8",
+                            "autoprefixer":  "^10",
+                            "ts-node":  "^10.9.2",
+                            "dotenv-cli":  "^7.4.2"
+                        }
+}

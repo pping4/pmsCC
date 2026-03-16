@@ -1,0 +1,345 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Gender {
+  male
+  female
+  other
+}
+
+enum IdType {
+  passport
+  thai_id
+  driving_license
+  other
+}
+
+enum RoomStatus {
+  available
+  occupied
+  reserved
+  maintenance
+  cleaning
+  checkout
+}
+
+enum BookingType {
+  daily
+  monthly_short
+  monthly_long
+}
+
+enum BookingSource {
+  direct
+  walkin
+  booking_com
+  agoda
+  airbnb
+  traveloka
+  expat
+}
+
+enum BookingStatus {
+  confirmed
+  checked_in
+  checked_out
+  cancelled
+}
+
+enum InvoiceStatus {
+  unpaid
+  paid
+  overdue
+  cancelled
+}
+
+enum PaymentMethod {
+  cash
+  transfer
+  credit_card
+}
+
+enum TaxType {
+  included
+  excluded
+  no_tax
+}
+
+enum ProductCategory {
+  service
+  product
+}
+
+enum HousekeepingStatus {
+  pending
+  in_progress
+  completed
+  inspected
+}
+
+enum MaintenanceStatus {
+  open
+  in_progress
+  resolved
+}
+
+enum MaintenancePriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum UserRole {
+  admin
+  manager
+  staff
+}
+
+model User {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  name      String
+  password  String
+  role      UserRole @default(staff)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("users")
+}
+
+model RoomType {
+  id           String  @id @default(uuid())
+  code         String  @unique // STD, SUP, DLX, STE
+  name         String
+  icon         String  @default("🛏️")
+  baseDaily    Decimal @map("base_daily") @db.Decimal(10, 2)
+  baseMonthly  Decimal @map("base_monthly") @db.Decimal(10, 2)
+  description  String?
+
+  rooms Room[]
+
+  @@map("room_types")
+}
+
+model Room {
+  id               String     @id @default(uuid())
+  number           String     @unique
+  floor            Int
+  typeId           String     @map("type_id")
+  status           RoomStatus @default(available)
+  currentBookingId String?    @map("current_booking_id")
+  notes            String?
+
+  roomType         RoomType   @relation(fields: [typeId], references: [id])
+  bookings         Booking[]
+  utilityReadings  UtilityReading[]
+  housekeepingTasks HousekeepingTask[]
+  maintenanceTasks  MaintenanceTask[]
+
+  @@map("rooms")
+}
+
+model Guest {
+  id                String   @id @default(uuid())
+  title             String   @default("Mr.")
+  firstName         String   @map("first_name")
+  lastName          String   @map("last_name")
+  firstNameTH       String?  @map("first_name_th")
+  lastNameTH        String?  @map("last_name_th")
+  gender            Gender   @default(male)
+  dateOfBirth       DateTime? @map("date_of_birth") @db.Date
+  nationality       String   @default("Thai")
+  idType            IdType   @default(passport) @map("id_type")
+  idNumber          String   @map("id_number")
+  idExpiry          DateTime? @map("id_expiry") @db.Date
+  idPhotoUrl        String?  @map("id_photo_url")
+  facePhotoUrl      String?  @map("face_photo_url")
+
+  phone             String?
+  email             String?
+  lineId            String?  @map("line_id")
+  address           String?
+
+  // TM30 Immigration fields
+  visaType          String?  @map("visa_type")
+  visaNumber        String?  @map("visa_number")
+  arrivalDate       DateTime? @map("arrival_date") @db.Date
+  departureDate     DateTime? @map("departure_date") @db.Date
+  portOfEntry       String?  @map("port_of_entry")
+  flightNumber      String?  @map("flight_number")
+  lastCountry       String?  @map("last_country")
+  purposeOfVisit    String?  @map("purpose_of_visit")
+
+  // Marketing & Service
+  preferredLanguage String?  @default("Thai") @map("preferred_language")
+  vipLevel          String?  @map("vip_level")
+  tags              String[] @default([])
+  allergies         String?
+  specialRequests   String?  @map("special_requests")
+  companyName       String?  @map("company_name")
+  companyTaxId      String?  @map("company_tax_id")
+
+  // Emergency Contact
+  emergencyName     String?  @map("emergency_name")
+  emergencyPhone    String?  @map("emergency_phone")
+
+  // TM30 Reporting
+  tm30Reported      Boolean  @default(false) @map("tm30_reported")
+  tm30ReportDate    DateTime? @map("tm30_report_date") @db.Date
+
+  // Stats
+  totalStays        Int      @default(0) @map("total_stays")
+  totalSpent        Decimal  @default(0) @map("total_spent") @db.Decimal(12, 2)
+  firstStay         DateTime? @map("first_stay") @db.Date
+  lastStay          DateTime? @map("last_stay") @db.Date
+
+  notes             String?
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  bookings          Booking[]
+  invoices          Invoice[]
+
+  @@map("guests")
+}
+
+model Booking {
+  id            String        @id @default(uuid())
+  bookingNumber String        @unique @map("booking_number")
+  guestId       String        @map("guest_id")
+  roomId        String        @map("room_id")
+  bookingType   BookingType   @map("booking_type")
+  source        BookingSource @default(direct)
+  checkIn       DateTime      @map("check_in") @db.Date
+  checkOut      DateTime      @map("check_out") @db.Date
+  rate          Decimal       @db.Decimal(10, 2)
+  deposit       Decimal       @default(0) @db.Decimal(10, 2)
+  status        BookingStatus @default(confirmed)
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+
+  guest         Guest         @relation(fields: [guestId], references: [id])
+  room          Room          @relation(fields: [roomId], references: [id])
+  invoices      Invoice[]
+
+  @@map("bookings")
+}
+
+model Invoice {
+  id            String        @id @default(uuid())
+  invoiceNumber String        @unique @map("invoice_number")
+  bookingId     String?       @map("booking_id")
+  guestId       String        @map("guest_id")
+  issueDate     DateTime      @map("issue_date") @db.Date
+  dueDate       DateTime      @map("due_date") @db.Date
+  subtotal      Decimal       @db.Decimal(12, 2)
+  taxTotal      Decimal       @default(0) @map("tax_total") @db.Decimal(12, 2)
+  grandTotal    Decimal       @map("grand_total") @db.Decimal(12, 2)
+  status        InvoiceStatus @default(unpaid)
+  paymentMethod PaymentMethod? @map("payment_method")
+  paidAt        DateTime?     @map("paid_at")
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  booking       Booking?      @relation(fields: [bookingId], references: [id])
+  guest         Guest         @relation(fields: [guestId], references: [id])
+  items         InvoiceItem[]
+
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String   @id @default(uuid())
+  invoiceId   String   @map("invoice_id")
+  description String
+  amount      Decimal  @db.Decimal(10, 2)
+  taxType     TaxType  @default(included) @map("tax_type")
+  productId   String?  @map("product_id")
+  sortOrder   Int      @default(0) @map("sort_order")
+
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product     Product? @relation(fields: [productId], references: [id])
+
+  @@map("invoice_items")
+}
+
+model UtilityReading {
+  id             String   @id @default(uuid())
+  roomId         String   @map("room_id")
+  month          String   // "2026-03" format
+  prevWater      Decimal  @default(0) @map("prev_water") @db.Decimal(10, 2)
+  currWater      Decimal  @default(0) @map("curr_water") @db.Decimal(10, 2)
+  waterRate      Decimal  @default(18) @map("water_rate") @db.Decimal(10, 2)
+  prevElectric   Decimal  @default(0) @map("prev_electric") @db.Decimal(10, 2)
+  currElectric   Decimal  @default(0) @map("curr_electric") @db.Decimal(10, 2)
+  electricRate   Decimal  @default(8) @map("electric_rate") @db.Decimal(10, 2)
+  recorded       Boolean  @default(false)
+  recordedAt     DateTime? @map("recorded_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  room           Room     @relation(fields: [roomId], references: [id])
+
+  @@unique([roomId, month])
+  @@map("utility_readings")
+}
+
+model Product {
+  id          String          @id @default(uuid())
+  code        String          @unique
+  name        String
+  price       Decimal         @db.Decimal(10, 2)
+  taxType     TaxType         @default(included) @map("tax_type")
+  category    ProductCategory @default(service)
+  active      Boolean         @default(true)
+  createdAt   DateTime        @default(now()) @map("created_at")
+
+  invoiceItems InvoiceItem[]
+
+  @@map("products")
+}
+
+model HousekeepingTask {
+  id          String             @id @default(uuid())
+  taskNumber  String             @unique @map("task_number")
+  roomId      String             @map("room_id")
+  taskType    String             @map("task_type")
+  assignedTo  String?            @map("assigned_to")
+  status      HousekeepingStatus @default(pending)
+  priority    String             @default("normal")
+  scheduledAt DateTime           @map("scheduled_at") @db.Date
+  completedAt DateTime?          @map("completed_at")
+  notes       String?
+  createdAt   DateTime           @default(now()) @map("created_at")
+
+  room        Room               @relation(fields: [roomId], references: [id])
+
+  @@map("housekeeping_tasks")
+}
+
+model MaintenanceTask {
+  id           String              @id @default(uuid())
+  taskNumber   String              @unique @map("task_number")
+  roomId       String              @map("room_id")
+  issue        String
+  priority     MaintenancePriority @default(medium)
+  assignedTo   String?             @map("assigned_to")
+  status       MaintenanceStatus   @default(open)
+  cost         Decimal             @default(0) @db.Decimal(10, 2)
+  reportDate   DateTime            @map("report_date") @db.Date
+  resolvedDate DateTime?           @map("resolved_date") @db.Date
+  notes        String?
+  createdAt    DateTime            @default(now()) @map("created_at")
+
+  room         Room                @relation(fields: [roomId], references: [id])
+
+  @@map("maintenance_tasks")
+}
