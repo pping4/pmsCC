@@ -65,7 +65,7 @@ export default function TM30Page() {
 
   const fetchGuests = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/guests?nationality=foreign&withBookings=true');
+    const res = await fetch('/api/tm30');
     const data = await res.json();
     setGuests(Array.isArray(data) ? data : []);
     setLoading(false);
@@ -83,8 +83,7 @@ export default function TM30Page() {
     setMarking(null);
   };
 
-  const isForeign = (g: Guest) => g.nationality?.toLowerCase() !== 'thai' && g.nationality?.toLowerCase() !== 'ไทย';
-  const foreignGuests = guests.filter(isForeign);
+  const foreignGuests = guests; // API already filters to foreign guests
   const currentBooking = (g: Guest) => g.bookings?.[0] || null;
 
   const filtered = foreignGuests.filter(g => {
