@@ -16,9 +16,54 @@ export async function GET(request: NextRequest) {
       ...(status && status !== 'all' ? { status: status as never } : {}),
       ...(floor && floor !== 'all' ? { floor: parseInt(floor) } : {}),
     },
-    include: { roomType: true },
+    include: {
+      roomType: true,
+      bookings: {
+        where: {
+          status: { in: ['checked_in', 'confirmed'] },
+        },
+        include: {
+          guest: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              firstNameTH: true,
+              lastNameTH: true,
+              nationality: true,
+              phone: true,
+            },
+          },
+        },
+        orderBy: { checkIn: 'desc' },
+        take: 1,
+      },
+    },
     orderBy: [{ floor: 'asc' }, { number: 'asc' }],
   });
 
-  return NextResponse.json(rooms);
+  const enriched = rooms.map(room => {
+    const currentBooking = room.bookings[0] || null;
+    return {
+      id: room.id,
+      number: room.number,
+      floor: room.floor,
+      status: room.status,
+      notes: room.notes,
+      currentBookingId: room.currentBookingId,
+      roomType: room.roomType,
+      currentBooking: currentBooking ? {
+        id: currentBooking.id,
+        bookingNumber: currentBooking.bookingNumber,
+        bookingType: currentBooking.bookingType,
+        status: currentBooking.status,
+        checkIn: currentBooking.checkIn,
+        checkOut: currentBooking.checkOut,
+        rate: Number(currentBooking.rate),
+        guest: currentBooking.guest,
+      } : null,
+    };
+  });
+
+  return NextResponse.json(enriched);
 }
