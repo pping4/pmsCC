@@ -126,6 +126,11 @@ export async function GET(request: NextRequest) {
                   email:       true,
                 },
               },
+              // City Ledger account (if booking is billed to a corporate account)
+              cityLedgerAccountId: true,
+              cityLedgerAccount: {
+                select: { id: true, companyName: true, accountCode: true },
+              },
               // Include invoices to calculate payment level
               invoices: {
                 select: {
@@ -219,6 +224,8 @@ export async function GET(request: NextRequest) {
           paymentLevel,
           totalPaid,
           expectedTotal,
+          cityLedgerAccountId: (b as any).cityLedgerAccountId ?? null,
+          cityLedgerAccount:   (b as any).cityLedgerAccount   ?? null,
           // Normalize dates: always return "YYYY-MM-DD" strings
           checkIn:  formatUTCDate(new Date(b.checkIn)),
           checkOut: formatUTCDate(new Date(b.checkOut)),

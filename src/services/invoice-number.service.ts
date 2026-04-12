@@ -7,23 +7,26 @@
  * All functions MUST be called inside a Prisma $transaction
  * to guarantee uniqueness under concurrent writes.
  *
- * ┌───────────┬─────────────────────────────────┐
- * │ Prefix    │ Meaning                         │
- * ├───────────┼─────────────────────────────────┤
- * │ FLO       │ Folio                           │
- * │ INV-CI    │ Invoice — Check-In stay charge  │
- * │ INV-CO    │ Invoice — Check-Out balance      │
- * │ INV-MN    │ Invoice — Monthly rent           │
- * │ INV-UT    │ Invoice — Utility                │
- * │ INV-EX    │ Invoice — Extra service          │
- * │ INV-BD    │ Invoice — Bad debt               │
- * │ INV-BK    │ Invoice — Booking prepayment     │
- * │ INV-GN    │ Invoice — General / manual       │
- * │ PAY       │ Payment                          │
- * │ RCP       │ Receipt                          │
- * │ DEP       │ Security Deposit                 │
- * │ BK        │ Booking                          │
- * └───────────┴─────────────────────────────────┘
+ * ┌────────────┬─────────────────────────────────┐
+ * │ Prefix     │ Meaning                         │
+ * ├────────────┼─────────────────────────────────┤
+ * │ FLO        │ Folio                           │
+ * │ INV-CI     │ Invoice — Check-In stay charge  │
+ * │ INV-CO     │ Invoice — Check-Out balance      │
+ * │ INV-MN     │ Invoice — Monthly rent           │
+ * │ INV-UT     │ Invoice — Utility                │
+ * │ INV-EX     │ Invoice — Extra service          │
+ * │ INV-BD     │ Invoice — Bad debt               │
+ * │ INV-BK     │ Invoice — Booking prepayment     │
+ * │ INV-GN     │ Invoice — General / manual       │
+ * │ INV-CL     │ Invoice — City Ledger summary    │
+ * │ PAY        │ Payment                          │
+ * │ RCP        │ Receipt                          │
+ * │ DEP        │ Security Deposit                 │
+ * │ BK         │ Booking                          │
+ * │ CL         │ City Ledger Account              │
+ * │ CL-PAY     │ City Ledger Payment              │
+ * └────────────┴─────────────────────────────────┘
  */
 
 import { Prisma } from '@prisma/client';
@@ -108,7 +111,7 @@ export async function generateFolioNumber(tx: TxClient): Promise<string> {
 /** INV-CI-YYYYMMDD-NNNN */
 export async function generateInvoiceNumber(
   tx: TxClient,
-  type: 'CI' | 'CO' | 'MN' | 'UT' | 'EX' | 'BD' | 'BK' | 'GN',
+  type: 'CI' | 'CO' | 'MN' | 'UT' | 'EX' | 'BD' | 'BK' | 'GN' | 'CL',
 ): Promise<string> {
   const prefix = `INV-${type}-${todayPrefix()}`;
   return nextSequence(tx, 'invoice', 'invoiceNumber', prefix);
@@ -137,6 +140,34 @@ export async function generateBookingNumber(tx: TxClient): Promise<string> {
   const year = new Date().getFullYear();
   const prefix = `BK-${year}`;
   return nextSequence(tx, 'booking', 'bookingNumber', prefix);
+}
+
+// ─── City Ledger Number Generators ─────────────────────────────────────────
+
+/**
+ * CL-NNNN — sequential City Ledger account code (no date, ever-increasing)
+ * e.g. CL-0001, CL-0002
+ */
+export async function generateCLAccountCode(tx: TxClient): Promise<string> {
+  const latest = await tx.cityLedgerAccount.findFirst({
+    where: { accountCode: { startsWith: 'CL-' } },
+    orderBy: { accountCode: 'desc' },
+    select: { accountCode: true },
+  });
+  if (!latest) return 'CL-0001';
+  const seq = parseInt(latest.accountCode.replace('CL-', ''), 10);
+  return `CL-${pad(isNaN(seq) ? 1 : seq + 1)}`;
+}
+
+/**
+ * CL-PAY-YYYYMMDD-NNNN — City Ledger payment number
+ */
+export async function generateCLPaymentNumber(tx: TxClient): Promise<string> {
+  const prefix = `CL-PAY-${todayPrefix()}`;
+  const count = await tx.cityLedgerPayment.count({
+    where: { paymentNumber: { startsWith: prefix } },
+  });
+  return `${prefix}-${pad(count + 1)}`;
 }
 
 /** MNT-YYYYMM-NNNN (monthly billing — uses INV-MN now) */

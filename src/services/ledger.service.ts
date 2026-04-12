@@ -244,3 +244,82 @@ export async function postBadDebt(
     createdBy: opts.createdBy,
   });
 }
+
+// ─── City Ledger / AR_CORPORATE accounting entries ───────────────────────────
+
+/**
+ * Post a City Ledger charge (when invoice is assigned to a CL account)
+ * DEBIT AR_CORPORATE  |  CREDIT Revenue
+ */
+export async function postCityLedgerCharge(
+  tx: TxClient,
+  opts: {
+    amount: number;
+    invoiceId: string;
+    description?: string;
+    createdBy: string;
+  }
+) {
+  await postLedgerPair(tx, {
+    debitAccount:  LedgerAccount.AR_CORPORATE,
+    creditAccount: LedgerAccount.REVENUE,
+    amount:        opts.amount,
+    referenceType: 'CityLedger',
+    referenceId:   opts.invoiceId,
+    description:   opts.description ?? 'City Ledger charge posted',
+    createdBy:     opts.createdBy,
+  });
+}
+
+/**
+ * Receive payment from a City Ledger (corporate) account
+ * DEBIT Cash/Bank  |  CREDIT AR_CORPORATE
+ */
+export async function postCityLedgerPaymentReceived(
+  tx: TxClient,
+  opts: {
+    paymentMethod: string;
+    amount: number;
+    clPaymentId: string;
+    description?: string;
+    createdBy: string;
+  }
+) {
+  const debitAccount = ['transfer', 'promptpay', 'credit_card'].includes(opts.paymentMethod)
+    ? LedgerAccount.BANK
+    : LedgerAccount.CASH;
+
+  await postLedgerPair(tx, {
+    debitAccount,
+    creditAccount: LedgerAccount.AR_CORPORATE,
+    amount:        opts.amount,
+    referenceType: 'CityLedger',
+    referenceId:   opts.clPaymentId,
+    description:   opts.description ?? `City Ledger payment received via ${opts.paymentMethod}`,
+    createdBy:     opts.createdBy,
+  });
+}
+
+/**
+ * Write off City Ledger bad debt
+ * DEBIT Expense  |  CREDIT AR_CORPORATE
+ */
+export async function postCityLedgerBadDebt(
+  tx: TxClient,
+  opts: {
+    amount: number;
+    invoiceId: string;
+    reason: string;
+    createdBy: string;
+  }
+) {
+  await postLedgerPair(tx, {
+    debitAccount:  LedgerAccount.EXPENSE,
+    creditAccount: LedgerAccount.AR_CORPORATE,
+    amount:        opts.amount,
+    referenceType: 'CityLedger',
+    referenceId:   opts.invoiceId,
+    description:   `City Ledger bad debt: ${opts.reason}`,
+    createdBy:     opts.createdBy,
+  });
+}

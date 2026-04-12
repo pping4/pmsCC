@@ -552,16 +552,20 @@ export default function DetailPanel({
 
         {/* ── CHECK-OUT COLLECT STEP header ── */}
         {booking && checkoutStep === 'collect' && (
-          <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: '#eff6ff' }}>
-            <span style={{ fontSize: 18 }}>🧳</span>
+          <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: booking.cityLedgerAccountId ? '#f5f3ff' : '#eff6ff' }}>
+            <span style={{ fontSize: 18 }}>{booking.cityLedgerAccountId ? '🏢' : '🧳'}</span>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#1e40af' }}>เช็คเอาท์ — ห้อง {room?.number}</div>
-              <div style={{ fontSize: 11, color: '#60a5fa' }}>
-                {checkoutFolioBalance === null && checkoutStep === 'collect'
-                  ? 'กำลังตรวจสอบยอดค้างชำระ...'
-                  : checkoutOutstanding > 0
-                    ? `ยอดค้างชำระ ${fmtCurrency(checkoutOutstanding)} — เลือกช่องทางชำระ`
-                    : 'ชำระครบแล้ว — กดยืนยันเพื่อเช็คเอาท์'}
+              <div style={{ fontSize: 13, fontWeight: 700, color: booking.cityLedgerAccountId ? '#6d28d9' : '#1e40af' }}>
+                {booking.cityLedgerAccountId ? `City Ledger — ห้อง ${room?.number}` : `เช็คเอาท์ — ห้อง ${room?.number}`}
+              </div>
+              <div style={{ fontSize: 11, color: booking.cityLedgerAccountId ? '#a78bfa' : '#60a5fa' }}>
+                {booking.cityLedgerAccountId
+                  ? `บิลจะถูกส่งไปยัง ${booking.cityLedgerAccount?.companyName ?? 'บัญชี City Ledger'}`
+                  : checkoutFolioBalance === null
+                    ? 'กำลังตรวจสอบยอดค้างชำระ...'
+                    : checkoutOutstanding > 0
+                      ? `ยอดค้างชำระ ${fmtCurrency(checkoutOutstanding)} — เลือกช่องทางชำระ`
+                      : 'ชำระครบแล้ว — กดยืนยันเพื่อเช็คเอาท์'}
               </div>
             </div>
           </div>
@@ -827,8 +831,22 @@ export default function DetailPanel({
                     </div>
                   </div>
 
-                  {/* Payment method — only show when there's an outstanding balance */}
-                  {checkoutOutstanding > 0 ? (
+                  {/* City Ledger notice OR normal payment method selector */}
+                  {booking.cityLedgerAccountId ? (
+                    <div style={{ marginBottom: 16, padding: '14px 16px', background: '#f5f3ff', borderRadius: 8, border: '1px solid #c4b5fd', display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+                      <span style={{ fontSize: 20 }}>🏢</span>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: '#6d28d9', marginBottom: 4 }}>บิล City Ledger</div>
+                        <div style={{ fontSize: 12, color: '#7c3aed' }}>
+                          ยอดค้างชำระ <strong>{fmtCurrency(checkoutOutstanding)}</strong> จะถูกบันทึกเข้าบัญชี
+                          <strong> {booking.cityLedgerAccount?.companyName ?? ''}</strong> ({booking.cityLedgerAccount?.accountCode ?? ''})
+                        </div>
+                        <div style={{ fontSize: 11, color: '#a78bfa', marginTop: 4 }}>
+                          ไม่ต้องรับเงินสดจากลูกค้า — บริษัทจะชำระภายหลังตามเงื่อนไขเครดิต
+                        </div>
+                      </div>
+                    </div>
+                  ) : checkoutOutstanding > 0 ? (
                     <div style={{ marginBottom: 16, padding: '12px 14px', background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
                       <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
                         💳 ช่องทางชำระเงิน
@@ -861,8 +879,8 @@ export default function DetailPanel({
                     </div>
                   )}
 
-                  {/* Cash session warning */}
-                  {checkoutCashMissing && (
+                  {/* Cash session warning — only for non-CL bookings */}
+                  {!booking.cityLedgerAccountId && checkoutCashMissing && (
                     <div style={{ marginBottom: 12, padding: '10px 14px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 12, color: '#b91c1c' }}>
                       ⚠️ ยังไม่มีกะแคชเชียร์ที่เปิดอยู่ — กรุณาไปที่เมนู <strong>แคชเชียร์</strong> และเปิดกะก่อน หรือเลือกช่องทางชำระอื่น
                     </div>
@@ -884,18 +902,24 @@ export default function DetailPanel({
                     </button>
                     <button
                       onClick={handleCheckoutConfirm}
-                      disabled={loading || checkoutCashMissing}
+                      disabled={loading || (!booking.cityLedgerAccountId && checkoutCashMissing)}
                       style={{
                         flex: 2, padding: '10px', borderRadius: 6,
-                        background: checkoutCashMissing ? '#93c5fd' : '#3b82f6',
+                        background: booking.cityLedgerAccountId
+                          ? '#7c3aed'
+                          : (!booking.cityLedgerAccountId && checkoutCashMissing) ? '#93c5fd' : '#3b82f6',
                         color: '#fff', border: 'none', fontSize: 13, fontWeight: 700,
-                        cursor: (loading || checkoutCashMissing) ? 'not-allowed' : 'pointer',
-                        opacity: (loading || checkoutCashMissing) ? 0.6 : 1,
+                        cursor: (loading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 'not-allowed' : 'pointer',
+                        opacity: (loading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 0.6 : 1,
                         fontFamily: FONT,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                       }}
                     >
-                      {loading ? '⏳ กำลังดำเนินการ...' : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
+                      {loading
+                        ? '⏳ กำลังดำเนินการ...'
+                        : booking.cityLedgerAccountId
+                          ? '🏢 บันทึกเข้า City Ledger และเช็คเอาท์'
+                          : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
                     </button>
                   </div>
                 </div>

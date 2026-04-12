@@ -30,7 +30,8 @@ export type LogCategory =
   | 'housekeeping'
   | 'maintenance'
   | 'guest'
-  | 'system';
+  | 'system'
+  | 'city_ledger';
 
 /** Parameters for a single log entry */
 export interface LogActivityParams {
@@ -52,6 +53,7 @@ export interface LogActivityParams {
   roomId?: string | null;
   guestId?: string | null;
   invoiceId?: string | null;
+  cityLedgerAccountId?: string | null;
 
   /** Arbitrary JSON metadata — use for before/after state snapshots */
   metadata?: Record<string, unknown>;
@@ -84,6 +86,7 @@ const CATEGORY_ICONS: Record<LogCategory, string> = {
   maintenance:   '🔧',
   guest:         '👤',
   system:        '⚙️',
+  city_ledger:   '🏢',
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -154,10 +157,11 @@ export async function logActivity(
         action:      params.action,
         category:    params.category,
         description: params.description,
-        bookingId:   params.bookingId  ?? null,
-        roomId:      params.roomId     ?? null,
-        guestId:     params.guestId    ?? null,
-        invoiceId:   params.invoiceId  ?? null,
+        bookingId:           params.bookingId           ?? null,
+        roomId:              params.roomId              ?? null,
+        guestId:             params.guestId             ?? null,
+        invoiceId:           params.invoiceId           ?? null,
+        cityLedgerAccountId: params.cityLedgerAccountId ?? null,
         metadata:    params.metadata   as Prisma.InputJsonValue | undefined,
         icon,
         severity:    params.severity   ?? 'info',

@@ -24,6 +24,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { postBadDebt } from '@/services/ledger.service';
+import { postInvoiceToCityLedger } from '@/services/cityLedger.service';
 import { z } from 'zod';
 import {
   getFolioByBookingId, addCharge, createInvoiceFromFolio,
@@ -92,6 +93,7 @@ export async function POST(request: Request) {
     include: {
       room:    { select: { id: true, number: true } },
       guest:   { select: { id: true, firstName: true, lastName: true } },
+      cityLedgerAccount: { select: { id: true, companyName: true, accountCode: true } },
       invoices: {
         select: {
           id:          true,
@@ -168,8 +170,42 @@ export async function POST(request: Request) {
     // ── 3. Folio-centric: check for unbilled items and create final invoice ─
     const folio = await getFolioByBookingId(tx, bookingId);
 
-    if (badDebt && outstanding > 0) {
-      // ── 3a. BAD DEBT: create invoice + post ledger ───────────────────────
+    if (booking.cityLedgerAccount) {
+      // ── 3a. CITY LEDGER checkout: create INV-CO, post to CL, skip cash ───
+      const coResult = await createInvoiceFromFolio(tx, {
+        folioId:     folio?.folioId ?? '',
+        guestId:     booking.guestId,
+        bookingId,
+        invoiceType: 'CO',
+        dueDate:     now,
+        notes:       `ใบแจ้งหนี้ City Ledger — ${booking.cityLedgerAccount.companyName} — ห้อง ${booking.room.number}`,
+        createdBy:   userId,
+      });
+
+      if (coResult) {
+        checkoutSummary.newInvoiceNumber = coResult.invoiceNumber;
+
+        await postInvoiceToCityLedger(tx, {
+          invoiceId:  coResult.invoiceId,
+          accountId:  booking.cityLedgerAccount.id,
+          createdBy:  userId,
+          userName:   authSession.user.name ?? undefined,
+        });
+
+        await logActivity(tx, {
+          userId,
+          action:      'city_ledger.checkout_posted',
+          category:    'city_ledger',
+          description: `เช็คเอาท์ City Ledger: ${booking.cityLedgerAccount.companyName} — ${coResult.invoiceNumber} ฿${coResult.grandTotal.toLocaleString()}`,
+          bookingId,
+          guestId:             booking.guestId,
+          invoiceId:           coResult.invoiceId,
+          cityLedgerAccountId: booking.cityLedgerAccount.id,
+          severity: 'success',
+        });
+      }
+    } else if (badDebt && outstanding > 0) {
+      // ── 3b. BAD DEBT: create invoice + post ledger ───────────────────────
       const nights =
         booking.bookingType === 'daily'
           ? calcNights(booking.checkIn, booking.checkOut)
@@ -232,7 +268,7 @@ export async function POST(request: Request) {
         createdBy: userId,
       });
     } else if (folio) {
-      // ── 3b. Normal checkout: build final invoice
+      // ── 3c. Normal checkout: build final invoice
       //
       // BILLING FLOW (daily stay):
       //  A. Add ROOM charge if not already in Folio (i.e. not prepaid via INV-BK).

@@ -29,6 +29,7 @@ const navItems = [
   { href: '/maintenance',   label: 'ซ่อมบำรุง',             icon: '🔧' },
   { href: '/tm30',          label: 'รายงาน ตม.30',          icon: '🛂' },
   { href: '/nightaudit',    label: 'Night Audit',          icon: '🌙' },
+  { href: '/city-ledger',   label: 'City Ledger / AR',     icon: '🏢' },
   { href: '/settings/rates',label: 'กำหนดราคาห้องพัก',      icon: '🏷️' },
 ];
 

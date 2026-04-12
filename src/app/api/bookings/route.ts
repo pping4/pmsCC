@@ -73,6 +73,9 @@ export async function GET(request: NextRequest) {
           closedAt: true,
         },
       },
+      cityLedgerAccount: {
+        select: { id: true, companyName: true, accountCode: true },
+      },
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -171,9 +174,13 @@ export async function POST(request: NextRequest) {
           checkIn:     checkInDate,
           checkOut:    checkOutDate,
           rate:        data.rate,
-          deposit:     depositAmount,
-          status:      'confirmed',
-          notes:       data.notes || null,
+          deposit:              depositAmount,
+          status:               'confirmed',
+          notes:                data.notes || null,
+          // City Ledger — optional FK (validated: must be valid UUID if provided)
+          ...(data.cityLedgerAccountId
+            ? { cityLedgerAccountId: String(data.cityLedgerAccountId) }
+            : {}),
         },
         select: {
           id:            true,

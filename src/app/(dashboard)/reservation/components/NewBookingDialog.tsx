@@ -85,6 +85,10 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
   const [source, setSource] = useState<BookingSource>('direct');
   const [notes, setNotes] = useState('');
 
+  // ─── State: City Ledger ───────────────────────────────────────────────────────
+  const [cityLedgerAccountId, setCityLedgerAccountId] = useState<string>('');
+  const [clAccounts, setClAccounts] = useState<{ id: string; accountCode: string; companyName: string }[]>([]);
+
   // ─── State: Payment at Booking ─────────────────────────────────────────────
   const [collectPayment, setCollectPayment] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<string>('cash');
@@ -115,6 +119,7 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
     setCollectPayment(false);
     setPaymentMethod('cash');
     setPaymentType('full');
+    setCityLedgerAccountId('');
     setOverlapWarning(null);
     setError(null);
     setNewGuestForm({
@@ -125,6 +130,15 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialCheckIn, initialCheckOut, initialRoom?.id]);
+
+  // ─── Effect: Fetch active City Ledger accounts (once on mount) ───────────────
+  useEffect(() => {
+    fetch('/api/city-ledger?status=active&limit=200')
+      .then(r => r.ok ? r.json() : { accounts: [] })
+      .then((d: { accounts?: { id: string; accountCode: string; companyName: string }[] }) =>
+        setClAccounts(d.accounts ?? []))
+      .catch(() => setClAccounts([]));
+  }, []);
 
   // ─── Effect: Guest Search Debounce ────────────────────────────────────────────
   useEffect(() => {
@@ -358,7 +372,8 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
           rate,
           deposit,
           notes: notes.trim() || null,
-          ...(collectPayment ? {
+          ...(cityLedgerAccountId ? { cityLedgerAccountId } : {}),
+          ...(collectPayment && !cityLedgerAccountId ? {
             paymentMethod,
             paymentType,
           } : {}),
@@ -1029,6 +1044,33 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
                 </div>
               </div>
 
+              {/* ── City Ledger / AR Account (optional) ── */}
+              {clAccounts.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <label style={LABEL_STYLE}>🏢 City Ledger / บริษัท (ถ้ามี)</label>
+                  <select
+                    value={cityLedgerAccountId}
+                    onChange={e => {
+                      setCityLedgerAccountId(e.target.value);
+                      if (e.target.value) setCollectPayment(false); // CL booking → no upfront payment
+                    }}
+                    style={INPUT_STYLE}
+                  >
+                    <option value="">— บุคคลทั่วไป (ไม่ใช่ City Ledger) —</option>
+                    {clAccounts.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.accountCode} — {a.companyName}
+                      </option>
+                    ))}
+                  </select>
+                  {cityLedgerAccountId && (
+                    <div style={{ fontSize: 11, color: '#1e40af', marginTop: 4 }}>
+                      ℹ️ บิลจะถูกส่งไปยังบัญชี City Ledger ณ เช็คเอาท์ ไม่ต้องรับเงินสดจากลูกค้า
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* ── Payment at Booking (optional) ── */}
               <div
                 style={{
@@ -1036,6 +1078,8 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
                   border: '1px solid #e5e7eb',
                   borderRadius: 8,
                   overflow: 'hidden',
+                  opacity: cityLedgerAccountId ? 0.4 : 1,
+                  pointerEvents: cityLedgerAccountId ? 'none' : 'auto',
                 }}
               >
                 <div

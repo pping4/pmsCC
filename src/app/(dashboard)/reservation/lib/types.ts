@@ -52,6 +52,9 @@ export interface BookingItem {
   expectedTotal: number;
   /** Room assignment is locked — cannot be dragged to another room */
   roomLocked: boolean;
+  /** City Ledger / AR — set when booking is billed to a corporate account */
+  cityLedgerAccountId?: string | null;
+  cityLedgerAccount?: { id: string; companyName: string; accountCode: string } | null;
 }
 
 export interface RoomRateInfo {

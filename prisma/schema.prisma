@@ -70,6 +70,7 @@ enum InvoiceType {
   extra_service
   deposit_receipt
   checkout_balance
+  city_ledger_summary  // ใบแจ้งหนี้รวม City Ledger รายเดือน
 }
 
 enum DiscountCategory {
@@ -101,11 +102,25 @@ enum LedgerAccount {
   CASH
   BANK
   AR
+  AR_CORPORATE       // City Ledger — ลูกหนี้องค์กร
   REVENUE
   DEPOSIT_LIABILITY
   PENALTY_REVENUE
   EXPENSE
   DISCOUNT_GIVEN
+}
+
+enum CityLedgerInvoiceStatus {
+  pending    // ตั้งหนี้แล้ว ยังไม่ส่ง
+  sent       // ส่งใบแจ้งหนี้แล้ว
+  settled    // ชำระครบ
+  disputed   // โต้แย้ง
+}
+
+enum CityLedgerAccountStatus {
+  active
+  suspended  // เกิน credit limit
+  closed
 }
 
 enum DepositStatus {
@@ -366,18 +381,24 @@ model Booking {
   roomLocked    Boolean       @default(false) @map("room_locked")
   notes         String?
   version       Int           @default(1)
+
+  // City Ledger — ถ้าบริษัทรับผิดชอบค่าใช้จ่าย
+  cityLedgerAccountId String? @map("city_ledger_account_id")
+
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  guest           Guest         @relation(fields: [guestId], references: [id])
-  room            Room          @relation(fields: [roomId], references: [id])
-  folio           Folio?
-  invoices        Invoice[]
-  rateAudits      RateAudit[]
-  activityLogs    ActivityLog[]
-  companions      BookingCompanion[]
-  securityDeposits SecurityDeposit[]
+  guest              Guest              @relation(fields: [guestId], references: [id])
+  room               Room               @relation(fields: [roomId], references: [id])
+  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
+  folio              Folio?
+  invoices           Invoice[]
+  rateAudits         RateAudit[]
+  activityLogs       ActivityLog[]
+  companions         BookingCompanion[]
+  securityDeposits   SecurityDeposit[]
 
+  @@index([cityLedgerAccountId])
   @@map("bookings")
 }
 
@@ -413,6 +434,10 @@ model Invoice {
   badDebt       Boolean          @default(false) @map("bad_debt")
   badDebtNote   String?          @map("bad_debt_note")
 
+  // City Ledger
+  cityLedgerAccountId String?                  @map("city_ledger_account_id")
+  cityLedgerStatus    CityLedgerInvoiceStatus? @map("city_ledger_status")
+
   // Billing period (for monthly tenants)
   billingPeriodStart DateTime?   @map("billing_period_start") @db.Date
   billingPeriodEnd   DateTime?   @map("billing_period_end") @db.Date
@@ -428,14 +453,17 @@ model Invoice {
   // Folio link (optional — for migration compatibility)
   folioId       String?          @map("folio_id")
 
-  booking       Booking?         @relation(fields: [bookingId], references: [id])
-  guest         Guest            @relation(fields: [guestId], references: [id])
-  folio         Folio?           @relation(fields: [folioId], references: [id])
-  items         InvoiceItem[]
-  allocations   PaymentAllocation[]
-  auditLogs     PaymentAuditLog[] @relation("InvoiceAuditLogs")
+  booking             Booking?              @relation(fields: [bookingId], references: [id])
+  guest               Guest                 @relation(fields: [guestId], references: [id])
+  folio               Folio?                @relation(fields: [folioId], references: [id])
+  cityLedgerAccount   CityLedgerAccount?    @relation(fields: [cityLedgerAccountId], references: [id])
+  items               InvoiceItem[]
+  allocations         PaymentAllocation[]
+  auditLogs           PaymentAuditLog[]     @relation("InvoiceAuditLogs")
+  clAllocations       CityLedgerAllocation[]
 
   @@index([folioId])
+  @@index([cityLedgerAccountId])
   @@map("invoices")
 }
 
@@ -627,10 +655,11 @@ model ActivityLog {
   category    String
 
   // Related Entities
-  bookingId   String?  @map("booking_id")
-  roomId      String?  @map("room_id")
-  guestId     String?  @map("guest_id")
-  invoiceId   String?  @map("invoice_id")
+  bookingId           String?  @map("booking_id")
+  roomId              String?  @map("room_id")
+  guestId             String?  @map("guest_id")
+  invoiceId           String?  @map("invoice_id")
+  cityLedgerAccountId String?  @map("city_ledger_account_id")
 
   // Content
   description String
@@ -639,14 +668,16 @@ model ActivityLog {
   severity    String   @default("info")
 
   // Relations
-  booking     Booking? @relation(fields: [bookingId], references: [id])
-  room        Room?    @relation(fields: [roomId], references: [id])
-  guest       Guest?   @relation(fields: [guestId], references: [id])
+  booking            Booking?           @relation(fields: [bookingId], references: [id])
+  room               Room?              @relation(fields: [roomId], references: [id])
+  guest              Guest?             @relation(fields: [guestId], references: [id])
+  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
 
   @@index([bookingId, createdAt])
   @@index([roomId, createdAt])
   @@index([guestId, createdAt])
   @@index([category, createdAt])
+  @@index([cityLedgerAccountId, createdAt])
   @@index([createdAt])
   @@map("activity_logs")
 }
@@ -831,12 +862,16 @@ model SecurityDeposit {
   // Early termination
   forfeitReason String?       @map("forfeit_reason")
 
+  // City Ledger — มัดจำองค์กร
+  cityLedgerAccountId String? @map("city_ledger_account_id")
+
   notes         String?
   createdAt     DateTime      @default(now()) @map("created_at")
   createdBy     String        @map("created_by")
 
-  booking       Booking       @relation(fields: [bookingId], references: [id])
-  auditLogs     PaymentAuditLog[] @relation("DepositAuditLogs")
+  booking            Booking            @relation(fields: [bookingId], references: [id])
+  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
+  auditLogs          PaymentAuditLog[]  @relation("DepositAuditLogs")
 
   @@index([bookingId])
   @@map("security_deposits")
@@ -945,4 +980,96 @@ model FolioLineItem {
   @@index([folioId, billingStatus])
   @@index([folioId, chargeType])
   @@map("folio_line_items")
+}
+
+// ─── City Ledger / Accounts Receivable ──────────────────────────────────────
+
+model CityLedgerAccount {
+  id              String                  @id @default(uuid())
+  accountCode     String                  @unique @map("account_code")    // CL-0001
+  companyName     String                  @map("company_name")
+  companyTaxId    String?                 @map("company_tax_id")
+  companyAddress  String?                 @map("company_address")
+
+  contactName     String?                 @map("contact_name")
+  contactEmail    String?                 @map("contact_email")
+  contactPhone    String?                 @map("contact_phone")
+
+  creditLimit     Decimal                 @default(0) @map("credit_limit")     @db.Decimal(12, 2)
+  creditTermsDays Int                     @default(30) @map("credit_terms_days")
+  currentBalance  Decimal                 @default(0) @map("current_balance")  @db.Decimal(12, 2) // cached outstanding
+
+  status          CityLedgerAccountStatus @default(active)
+  version         Int                     @default(1)   // Optimistic Concurrency
+
+  notes           String?
+  createdAt       DateTime                @default(now()) @map("created_at")
+  updatedAt       DateTime                @updatedAt @map("updated_at")
+
+  bookings        Booking[]
+  invoices        Invoice[]
+  transactions    CityLedgerTransaction[]
+  payments        CityLedgerPayment[]
+  deposits        SecurityDeposit[]
+  activityLogs    ActivityLog[]
+
+  @@map("city_ledger_accounts")
+}
+
+model CityLedgerTransaction {
+  id             String            @id @default(uuid())
+  accountId      String            @map("account_id")
+  date           DateTime          @db.Date
+  // CHARGE | PAYMENT | VOID | ADJUSTMENT | BAD_DEBT
+  type           String
+  referenceType  String            @map("reference_type")   // Invoice | Payment | CreditNote
+  referenceId    String            @map("reference_id")
+  amount         Decimal           @db.Decimal(12, 2)
+  runningBalance Decimal           @map("running_balance")  @db.Decimal(12, 2) // cached
+  description    String?
+  version        Int               @default(1)
+  createdAt      DateTime          @default(now()) @map("created_at")
+  createdBy      String            @map("created_by")
+
+  account        CityLedgerAccount @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, date])
+  @@map("city_ledger_transactions")
+}
+
+model CityLedgerPayment {
+  id                String            @id @default(uuid())
+  paymentNumber     String            @unique @map("payment_number")       // CL-PAY-YYYYMMDD-NNNN
+  accountId         String            @map("account_id")
+  amount            Decimal           @db.Decimal(12, 2)
+  unallocatedAmount Decimal           @default(0) @map("unallocated_amount") @db.Decimal(12, 2)
+  paymentDate       DateTime          @map("payment_date")
+  paymentMethod     PaymentMethod     @map("payment_method")
+  referenceNo       String?           @map("reference_no")
+  status            PaymentStatus     @default(ACTIVE)
+  notes             String?
+  createdAt         DateTime          @default(now()) @map("created_at")
+  createdBy         String            @map("created_by")
+
+  account           CityLedgerAccount     @relation(fields: [accountId], references: [id])
+  allocations       CityLedgerAllocation[]
+
+  @@index([accountId])
+  @@index([paymentDate])
+  @@map("city_ledger_payments")
+}
+
+model CityLedgerAllocation {
+  id          String            @id @default(uuid())
+  clPaymentId String            @map("cl_payment_id")
+  invoiceId   String            @map("invoice_id")
+  amount      Decimal           @db.Decimal(12, 2)
+  allocatedAt DateTime          @default(now()) @map("allocated_at")
+
+  clPayment   CityLedgerPayment @relation(fields: [clPaymentId], references: [id])
+  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
+
+  @@unique([clPaymentId, invoiceId])
+  @@index([invoiceId])
+  @@map("city_ledger_allocations")
 }
