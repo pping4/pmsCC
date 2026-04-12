@@ -32,53 +32,96 @@ export async function GET(request: NextRequest) {
   return NextResponse.json(guests);
 }
 
+/** Map Thai display names or any alias → Prisma IdType enum value */
+function normalizeIdType(raw: string | undefined): 'passport' | 'thai_id' | 'driving_license' | 'other' {
+  const map: Record<string, 'passport' | 'thai_id' | 'driving_license' | 'other'> = {
+    'thai_id':        'thai_id',
+    'passport':       'passport',
+    'driving_license':'driving_license',
+    'other':          'other',
+    'บัตรประชาชน':   'thai_id',
+    'หนังสือเดินทาง':'passport',
+    'ใบขับขี่':      'driving_license',
+    'อื่นๆ':         'other',
+  };
+  return map[raw ?? ''] ?? 'other';
+}
+
 export async function POST(request: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const data = await request.json();
+  try {
+    const data = await request.json();
 
-  // Count existing guests for ID
-  const count = await prisma.guest.count();
+    // Basic validation
+    if (!data.firstName?.trim()) {
+      return NextResponse.json({ error: 'ต้องระบุชื่อ' }, { status: 400 });
+    }
+    if (!data.lastName?.trim()) {
+      return NextResponse.json({ error: 'ต้องระบุนามสกุล' }, { status: 400 });
+    }
+    if (!data.idNumber?.trim()) {
+      return NextResponse.json({ error: 'ต้องระบุหมายเลขบัตรประชาชน/หนังสือเดินทาง' }, { status: 400 });
+    }
 
-  const guest = await prisma.guest.create({
-    data: {
-      title: data.title || 'Mr.',
-      firstName: data.firstName,
-      lastName: data.lastName,
-      firstNameTH: data.firstNameTH || null,
-      lastNameTH: data.lastNameTH || null,
-      gender: data.gender || 'male',
-      dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : null,
-      nationality: data.nationality || 'Thai',
-      idType: data.idType || 'passport',
-      idNumber: data.idNumber,
-      idExpiry: data.idExpiry ? new Date(data.idExpiry) : null,
-      phone: data.phone || null,
-      email: data.email || null,
-      lineId: data.lineId || null,
-      address: data.address || null,
-      visaType: data.visaType || null,
-      visaNumber: data.visaNumber || null,
-      arrivalDate: data.arrivalDate ? new Date(data.arrivalDate) : null,
-      departureDate: data.departureDate ? new Date(data.departureDate) : null,
-      portOfEntry: data.portOfEntry || null,
-      flightNumber: data.flightNumber || null,
-      lastCountry: data.lastCountry || null,
-      purposeOfVisit: data.purposeOfVisit || null,
-      preferredLanguage: data.preferredLanguage || 'Thai',
-      vipLevel: data.vipLevel || null,
-      tags: data.tags || [],
-      allergies: data.allergies || null,
-      specialRequests: data.specialRequests || null,
-      companyName: data.companyName || null,
-      companyTaxId: data.companyTaxId || null,
-      emergencyName: data.emergencyName || null,
-      emergencyPhone: data.emergencyPhone || null,
-      notes: data.notes || null,
-      tm30Reported: false,
-    },
-  });
+    const guest = await prisma.guest.create({
+      data: {
+        title: data.title || 'Mr.',
+        firstName: data.firstName.trim(),
+        lastName: data.lastName.trim(),
+        firstNameTH: data.firstNameTH?.trim() || null,
+        lastNameTH: data.lastNameTH?.trim() || null,
+        gender: data.gender || 'male',
+        dateOfBirth: data.dateOfBirth ? new Date(data.dateOfBirth) : null,
+        nationality: data.nationality || 'Thai',
+        idType: normalizeIdType(data.idType),
+        idNumber: data.idNumber.trim(),
+        idExpiry: data.idExpiry ? new Date(data.idExpiry) : null,
+        phone: data.phone?.trim() || null,
+        email: data.email?.trim() || null,
+        lineId: data.lineId || null,
+        address: data.address || null,
+        visaType: data.visaType || null,
+        visaNumber: data.visaNumber || null,
+        arrivalDate: data.arrivalDate ? new Date(data.arrivalDate) : null,
+        departureDate: data.departureDate ? new Date(data.departureDate) : null,
+        portOfEntry: data.portOfEntry || null,
+        flightNumber: data.flightNumber || null,
+        lastCountry: data.lastCountry || null,
+        purposeOfVisit: data.purposeOfVisit || null,
+        preferredLanguage: data.preferredLanguage || 'Thai',
+        vipLevel: data.vipLevel || null,
+        tags: data.tags || [],
+        allergies: data.allergies || null,
+        specialRequests: data.specialRequests || null,
+        companyName: data.companyName || null,
+        companyTaxId: data.companyTaxId || null,
+        emergencyName: data.emergencyName || null,
+        emergencyPhone: data.emergencyPhone || null,
+        notes: data.notes || null,
+        tm30Reported: false,
+      },
+    });
 
-  return NextResponse.json(guest, { status: 201 });
+    return NextResponse.json(guest, { status: 201 });
+  } catch (error: unknown) {
+    // Handle Prisma unique constraint violations
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code: string }).code === 'P2002'
+    ) {
+      return NextResponse.json(
+        { error: 'ข้อมูลลูกค้าซ้ำกัน กรุณาตรวจสอบข้อมูลอีกครั้ง' },
+        { status: 409 }
+      );
+    }
+    console.error('POST /api/guests error:', error);
+    return NextResponse.json(
+      { error: 'เกิดข้อผิดพลาดในการสร้างข้อมูลลูกค้า กรุณาลองใหม่อีกครั้ง' },
+      { status: 500 }
+    );
+  }
 }

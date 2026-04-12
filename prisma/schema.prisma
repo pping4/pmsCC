@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -54,15 +55,98 @@ enum BookingStatus {
 
 enum InvoiceStatus {
   unpaid
+  partial
   paid
   overdue
   cancelled
+  voided
+}
+
+enum InvoiceType {
+  general
+  daily_stay
+  monthly_rent
+  utility
+  extra_service
+  deposit_receipt
+  checkout_balance
+}
+
+enum DiscountCategory {
+  NONE
+  PROMO_CODE
+  MANUAL_STAFF
+  RENEWAL_OFFER
 }
 
 enum PaymentMethod {
   cash
   transfer
   credit_card
+  promptpay
+  ota_collect
+}
+
+enum PaymentStatus {
+  ACTIVE
+  VOIDED
+}
+
+enum LedgerType {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerAccount {
+  CASH
+  BANK
+  AR
+  REVENUE
+  DEPOSIT_LIABILITY
+  PENALTY_REVENUE
+  EXPENSE
+  DISCOUNT_GIVEN
+}
+
+enum DepositStatus {
+  pending
+  held
+  partially_deducted
+  refunded
+  forfeited
+}
+
+enum AuditAction {
+  CREATE
+  UPDATE
+  VOID
+  REFUND
+  ALLOCATE
+  APPLY_DISCOUNT
+}
+
+enum SessionStatus {
+  OPEN
+  CLOSED
+}
+
+enum BillingStatus {
+  UNBILLED
+  BILLED
+  PAID
+  VOIDED
+}
+
+enum FolioChargeType {
+  ROOM
+  UTILITY_WATER
+  UTILITY_ELECTRIC
+  EXTRA_SERVICE
+  PENALTY
+  DISCOUNT
+  ADJUSTMENT
+  DEPOSIT_BOOKING
+  OTHER
 }
 
 enum TaxType {
@@ -90,6 +174,29 @@ enum MaintenanceStatus {
 }
 
 enum MaintenancePriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum IssueCategory {
+  housekeeping // ทำความสะอาด
+  maintenance  // ซ่อมบำรุง
+  service      // บริการ
+  complaint    // ร้องเรียน
+  other
+}
+
+enum IssueStatus {
+  pending      // รอดำเนินการ
+  in_progress  // กำลังดำเนินการ
+  resolved     // ทำเสร็จรอหัวหน้าตรวจ
+  closed       // ปิดงาน
+  rejected     // ตีกลับแก้ไข
+}
+
+enum IssuePriority {
   low
   medium
   high
@@ -139,12 +246,42 @@ model Room {
   notes            String?
 
   roomType         RoomType   @relation(fields: [typeId], references: [id])
+  rate             RoomRate?
   bookings         Booking[]
-  utilityReadings  UtilityReading[]
+  utilityReadings   UtilityReading[]
   housekeepingTasks HousekeepingTask[]
   maintenanceTasks  MaintenanceTask[]
+  activityLogs      ActivityLog[]
+  inspections       RoomInspection[]
 
   @@map("rooms")
+}
+
+model RoomRate {
+  id        String   @id @default(cuid())
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roomId    String   @unique @map("room_id")
+
+  dailyEnabled        Boolean  @default(false) @map("daily_enabled")
+  dailyRate           Decimal? @map("daily_rate") @db.Decimal(10, 2)
+
+  monthlyShortEnabled   Boolean  @default(false) @map("monthly_short_enabled")
+  monthlyShortRate      Decimal? @map("monthly_short_rate") @db.Decimal(10, 2)
+  monthlyShortFurniture Decimal  @default(0) @map("monthly_short_furniture") @db.Decimal(10, 2)
+  monthlyShortMinMonths Int      @default(1) @map("monthly_short_min_months")
+
+  monthlyLongEnabled   Boolean  @default(false) @map("monthly_long_enabled")
+  monthlyLongRate      Decimal? @map("monthly_long_rate") @db.Decimal(10, 2)
+  monthlyLongFurniture Decimal  @default(0) @map("monthly_long_furniture") @db.Decimal(10, 2)
+  monthlyLongMinMonths Int      @default(3) @map("monthly_long_min_months")
+
+  waterRate    Decimal? @map("water_rate") @db.Decimal(10, 2)
+  electricRate Decimal? @map("electric_rate") @db.Decimal(10, 2)
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  @@map("room_rates")
 }
 
 model Guest {
@@ -207,6 +344,7 @@ model Guest {
 
   bookings          Booking[]
   invoices          Invoice[]
+  activityLogs      ActivityLog[]
 
   @@map("guests")
 }
@@ -225,51 +363,97 @@ model Booking {
   rate          Decimal       @db.Decimal(10, 2)
   deposit       Decimal       @default(0) @db.Decimal(10, 2)
   status        BookingStatus @default(confirmed)
+  roomLocked    Boolean       @default(false) @map("room_locked")
   notes         String?
+  version       Int           @default(1)
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
 
-  guest         Guest         @relation(fields: [guestId], references: [id])
-  room          Room          @relation(fields: [roomId], references: [id])
-  invoices      Invoice[]
+  guest           Guest         @relation(fields: [guestId], references: [id])
+  room            Room          @relation(fields: [roomId], references: [id])
+  folio           Folio?
+  invoices        Invoice[]
+  rateAudits      RateAudit[]
+  activityLogs    ActivityLog[]
+  companions      BookingCompanion[]
+  securityDeposits SecurityDeposit[]
 
   @@map("bookings")
 }
 
 model Invoice {
-  id            String        @id @default(uuid())
-  invoiceNumber String        @unique @map("invoice_number")
-  bookingId     String?       @map("booking_id")
-  guestId       String        @map("guest_id")
-  issueDate     DateTime      @map("issue_date") @db.Date
-  dueDate       DateTime      @map("due_date") @db.Date
-  subtotal      Decimal       @db.Decimal(12, 2)
-  taxTotal      Decimal       @default(0) @map("tax_total") @db.Decimal(12, 2)
-  grandTotal    Decimal       @map("grand_total") @db.Decimal(12, 2)
-  status        InvoiceStatus @default(unpaid)
-  paymentMethod PaymentMethod? @map("payment_method")
-  paidAt        DateTime?     @map("paid_at")
+  id            String           @id @default(uuid())
+  invoiceNumber String           @unique @map("invoice_number")
+  bookingId     String?          @map("booking_id")
+  guestId       String           @map("guest_id")
+  issueDate     DateTime         @map("issue_date") @db.Date
+  dueDate       DateTime         @map("due_date") @db.Date
+  invoiceType   InvoiceType      @default(general) @map("invoice_type")
+
+  // Financial fields
+  subtotal         Decimal       @db.Decimal(12, 2)
+  discountAmount   Decimal       @default(0) @map("discount_amount") @db.Decimal(12, 2)
+  discountCategory DiscountCategory @default(NONE) @map("discount_category")
+  discountReason   String?       @map("discount_reason")
+  promoId          String?       @map("promo_id")
+  approvedBy       String?       @map("approved_by")  // Manager who approved manual discount
+  vatAmount        Decimal       @default(0) @map("vat_amount") @db.Decimal(12, 2)
+  whtAmount        Decimal       @default(0) @map("wht_amount") @db.Decimal(12, 2)
+  latePenalty      Decimal       @default(0) @map("late_penalty") @db.Decimal(12, 2)
+  grandTotal       Decimal       @map("grand_total") @db.Decimal(12, 2)
+
+  // Payment tracking (derived / cached)
+  paidAmount       Decimal       @default(0) @map("paid_amount") @db.Decimal(12, 2)
+
+  // Status & flags
+  status        InvoiceStatus    @default(unpaid)
+  isVatInclusive Boolean         @default(false) @map("is_vat_inclusive")
+  isOtaReceivable Boolean        @default(false) @map("is_ota_receivable")
+  otaSource     String?          @map("ota_source")
+  badDebt       Boolean          @default(false) @map("bad_debt")
+  badDebtNote   String?          @map("bad_debt_note")
+
+  // Billing period (for monthly tenants)
+  billingPeriodStart DateTime?   @map("billing_period_start") @db.Date
+  billingPeriodEnd   DateTime?   @map("billing_period_end") @db.Date
+
+  // Void fields
+  voidedAt      DateTime?        @map("voided_at")
+  voidedBy      String?          @map("voided_by")
+
   notes         String?
-  createdAt     DateTime      @default(now()) @map("created_at")
+  createdAt     DateTime         @default(now()) @map("created_at")
+  createdBy     String?          @map("created_by")
 
-  booking       Booking?      @relation(fields: [bookingId], references: [id])
-  guest         Guest         @relation(fields: [guestId], references: [id])
+  // Folio link (optional — for migration compatibility)
+  folioId       String?          @map("folio_id")
+
+  booking       Booking?         @relation(fields: [bookingId], references: [id])
+  guest         Guest            @relation(fields: [guestId], references: [id])
+  folio         Folio?           @relation(fields: [folioId], references: [id])
   items         InvoiceItem[]
+  allocations   PaymentAllocation[]
+  auditLogs     PaymentAuditLog[] @relation("InvoiceAuditLogs")
 
+  @@index([folioId])
   @@map("invoices")
 }
 
 model InvoiceItem {
-  id          String   @id @default(uuid())
-  invoiceId   String   @map("invoice_id")
-  description String
-  amount      Decimal  @db.Decimal(10, 2)
-  taxType     TaxType  @default(included) @map("tax_type")
-  productId   String?  @map("product_id")
-  sortOrder   Int      @default(0) @map("sort_order")
+  id              String   @id @default(uuid())
+  invoiceId       String   @map("invoice_id")
+  description     String
+  amount          Decimal  @db.Decimal(10, 2)
+  taxType         TaxType  @default(included) @map("tax_type")
+  productId       String?  @map("product_id")
+  sortOrder       Int      @default(0) @map("sort_order")
 
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product     Product? @relation(fields: [productId], references: [id])
+  // Anti-double-billing: each folio line item can only appear on ONE invoice item
+  folioLineItemId String?  @unique @map("folio_line_item_id")
+
+  invoice         Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product         Product?       @relation(fields: [productId], references: [id])
+  folioLineItem   FolioLineItem? @relation(fields: [folioLineItemId], references: [id])
 
   @@map("invoice_items")
 }
@@ -310,19 +494,22 @@ model Product {
 }
 
 model HousekeepingTask {
-  id          String             @id @default(uuid())
-  taskNumber  String             @unique @map("task_number")
-  roomId      String             @map("room_id")
-  taskType    String             @map("task_type")
-  assignedTo  String?            @map("assigned_to")
-  status      HousekeepingStatus @default(pending)
-  priority    String             @default("normal")
-  scheduledAt DateTime           @map("scheduled_at") @db.Date
-  completedAt DateTime?          @map("completed_at")
-  notes       String?
-  createdAt   DateTime           @default(now()) @map("created_at")
+  id           String             @id @default(uuid())
+  taskNumber   String             @unique @map("task_number")
+  roomId       String             @map("room_id")
+  taskType     String             @map("task_type")
+  assignedTo   String?            @map("assigned_to")
+  maidTeamId   String?            @map("maid_team_id")
+  payoutAmount Decimal            @default(0) @map("payout_amount") @db.Decimal(10, 2)
+  status       HousekeepingStatus @default(pending)
+  priority     String             @default("normal")
+  scheduledAt  DateTime           @map("scheduled_at") @db.Date
+  completedAt  DateTime?          @map("completed_at")
+  notes        String?
+  createdAt    DateTime           @default(now()) @map("created_at")
 
-  room        Room               @relation(fields: [roomId], references: [id])
+  room         Room               @relation(fields: [roomId], references: [id])
+  maidTeam     MaidTeam?          @relation(fields: [maidTeamId], references: [id])
 
   @@map("housekeeping_tasks")
 }
@@ -346,3 +533,416 @@ model MaintenanceTask {
   @@map("maintenance_tasks")
 }
 
+model RateAudit {
+  id              String   @id @default(cuid())
+  bookingId       String   @map("booking_id")
+  booking         Booking  @relation(fields: [bookingId], references: [id])
+  changedBy       String   @map("changed_by")
+  changeType      String   @map("change_type")
+  previousRate    Decimal  @map("previous_rate") @db.Decimal(10, 2)
+  newRate         Decimal  @map("new_rate") @db.Decimal(10, 2)
+  previousNights  Int      @map("previous_nights")
+  newNights       Int      @map("new_nights")
+  previousTotal   Decimal  @map("previous_total") @db.Decimal(10, 2)
+  newTotal        Decimal  @map("new_total") @db.Decimal(10, 2)
+  scenario        String
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("rate_audits")
+}
+
+model IdempotencyRecord {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  result      Json
+  createdAt   DateTime @default(now()) @map("created_at")
+  expiresAt   DateTime @map("expires_at")
+
+  @@map("idempotency_records")
+}
+
+model Maid {
+  id        String           @id @default(uuid())
+  name      String
+  phone     String?
+  active    Boolean          @default(true)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  teams     MaidTeamMember[]
+  payouts   MaidPayout[]
+
+  @@map("maids")
+}
+
+model MaidTeam {
+  id        String           @id @default(uuid())
+  name      String
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  members   MaidTeamMember[]
+  tasks     HousekeepingTask[]
+
+  @@map("maid_teams")
+}
+
+model MaidTeamMember {
+  maidId     String   @map("maid_id")
+  maidTeamId String   @map("maid_team_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  maid       Maid     @relation(fields: [maidId], references: [id], onDelete: Cascade)
+  team       MaidTeam @relation(fields: [maidTeamId], references: [id], onDelete: Cascade)
+
+  @@id([maidId, maidTeamId])
+  @@map("maid_team_members")
+}
+
+model MaidPayout {
+  id           String   @id @default(uuid())
+  maidId       String   @map("maid_id")
+  amount       Decimal  @db.Decimal(10, 2)
+  payDate      DateTime @map("pay_date") @db.Date
+  status       String   @default("paid")
+  notes        String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  maid         Maid     @relation(fields: [maidId], references: [id])
+
+  @@map("maid_payouts")
+}
+
+model ActivityLog {
+  id          String   @id @default(uuid())
+
+  // Who & When
+  userId      String?  @map("user_id")
+  userName    String?  @map("user_name")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  // What
+  action      String
+  category    String
+
+  // Related Entities
+  bookingId   String?  @map("booking_id")
+  roomId      String?  @map("room_id")
+  guestId     String?  @map("guest_id")
+  invoiceId   String?  @map("invoice_id")
+
+  // Content
+  description String
+  metadata    Json?
+  icon        String   @default("📝")
+  severity    String   @default("info")
+
+  // Relations
+  booking     Booking? @relation(fields: [bookingId], references: [id])
+  room        Room?    @relation(fields: [roomId], references: [id])
+  guest       Guest?   @relation(fields: [guestId], references: [id])
+
+  @@index([bookingId, createdAt])
+  @@index([roomId, createdAt])
+  @@index([guestId, createdAt])
+  @@index([category, createdAt])
+  @@index([createdAt])
+  @@map("activity_logs")
+}
+
+// ─── Room Inspection ───────────────────────────────────────────────────────────
+
+model RoomInspection {
+  id             String   @id @default(uuid())
+  roomId         String   @map("room_id")
+  inspectorName  String   @map("inspector_name")
+  remark         String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  room           Room                  @relation(fields: [roomId], references: [id])
+  photos         RoomInspectionPhoto[]
+
+  @@index([roomId, createdAt])
+  @@map("room_inspections")
+}
+
+model RoomInspectionPhoto {
+  id           String   @id @default(uuid())
+  inspectionId String   @map("inspection_id")
+  filename     String
+  size         Int?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  inspection   RoomInspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  @@index([inspectionId])
+  @@map("room_inspection_photos")
+}
+
+// ─── Booking Companions (ผู้ติดตาม / เพื่อนลูกค้า) ────────────────────────────
+
+model BookingCompanion {
+  id             String   @id @default(uuid())
+  bookingId      String   @map("booking_id")
+  firstName      String   @map("first_name")
+  lastName       String   @map("last_name")
+  firstNameTH    String?  @map("first_name_th")
+  lastNameTH     String?  @map("last_name_th")
+  phone          String?
+  idType         String?  @map("id_type")       // passport, thai_id, driving_license
+  idNumber       String?  @map("id_number")
+  nationality    String?
+  notes          String?
+  ocrRawText     String?  @map("ocr_raw_text")  // OCR full text from ID photo
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  booking        Booking                @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  photos         BookingCompanionPhoto[]
+
+  @@index([bookingId])
+  @@map("booking_companions")
+}
+
+model BookingCompanionPhoto {
+  id           String   @id @default(uuid())
+  companionId  String   @map("companion_id")
+  filename     String
+  photoType    String   @default("face") @map("photo_type") // face, id_card, passport, other
+  size         Int?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  companion    BookingCompanion @relation(fields: [companionId], references: [id], onDelete: Cascade)
+
+  @@index([companionId])
+  @@map("booking_companion_photos")
+}
+
+// ─── Phase 1: Payment & Accounting Layer ────────────────────────────────────
+
+model Payment {
+  id              String        @id @default(uuid())
+  paymentNumber   String        @unique @map("payment_number")    // PAY-YYYYMMDD-NNNN
+  receiptNumber   String        @unique @map("receipt_number")    // RCP-YYYYMMDD-NNNN
+  bookingId       String?       @map("booking_id")
+  guestId         String        @map("guest_id")
+
+  // Financial
+  amount          Decimal       @db.Decimal(12, 2)
+  paymentMethod   PaymentMethod @map("payment_method")
+  paymentDate     DateTime      @map("payment_date")
+  referenceNo     String?       @map("reference_no")    // bank slip, QR ref, gateway ref
+
+  // Status & Void pattern
+  status          PaymentStatus @default(ACTIVE)
+  voidReason      String?       @map("void_reason")
+  voidedAt        DateTime?     @map("voided_at")
+  voidedBy        String?       @map("voided_by")
+
+  // Shift control (Phase 2: enforce non-null)
+  cashSessionId   String?       @map("cash_session_id")
+
+  // Staff tracking
+  receivedBy      String?       @map("received_by")
+  notes           String?
+
+  // Idempotency — UUID sent from client, prevents double-submit
+  idempotencyKey  String        @unique @map("idempotency_key")
+
+  createdAt       DateTime      @default(now()) @map("created_at")
+  createdBy       String        @map("created_by")
+
+  // Folio link (optional — for migration compatibility)
+  folioId         String?       @map("folio_id")
+
+  // Relations
+  allocations     PaymentAllocation[]
+  cashSession     CashSession?  @relation(fields: [cashSessionId], references: [id])
+  folio           Folio?        @relation(fields: [folioId], references: [id])
+  auditLogs       PaymentAuditLog[] @relation("PaymentAuditLogs")
+
+  @@index([bookingId])
+  @@index([guestId])
+  @@index([folioId])
+  @@index([paymentDate])
+  @@map("payments")
+}
+
+model PaymentAllocation {
+  id          String   @id @default(uuid())
+  paymentId   String   @map("payment_id")
+  invoiceId   String   @map("invoice_id")
+  amount      Decimal  @db.Decimal(12, 2)
+  allocatedAt DateTime @default(now()) @map("allocated_at")
+
+  payment     Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+  @@map("payment_allocations")
+}
+
+model LedgerEntry {
+  id            String        @id @default(uuid())
+  date          DateTime
+  type          LedgerType
+  account       LedgerAccount
+  amount        Decimal       @db.Decimal(12, 2)
+  referenceType String        @map("reference_type")   // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'Void'
+  referenceId   String        @map("reference_id")
+  description   String?
+  createdAt     DateTime      @default(now()) @map("created_at")
+  createdBy     String        @map("created_by")
+
+  @@index([referenceType, referenceId])
+  @@index([account, date])
+  @@index([date])
+  @@map("ledger_entries")
+}
+
+model SecurityDeposit {
+  id            String        @id @default(uuid())
+  depositNumber String        @unique @map("deposit_number")   // DEP-YYYYMMDD-NNNN
+  bookingId     String        @map("booking_id")
+  guestId       String        @map("guest_id")
+
+  amount        Decimal       @db.Decimal(12, 2)
+  paymentMethod PaymentMethod @map("payment_method")
+  receivedAt    DateTime      @map("received_at")
+  referenceNo   String?       @map("reference_no")
+
+  status        DepositStatus @default(held)
+
+  // Refund info
+  refundAmount  Decimal?      @map("refund_amount") @db.Decimal(12, 2)
+  refundAt      DateTime?     @map("refund_at")
+  refundMethod  PaymentMethod? @map("refund_method")
+  refundRef     String?       @map("refund_ref")
+
+  // Deductions (stored as JSON array: [{reason, amount}])
+  deductions    Json?
+
+  // Bank details for transfer refund
+  bankName      String?       @map("bank_name")
+  bankAccount   String?       @map("bank_account")
+  bankAccountName String?     @map("bank_account_name")
+
+  // Early termination
+  forfeitReason String?       @map("forfeit_reason")
+
+  notes         String?
+  createdAt     DateTime      @default(now()) @map("created_at")
+  createdBy     String        @map("created_by")
+
+  booking       Booking       @relation(fields: [bookingId], references: [id])
+  auditLogs     PaymentAuditLog[] @relation("DepositAuditLogs")
+
+  @@index([bookingId])
+  @@map("security_deposits")
+}
+
+model PaymentAuditLog {
+  id          String      @id @default(uuid())
+  action      AuditAction
+  entityType  String      @map("entity_type")   // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'CashSession'
+  entityId    String      @map("entity_id")
+  before      Json?       // state before change (null for CREATE)
+  after       Json        // state after change
+  userId      String      @map("user_id")
+  userName    String?     @map("user_name")
+  ipAddress   String?     @map("ip_address")
+  timestamp   DateTime    @default(now())
+
+  // Optional FK relations for quick lookup
+  paymentId   String?     @map("payment_id")
+  invoiceId   String?     @map("invoice_id")
+  depositId   String?     @map("deposit_id")
+
+  payment     Payment?    @relation("PaymentAuditLogs", fields: [paymentId], references: [id])
+  invoice     Invoice?    @relation("InvoiceAuditLogs", fields: [invoiceId], references: [id])
+  deposit     SecurityDeposit? @relation("DepositAuditLogs", fields: [depositId], references: [id])
+
+  @@index([entityType, entityId, timestamp])
+  @@index([timestamp])
+  @@map("payment_audit_logs")
+}
+
+model CashSession {
+  id                  String        @id @default(uuid())
+  openedBy            String        @map("opened_by")
+  openedByName        String?       @map("opened_by_name")
+  closedBy            String?       @map("closed_by")
+  closedByName        String?       @map("closed_by_name")
+  openedAt            DateTime      @map("opened_at")
+  closedAt            DateTime?     @map("closed_at")
+  openingBalance      Decimal       @map("opening_balance") @db.Decimal(12, 2)
+  closingBalance      Decimal?      @map("closing_balance") @db.Decimal(12, 2)
+  systemCalculatedCash Decimal?     @map("system_calculated_cash") @db.Decimal(12, 2)
+  status              SessionStatus @default(OPEN)
+  closingNote         String?       @map("closing_note")
+
+  payments            Payment[]
+
+  @@index([status])
+  @@index([openedAt])
+  @@map("cash_sessions")
+}
+
+// ─── Folio-Centric Billing Layer ────────────────────────────────────────────
+
+model Folio {
+  id            String   @id @default(uuid())
+  folioNumber   String   @unique @map("folio_number")   // FLO-YYYYMMDD-NNNN
+  bookingId     String   @unique @map("booking_id")     // 1 Booking = 1 Folio
+  guestId       String   @map("guest_id")
+
+  // Cached totals (recalculated on charge add/remove)
+  totalCharges  Decimal  @default(0) @map("total_charges") @db.Decimal(12, 2)
+  totalPayments Decimal  @default(0) @map("total_payments") @db.Decimal(12, 2)
+  balance       Decimal  @default(0) @db.Decimal(12, 2)    // totalCharges - totalPayments
+
+  closedAt      DateTime? @map("closed_at")
+  notes         String?
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  booking       Booking       @relation(fields: [bookingId], references: [id])
+  lineItems     FolioLineItem[]
+  invoices      Invoice[]
+  payments      Payment[]
+
+  @@index([guestId])
+  @@map("folios")
+}
+
+model FolioLineItem {
+  id            String          @id @default(uuid())
+  folioId       String          @map("folio_id")
+  chargeType    FolioChargeType @map("charge_type")
+  description   String
+  amount        Decimal         @db.Decimal(12, 2)
+  quantity      Int             @default(1)
+  unitPrice     Decimal         @default(0) @map("unit_price") @db.Decimal(12, 2)
+  taxType       TaxType         @default(no_tax) @map("tax_type")
+
+  // Anti-double-billing status lock
+  billingStatus BillingStatus   @default(UNBILLED) @map("billing_status")
+
+  // Optional references for traceability
+  serviceDate   DateTime?       @map("service_date") @db.Date
+  productId     String?         @map("product_id")
+  referenceType String?         @map("reference_type")   // 'utility_reading' | 'product' | 'manual'
+  referenceId   String?         @map("reference_id")
+
+  notes         String?
+  createdAt     DateTime        @default(now()) @map("created_at")
+  createdBy     String          @map("created_by")
+
+  folio         Folio           @relation(fields: [folioId], references: [id])
+  invoiceItem   InvoiceItem?    // 1:1 — enforced by unique constraint on InvoiceItem.folioLineItemId
+
+  @@index([folioId, billingStatus])
+  @@index([folioId, chargeType])
+  @@map("folio_line_items")
+}

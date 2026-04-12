@@ -1,0 +1,107 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+
+interface MaidTeam {
+  id: string;
+  name: string;
+}
+
+export default function AssignTab() {
+  const [teams, setTeams] = useState<MaidTeam[]>([]);
+  const [floor, setFloor] = useState('all');
+  const [evenOdd, setEvenOdd] = useState('all');
+  const [teamId, setTeamId] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [payoutAmount, setPayoutAmount] = useState('50'); // default 50 THB per room
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState('');
+
+  useEffect(() => {
+    fetch('/api/maid-teams').then(res => res.json()).then(setTeams);
+  }, []);
+
+  const handleAssign = async () => {
+    if (!teamId) {
+      alert('กรุณาเลือกทีม');
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch('/api/housekeeping/bulk-assign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          floor,
+          evenOdd,
+          maidTeamId: teamId,
+          date,
+          payoutAmount
+        })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      setResult(`สำเร็จ! แจกงานให้ห้องไปทั้งหมด ${data.assignedCount} ห้อง`);
+    } catch (e: any) {
+      setResult(`เกิดข้อผิดพลาด: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cardStyle = { background: '#fff', borderRadius: 12, padding: 24, boxShadow: '0 1px 3px rgba(0,0,0,0.1)', maxWidth: 600, margin: '0 auto' };
+  const inputStyle = { width: '100%', padding: '12px', border: '1px solid #d1d5db', borderRadius: 8, marginBottom: 16, fontSize: 14 };
+  const labelStyle = { display: 'block', marginBottom: 6, fontWeight: 600, fontSize: 13, color: '#374151' };
+  const btnStyle = { padding: '12px 24px', background: '#2563eb', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700, width: '100%', fontSize: 15 };
+
+  return (
+    <div style={cardStyle}>
+      <h2 style={{ marginTop: 0, marginBottom: 20 }}>จ่ายงานแม่บ้านแบบกลุ่ม (Bulk Assign)</h2>
+
+      <label style={labelStyle}>วันที่ทำงาน</label>
+      <input type="date" value={date} onChange={e => setDate(e.target.value)} style={inputStyle} />
+
+      <label style={labelStyle}>เลือกชั้น (Floor)</label>
+      <select value={floor} onChange={e => setFloor(e.target.value)} style={inputStyle}>
+        <option value="all">ทุกชั้น</option>
+        {[1,2,3,4,5,6,7,8].map(f => (
+          <option key={f} value={f.toString()}>ชั้น {f}</option>
+        ))}
+      </select>
+
+      <label style={labelStyle}>เงื่อนไขเลขห้อง</label>
+      <select value={evenOdd} onChange={e => setEvenOdd(e.target.value)} style={inputStyle}>
+        <option value="all">ทั้งหมด (คู่และคี่)</option>
+        <option value="even">เฉพาะห้องเลขคู่ (Even)</option>
+        <option value="odd">เฉพาะห้องเลขคี่ (Odd)</option>
+      </select>
+
+      <label style={labelStyle}>มูลค่าต่องาน (บาท)</label>
+      <input 
+        type="number" 
+        value={payoutAmount} 
+        onChange={e => setPayoutAmount(e.target.value)} 
+        style={inputStyle} 
+        placeholder="เช่น 50"
+      />
+
+      <label style={labelStyle}>มอบหมายให้ทีม</label>
+      <select value={teamId} onChange={e => setTeamId(e.target.value)} style={inputStyle}>
+        <option value="">-- เลือกทีม --</option>
+        {teams.map(t => (
+          <option key={t.id} value={t.id}>{t.name}</option>
+        ))}
+      </select>
+
+      <button onClick={handleAssign} disabled={loading} style={{ ...btnStyle, opacity: loading ? 0.7 : 1 }}>
+        {loading ? 'กำลังจ่ายงาน...' : '⚡ จ่ายงานเดี๋ยวนี้'}
+      </button>
+
+      {result && (
+        <div style={{ marginTop: 20, padding: 12, background: result.includes('สำเร็จ') ? '#ecfdf5' : '#fef2f2', color: result.includes('สำเร็จ') ? '#047857' : '#b91c1c', borderRadius: 8, textAlign: 'center', fontWeight: 600 }}>
+          {result}
+        </div>
+      )}
+    </div>
+  );
+}

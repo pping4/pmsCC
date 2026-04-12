@@ -3,6 +3,147 @@
 import { useState, useEffect, useCallback } from 'react';
 import { NATIONALITIES, VIP_LEVELS } from '@/lib/constants';
 import { formatDate, formatCurrency } from '@/lib/tax';
+import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
+
+// ─── Types for comprehensive Guest History ────────────────────────────────────
+
+interface HistoryInvoiceAllocation {
+  amount: number;
+  payment: {
+    paymentNumber: string;
+    paymentDate: string;
+    paymentMethod: string;
+    amount: number;
+    referenceNo: string | null;
+    status: string;
+  } | null;
+}
+
+interface HistoryInvoice {
+  id: string;
+  invoiceNumber: string;
+  invoiceType: string;
+  status: string;
+  grandTotal: number;
+  paidAmount: number;
+  subtotal: number;
+  vatAmount: number;
+  latePenalty: number;
+  issueDate: string;
+  dueDate: string;
+  billingPeriodStart: string | null;
+  billingPeriodEnd: string | null;
+  notes: string | null;
+  badDebt: boolean;
+  allocations: HistoryInvoiceAllocation[];
+}
+
+interface HistoryDeposit {
+  id: string;
+  amount: number;
+  status: string;
+  receivedAt: string;
+  refundAt: string | null;
+  notes: string | null;
+}
+
+interface BookingHistory {
+  id: string;
+  bookingNumber: string;
+  bookingType: string;
+  source: string;
+  status: string;
+  checkIn: string;
+  checkOut: string;
+  actualCheckIn: string | null;
+  actualCheckOut: string | null;
+  rate: number;
+  deposit: number;
+  notes: string | null;
+  createdAt: string;
+  room: { id: string; number: string; floor: number; roomType: { name: string } };
+  invoices: HistoryInvoice[];
+  securityDeposits: HistoryDeposit[];
+}
+
+interface GuestHistorySummary {
+  totalStays: number;
+  dailyStays: number;
+  monthlyShortStays: number;
+  monthlyLongStays: number;
+  lifetimeValue: number;
+  currentBalanceDue: number;
+  overdueAmount: number;
+  depositHeld: number;
+}
+
+// ─── Helper constants ─────────────────────────────────────────────────────────
+
+const SOURCE_LABELS: Record<string, string> = {
+  direct:   'Walk-in', website: 'Website', agoda: 'Agoda',
+  booking:  'Booking.com', airbnb: 'Airbnb', expedia: 'Expedia',
+  facebook: 'Facebook', phone: 'โทรศัพท์', line: 'LINE',
+  referral: 'แนะนำ', corporate: 'Corporate', other: 'อื่นๆ',
+};
+
+const BOOKING_TYPE_LABELS: Record<string, { label: string; color: string; bg: string }> = {
+  daily:         { label: 'รายวัน',            color: '#1e40af', bg: '#dbeafe' },
+  monthly_short: { label: 'รายเดือน (สั้น)',   color: '#92400e', bg: '#fef3c7' },
+  monthly_long:  { label: 'รายเดือน (ยาว)',    color: '#3b0764', bg: '#f3e8ff' },
+};
+
+const INVOICE_TYPE_LABELS: Record<string, string> = {
+  general:          'ทั่วไป',
+  daily_stay:       'ค่าห้อง (รายวัน)',
+  monthly_rent:     'ค่าเช่า (รายเดือน)',
+  utility:          'ค่าสาธารณูปโภค',
+  extra_service:    'บริการเสริม',
+  deposit_receipt:  'มัดจำ',
+  checkout_balance: 'ยอดคงเหลือเช็คเอาท์',
+};
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  cash: '💵 สด', transfer: '🏦 โอน', credit_card: '💳 บัตร',
+  promptpay: '📱 พร้อมเพย์', ota_collect: '🌐 OTA',
+};
+
+function invoiceStatusBadge(status: string, overdue?: boolean) {
+  if (status === 'paid')    return { label: '🟢 จ่ายแล้ว',   color: '#15803d', bg: '#dcfce7' };
+  if (status === 'overdue' || overdue) return { label: '🔴 เกินกำหนด', color: '#dc2626', bg: '#fee2e2' };
+  if (status === 'partial') return { label: '⚪ จ่ายบางส่วน', color: '#6b7280', bg: '#f3f4f6' };
+  return { label: '🟡 ยังไม่จ่าย', color: '#92400e', bg: '#fef3c7' };
+}
+
+function nightsOrMonths(bk: BookingHistory) {
+  const inDate  = new Date(bk.checkIn);
+  const outDate = new Date(bk.checkOut);
+  if (bk.bookingType === 'daily') {
+    const nights = Math.ceil((outDate.getTime() - inDate.getTime()) / 86_400_000);
+    return `${nights} คืน`;
+  }
+  const months = (outDate.getFullYear() - inDate.getFullYear()) * 12 + outDate.getMonth() - inDate.getMonth();
+  return `${months || 1} เดือน`;
+}
+
+function overallPaymentStatus(bk: BookingHistory) {
+  const allInvoices = bk.invoices.filter(inv => inv.status !== 'void');
+  if (allInvoices.length === 0) return { label: 'ไม่มีบิล', color: '#6b7280', bg: '#f3f4f6' };
+  const hasOverdue = allInvoices.some(inv => inv.status === 'overdue');
+  const hasPending = allInvoices.some(inv => inv.status === 'unpaid' || inv.status === 'partial');
+  const allPaid    = allInvoices.every(inv => inv.status === 'paid');
+  if (hasOverdue) return { label: '🔴 เกินกำหนด', color: '#dc2626', bg: '#fee2e2' };
+  if (allPaid)    return { label: '🟢 จ่ายครบ', color: '#15803d', bg: '#dcfce7' };
+  if (hasPending) return { label: '🟡 ค้างชำระ', color: '#92400e', bg: '#fef3c7' };
+  return { label: 'ไม่มีบิล', color: '#6b7280', bg: '#f3f4f6' };
+}
+
+function bookingStatusLabel(status: string) {
+  const m: Record<string, string> = {
+    confirmed: 'จองแล้ว', checked_in: 'เข้าพักอยู่',
+    checked_out: 'เช็คเอาท์แล้ว', cancelled: 'ยกเลิก', no_show: 'ไม่มา',
+  };
+  return m[status] || status;
+}
 
 interface Guest {
   id: string;
@@ -100,6 +241,25 @@ export default function GuestsPage() {
   const [selectedGuest, setSelectedGuest] = useState<Guest | null>(null);
   const [activeTab, setActiveTab] = useState('info');
   const [saving, setSaving] = useState(false);
+
+  // ── Guest History detail state ─────────────────────────────────────────────
+  const [guestDetail, setGuestDetail] = useState<{ guest: Guest & { bookings: BookingHistory[] }; summary: GuestHistorySummary } | null>(null);
+  const [historyFilter, setHistoryFilter] = useState<'all' | 'daily' | 'monthly_short' | 'monthly_long'>('all');
+  const [expandedBookingId, setExpandedBookingId] = useState<string | null>(null);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // Fetch full guest detail (with bookings + invoices) when opening history tab
+  useEffect(() => {
+    if (!selectedGuest || activeTab !== 'history') return;
+    let cancelled = false;
+    setLoadingHistory(true);
+    setGuestDetail(null);
+    fetch(`/api/guests/${selectedGuest.id}`)
+      .then(r => r.json())
+      .then(data => { if (!cancelled) setGuestDetail(data); })
+      .finally(() => { if (!cancelled) setLoadingHistory(false); });
+    return () => { cancelled = true; };
+  }, [selectedGuest?.id, activeTab]);
 
   const [form, setForm] = useState<typeof EMPTY_GUEST>(EMPTY_GUEST);
 
@@ -568,26 +728,235 @@ export default function GuestsPage() {
 
               {activeTab === 'history' && (
                 <div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 16 }}>
-                    <div style={{ background: '#eff6ff', borderRadius: 10, padding: 12, textAlign: 'center' }}>
-                      <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600 }}>เข้าพักทั้งหมด</div>
-                      <div style={{ fontSize: 24, fontWeight: 800, color: '#1e40af' }}>{selectedGuest.totalStays}</div>
-                    </div>
-                    <div style={{ background: '#f0fdf4', borderRadius: 10, padding: 12, textAlign: 'center' }}>
-                      <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600 }}>ยอดใช้จ่าย</div>
-                      <div style={{ fontSize: 16, fontWeight: 800, color: '#16a34a' }}>{formatCurrency(selectedGuest.totalSpent)}</div>
-                    </div>
-                    <div style={{ background: '#f5f3ff', borderRadius: 10, padding: 12, textAlign: 'center' }}>
-                      <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600 }}>ลูกค้าตั้งแต่</div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: '#7c3aed' }}>{formatDate(selectedGuest.createdAt)}</div>
-                    </div>
-                  </div>
-                  {selectedGuest.specialRequests && (
-                    <div style={{ background: '#f8fafc', borderRadius: 10, padding: 12, fontSize: 13 }}>
-                      <div style={{ fontWeight: 700, marginBottom: 4 }}>ความต้องการพิเศษ</div>
-                      <div style={{ color: '#374151' }}>{selectedGuest.specialRequests}</div>
-                    </div>
-                  )}
+                  {loadingHistory ? (
+                    <div style={{ textAlign: 'center', padding: 40, color: '#9ca3af' }}>กำลังโหลดประวัติ...</div>
+                  ) : !guestDetail ? null : (() => {
+                    const { summary, guest: gd } = guestDetail;
+                    const bookings = gd.bookings ?? [];
+                    const filtered = historyFilter === 'all' ? bookings : bookings.filter(b => b.bookingType === historyFilter);
+
+                    return (
+                      <div>
+                        {/* ── Section 1: KPI Summary ─────────────────────────── */}
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 14 }}>
+                          {/* LTV */}
+                          <div style={{ background: '#eff6ff', borderRadius: 10, padding: '10px 14px' }}>
+                            <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, marginBottom: 2 }}>💰 Lifetime Value</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: '#1e40af' }}>฿{fmtBaht(summary.lifetimeValue, 0)}</div>
+                            <div style={{ fontSize: 10, color: '#93c5fd' }}>จาก {summary.totalStays} ครั้ง</div>
+                          </div>
+                          {/* Balance Due */}
+                          <div style={{ background: summary.overdueAmount > 0 ? '#fef2f2' : '#f0fdf4', borderRadius: 10, padding: '10px 14px', border: summary.overdueAmount > 0 ? '1.5px solid #fca5a5' : 'none' }}>
+                            <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, marginBottom: 2 }}>
+                              {summary.overdueAmount > 0 ? '🔴 ยอดค้างชำระ (เกินกำหนด)' : '✅ ยอดค้างชำระ'}
+                            </div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: summary.overdueAmount > 0 ? '#dc2626' : '#15803d' }}>
+                              ฿{fmtBaht(summary.currentBalanceDue, 0)}
+                            </div>
+                            {summary.overdueAmount > 0 && (
+                              <div style={{ fontSize: 10, color: '#dc2626' }}>เกินกำหนด ฿{fmtBaht(summary.overdueAmount, 0)}</div>
+                            )}
+                          </div>
+                          {/* Deposit Held */}
+                          <div style={{ background: '#faf5ff', borderRadius: 10, padding: '10px 14px' }}>
+                            <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, marginBottom: 2 }}>🔐 มัดจำ / เงินประกัน</div>
+                            <div style={{ fontSize: 18, fontWeight: 800, color: '#7c3aed' }}>฿{fmtBaht(summary.depositHeld, 0)}</div>
+                            <div style={{ fontSize: 10, color: '#a78bfa' }}>ที่พักถือไว้อยู่</div>
+                          </div>
+                          {/* Stay breakdown */}
+                          <div style={{ background: '#f8fafc', borderRadius: 10, padding: '10px 14px' }}>
+                            <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, marginBottom: 4 }}>📊 สถิติการเข้าพัก</div>
+                            <div style={{ fontSize: 11, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                              <span style={{ background: '#dbeafe', color: '#1e40af', borderRadius: 6, padding: '2px 7px', fontWeight: 700 }}>รายวัน {summary.dailyStays}</span>
+                              <span style={{ background: '#fef3c7', color: '#92400e', borderRadius: 6, padding: '2px 7px', fontWeight: 700 }}>เดือน(สั้น) {summary.monthlyShortStays}</span>
+                              <span style={{ background: '#f3e8ff', color: '#7c3aed', borderRadius: 6, padding: '2px 7px', fontWeight: 700 }}>เดือน(ยาว) {summary.monthlyLongStays}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* ── Section 2: Filter Tabs ───────────────────────────── */}
+                        <div style={{ display: 'flex', gap: 4, marginBottom: 10, background: '#f3f4f6', borderRadius: 8, padding: 3 }}>
+                          {([
+                            { key: 'all', label: `ทั้งหมด (${bookings.length})` },
+                            { key: 'daily', label: `รายวัน (${summary.dailyStays})` },
+                            { key: 'monthly_short', label: `เดือน(สั้น) (${summary.monthlyShortStays})` },
+                            { key: 'monthly_long', label: `เดือน(ยาว) (${summary.monthlyLongStays})` },
+                          ] as { key: typeof historyFilter; label: string }[]).map(t => (
+                            <button key={t.key} onClick={() => { setHistoryFilter(t.key); setExpandedBookingId(null); }}
+                              style={{ padding: '5px 10px', borderRadius: 6, border: 'none', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', background: historyFilter === t.key ? '#fff' : 'transparent', color: historyFilter === t.key ? '#1e40af' : '#6b7280', boxShadow: historyFilter === t.key ? '0 1px 3px rgba(0,0,0,0.1)' : 'none' }}>
+                              {t.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* ── Section 3: Master History Table ─────────────────── */}
+                        {filtered.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: 32, color: '#9ca3af', background: '#f8fafc', borderRadius: 10 }}>ไม่มีประวัติการเข้าพัก</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 0, border: '1px solid #e5e7eb', borderRadius: 10, overflow: 'hidden' }}>
+                            {filtered.map((bk, idx) => {
+                              const isExpanded = expandedBookingId === bk.id;
+                              const typeInfo = BOOKING_TYPE_LABELS[bk.bookingType] ?? { label: bk.bookingType, color: '#374151', bg: '#f3f4f6' };
+                              const payStatus = overallPaymentStatus(bk);
+
+                              return (
+                                <div key={bk.id} style={{ borderBottom: idx < filtered.length - 1 ? '1px solid #e5e7eb' : 'none' }}>
+                                  {/* ── Master Row ── */}
+                                  <div
+                                    onClick={() => {
+                                      setExpandedBookingId(isExpanded ? null : bk.id);
+                                      // Also auto-expand if clicking on overdue status
+                                    }}
+                                    style={{ padding: '10px 12px', background: isExpanded ? '#f0f9ff' : '#fff', cursor: 'pointer', display: 'flex', flexDirection: 'column', gap: 6 }}
+                                  >
+                                    {/* Row top: type badge + booking# + status */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                      <span style={{ fontSize: 10, fontWeight: 700, color: typeInfo.color, background: typeInfo.bg, padding: '2px 8px', borderRadius: 6 }}>{typeInfo.label}</span>
+                                      <span style={{ fontSize: 11, fontWeight: 700, color: '#374151' }}>{bk.bookingNumber}</span>
+                                      <span style={{ fontSize: 10, color: '#9ca3af' }}>• ห้อง {bk.room.number} ({bk.room.floor}F)</span>
+                                      <span style={{ marginLeft: 'auto', fontSize: 10, color: '#9ca3af' }}>{SOURCE_LABELS[bk.source] ?? bk.source}</span>
+                                    </div>
+                                    {/* Row bottom: dates + duration + status tags */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                      <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>{fmtDate(bk.checkIn)} → {fmtDate(bk.checkOut)}</span>
+                                      <span style={{ fontSize: 11, color: '#6b7280' }}>({nightsOrMonths(bk)})</span>
+                                      <span style={{ fontSize: 10, color: '#6b7280' }}>฿{fmtBaht(bk.rate, 0)}</span>
+                                      <span style={{ marginLeft: 'auto', fontSize: 10, fontWeight: 700, color: '#6b7280', background: '#f3f4f6', padding: '2px 7px', borderRadius: 5 }}>{bookingStatusLabel(bk.status)}</span>
+                                      <span
+                                        onClick={(e) => { e.stopPropagation(); setExpandedBookingId(bk.id); }}
+                                        style={{ fontSize: 10, fontWeight: 700, color: payStatus.color, background: payStatus.bg, padding: '2px 8px', borderRadius: 5, cursor: 'pointer' }}
+                                      >{payStatus.label}</span>
+                                      <span style={{ fontSize: 12, color: '#9ca3af' }}>{isExpanded ? '▲' : '▼'}</span>
+                                    </div>
+                                  </div>
+
+                                  {/* ── Expanded Detail ── */}
+                                  {isExpanded && (
+                                    <div style={{ background: '#f8fafc', borderTop: '1px solid #e5e7eb', padding: '10px 12px' }}>
+                                      {bk.bookingType === 'daily' ? (
+                                        /* ── Case A: Daily Stay Detail ── */
+                                        <div>
+                                          <div style={{ fontSize: 11, fontWeight: 700, color: '#1e40af', marginBottom: 8 }}>📄 รายการชำระ</div>
+                                          <div style={{ overflowX: 'auto' }}>
+                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                                              <thead>
+                                                <tr style={{ background: '#e0f2fe', textAlign: 'left' }}>
+                                                  {['ใบแจ้งหนี้', 'ประเภท', 'ออกวันที่', 'ครบกำหนด', 'ยอด', 'จ่ายแล้ว', 'วันที่ชำระ', 'วิธีชำระ', 'สถานะ'].map(h => (
+                                                    <th key={h} style={{ padding: '5px 8px', fontWeight: 700, color: '#1e40af', whiteSpace: 'nowrap' }}>{h}</th>
+                                                  ))}
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {bk.invoices.map(inv => {
+                                                  const st = invoiceStatusBadge(inv.status);
+                                                  const activeAllocs = inv.allocations.filter(a => a.payment?.status === 'ACTIVE');
+                                                  const payDate  = activeAllocs[0]?.payment?.paymentDate;
+                                                  const payMeth  = activeAllocs[0]?.payment?.paymentMethod;
+                                                  return (
+                                                    <tr key={inv.id} style={{ borderBottom: '1px solid #e5e7eb', background: '#fff' }}>
+                                                      <td style={{ padding: '5px 8px', fontWeight: 600, color: '#374151', whiteSpace: 'nowrap' }}>{inv.invoiceNumber}</td>
+                                                      <td style={{ padding: '5px 8px', color: '#6b7280', whiteSpace: 'nowrap' }}>{INVOICE_TYPE_LABELS[inv.invoiceType] ?? inv.invoiceType}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>{fmtDate(inv.issueDate)}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: inv.status === 'overdue' ? '#dc2626' : '#374151' }}>{fmtDate(inv.dueDate)}</td>
+                                                      <td style={{ padding: '5px 8px', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap' }}>฿{fmtBaht(inv.grandTotal)}</td>
+                                                      <td style={{ padding: '5px 8px', textAlign: 'right', whiteSpace: 'nowrap' }}>฿{fmtBaht(inv.paidAmount)}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#6b7280' }}>{payDate ? fmtDate(payDate) : '—'}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#6b7280' }}>{payMeth ? (PAYMENT_METHOD_LABELS[payMeth] ?? payMeth) : '—'}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>
+                                                        <span style={{ fontSize: 10, fontWeight: 700, color: st.color, background: st.bg, padding: '2px 7px', borderRadius: 5 }}>{st.label}</span>
+                                                      </td>
+                                                    </tr>
+                                                  );
+                                                })}
+                                              </tbody>
+                                              <tfoot>
+                                                <tr style={{ background: '#e0f2fe', fontWeight: 800 }}>
+                                                  <td colSpan={4} style={{ padding: '5px 8px', color: '#1e40af' }}>รวม</td>
+                                                  <td style={{ padding: '5px 8px', textAlign: 'right', color: '#1e40af' }}>฿{fmtBaht(bk.invoices.reduce((s, i) => s + i.grandTotal, 0))}</td>
+                                                  <td style={{ padding: '5px 8px', textAlign: 'right', color: '#15803d' }}>฿{fmtBaht(bk.invoices.reduce((s, i) => s + i.paidAmount, 0))}</td>
+                                                  <td colSpan={3} />
+                                                </tr>
+                                              </tfoot>
+                                            </table>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        /* ── Case B: Monthly Contract Billing Ledger ── */
+                                        <div>
+                                          <div style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', marginBottom: 8 }}>📋 รายการบิลรายเดือน (Billing Ledger)</div>
+                                          <div style={{ overflowX: 'auto' }}>
+                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                                              <thead>
+                                                <tr style={{ background: '#f3e8ff', textAlign: 'left' }}>
+                                                  {['รอบบิล / เดือน', 'ใบแจ้งหนี้', 'ประเภท', 'รายละเอียด', 'ยอด', 'ออกวันที่', 'ครบกำหนด', 'วันที่ชำระ', 'วิธีชำระ', 'สถานะ'].map(h => (
+                                                    <th key={h} style={{ padding: '5px 8px', fontWeight: 700, color: '#7c3aed', whiteSpace: 'nowrap' }}>{h}</th>
+                                                  ))}
+                                                </tr>
+                                              </thead>
+                                              <tbody>
+                                                {bk.invoices.map((inv, i) => {
+                                                  const st = invoiceStatusBadge(inv.status);
+                                                  const activeAllocs = inv.allocations.filter(a => a.payment?.status === 'ACTIVE');
+                                                  const payDate  = activeAllocs[0]?.payment?.paymentDate;
+                                                  const payMeth  = activeAllocs[0]?.payment?.paymentMethod;
+                                                  const period = inv.billingPeriodStart && inv.billingPeriodEnd
+                                                    ? `${fmtDate(inv.billingPeriodStart)} – ${fmtDate(inv.billingPeriodEnd)}`
+                                                    : `รอบที่ ${i + 1}`;
+                                                  return (
+                                                    <tr key={inv.id} style={{ borderBottom: '1px solid #e5e7eb', background: i % 2 === 0 ? '#fff' : '#faf5ff' }}>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#6b7280', fontSize: 10 }}>{period}</td>
+                                                      <td style={{ padding: '5px 8px', fontWeight: 600, whiteSpace: 'nowrap' }}>{inv.invoiceNumber}</td>
+                                                      <td style={{ padding: '5px 8px', color: '#6b7280', whiteSpace: 'nowrap' }}>{INVOICE_TYPE_LABELS[inv.invoiceType] ?? inv.invoiceType}</td>
+                                                      <td style={{ padding: '5px 8px', color: '#374151', maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{inv.notes ?? '—'}</td>
+                                                      <td style={{ padding: '5px 8px', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap' }}>฿{fmtBaht(inv.grandTotal)}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>{fmtDate(inv.issueDate)}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: inv.status === 'overdue' ? '#dc2626' : '#374151' }}>{fmtDate(inv.dueDate)}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#6b7280' }}>{payDate ? fmtDate(payDate) : '—'}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: '#6b7280' }}>{payMeth ? (PAYMENT_METHOD_LABELS[payMeth] ?? payMeth) : '—'}</td>
+                                                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap' }}>
+                                                        <span style={{ fontSize: 10, fontWeight: 700, color: st.color, background: st.bg, padding: '2px 7px', borderRadius: 5 }}>{st.label}</span>
+                                                      </td>
+                                                    </tr>
+                                                  );
+                                                })}
+                                              </tbody>
+                                            </table>
+                                          </div>
+                                          {/* Summary footer */}
+                                          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 10, padding: '8px 10px', background: '#f3e8ff', borderRadius: 8, fontSize: 11 }}>
+                                            <span>📥 มัดจำ/ประกัน: <strong style={{ color: '#7c3aed' }}>฿{fmtBaht(bk.securityDeposits.reduce((s, d) => s + d.amount, 0), 0)}</strong></span>
+                                            <span>💰 รวมค่าเช่า: <strong style={{ color: '#15803d' }}>฿{fmtBaht(bk.invoices.filter(i => i.invoiceType === 'monthly_rent').reduce((s, i) => s + i.grandTotal, 0), 0)}</strong></span>
+                                            <span>⚡ สาธารณูปโภค: <strong>฿{fmtBaht(bk.invoices.filter(i => i.invoiceType === 'utility').reduce((s, i) => s + i.grandTotal, 0), 0)}</strong></span>
+                                            <span style={{ marginLeft: 'auto' }}>ยอดค้างชำระ: <strong style={{ color: summary.overdueAmount > 0 ? '#dc2626' : '#15803d' }}>฿{fmtBaht(bk.invoices.filter(i => i.status !== 'paid' && i.status !== 'void').reduce((s, i) => s + Math.max(0, i.grandTotal - i.paidAmount), 0), 0)}</strong></span>
+                                          </div>
+                                        </div>
+                                      )}
+                                      {/* Security deposits (if any) */}
+                                      {bk.securityDeposits.length > 0 && (
+                                        <div style={{ marginTop: 10 }}>
+                                          <div style={{ fontSize: 11, fontWeight: 700, color: '#7c3aed', marginBottom: 4 }}>🔐 เงินประกัน / มัดจำ</div>
+                                          {bk.securityDeposits.map(dep => (
+                                            <div key={dep.id} style={{ display: 'flex', gap: 10, fontSize: 11, color: '#374151', padding: '3px 0' }}>
+                                              <span style={{ fontWeight: 700 }}>฿{fmtBaht(dep.amount, 0)}</span>
+                                              <span style={{ color: dep.status === 'held' ? '#7c3aed' : '#22c55e' }}>
+                                                {dep.status === 'held' ? '🔐 ถือไว้' : '✅ คืนแล้ว'}
+                                              </span>
+                                              <span style={{ color: '#9ca3af' }}>รับ {fmtDate(dep.receivedAt)}</span>
+                                              {dep.refundAt && <span style={{ color: '#9ca3af' }}>คืน {fmtDate(dep.refundAt)}</span>}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>

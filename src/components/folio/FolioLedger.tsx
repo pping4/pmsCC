@@ -1,0 +1,405 @@
+'use client';
+
+/**
+ * FolioLedger.tsx
+ *
+ * แสดง Guest Folio แบบ real-time — รายการค่าใช้จ่าย, สถานะ billing,
+ * ยอดรวม, และ invoices ทั้งหมดของ booking นั้น
+ *
+ * Usage:
+ *   <FolioLedger bookingId="uuid" />
+ *
+ * Features:
+ *  - ดึง Folio จาก GET /api/bookings/[id]/folio
+ *  - แสดง FolioLineItems พร้อม BillingStatus badges (UNBILLED/BILLED/PAID/VOIDED)
+ *  - แสดง Invoice list พร้อมสถานะ
+ *  - แสดง KPI: ยอดรวมค่าใช้จ่าย, ชำระแล้ว, คงค้าง
+ *  - Refresh ได้ผ่าน onRefresh callback
+ */
+
+import React, { useEffect, useState, useCallback } from 'react';
+import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface FolioLineItem {
+  id: string;
+  chargeType: string;
+  description: string;
+  amount: number;
+  quantity: number;
+  billingStatus: 'UNBILLED' | 'BILLED' | 'PAID' | 'VOIDED';
+  serviceDate: string | null;
+  notes: string | null;
+  createdAt: string;
+  invoiceItem?: {
+    invoice?: { invoiceNumber: string; status: string } | null;
+  } | null;
+}
+
+interface FolioInvoice {
+  id: string;
+  invoiceNumber: string;
+  invoiceType: string;
+  status: string;
+  grandTotal: number;
+  paidAmount: number;
+  issueDate: string;
+  dueDate: string;
+}
+
+interface FolioData {
+  id: string;
+  folioNumber: string;
+  bookingId: string;
+  totalCharges: number;
+  totalPayments: number;
+  balance: number;
+  closedAt: string | null;
+  lineItems: FolioLineItem[];
+  invoices: FolioInvoice[];
+  booking: {
+    bookingNumber: string;
+    bookingType: string;
+    checkIn: string;
+    checkOut: string;
+    room: { number: string };
+    guest: { firstName: string; lastName: string };
+  };
+}
+
+interface FolioLedgerProps {
+  bookingId: string;
+  onRefresh?: () => void;
+  compact?: boolean;
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const CHARGE_LABEL: Record<string, string> = {
+  ROOM: '🏠 ค่าห้อง',
+  UTILITY_WATER: '💧 น้ำ',
+  UTILITY_ELECTRIC: '⚡ ไฟ',
+  EXTRA_SERVICE: '🛎 บริการเสริม',
+  PENALTY: '⚠️ ค่าปรับ',
+  DISCOUNT: '🏷️ ส่วนลด',
+  ADJUSTMENT: '📝 ปรับรายการ',
+  DEPOSIT_BOOKING: '🔐 มัดจำ',
+  OTHER: '📋 อื่น ๆ',
+};
+
+const BILLING_STATUS_CONFIG: Record<
+  string,
+  { label: string; bg: string; text: string }
+> = {
+  UNBILLED: { label: 'ยังไม่ออกบิล', bg: 'bg-yellow-100', text: 'text-yellow-800' },
+  BILLED:   { label: 'ออกบิลแล้ว',   bg: 'bg-blue-100',   text: 'text-blue-800'   },
+  PAID:     { label: 'ชำระแล้ว',      bg: 'bg-green-100',  text: 'text-green-800'  },
+  VOIDED:   { label: 'ยกเลิก',        bg: 'bg-gray-100',   text: 'text-gray-500'   },
+};
+
+const INVOICE_STATUS_CONFIG: Record<
+  string,
+  { label: string; bg: string; text: string }
+> = {
+  unpaid:    { label: 'ค้างชำระ',   bg: 'bg-red-100',    text: 'text-red-800'    },
+  partial:   { label: 'ชำระบางส่วน',bg: 'bg-orange-100', text: 'text-orange-800' },
+  paid:      { label: 'ชำระแล้ว',   bg: 'bg-green-100',  text: 'text-green-800'  },
+  overdue:   { label: 'เกินกำหนด',  bg: 'bg-red-200',    text: 'text-red-900'    },
+  voided:    { label: 'Void',        bg: 'bg-gray-100',   text: 'text-gray-500'   },
+  cancelled: { label: 'ยกเลิก',     bg: 'bg-gray-100',   text: 'text-gray-500'   },
+};
+
+function StatusBadge({
+  status,
+  config,
+}: {
+  status: string;
+  config: Record<string, { label: string; bg: string; text: string }>;
+}) {
+  const c = config[status] ?? { label: status, bg: 'bg-gray-100', text: 'text-gray-600' };
+  return (
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${c.bg} ${c.text}`}
+    >
+      {c.label}
+    </span>
+  );
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export default function FolioLedger({ bookingId, onRefresh, compact = false }: FolioLedgerProps) {
+  const [folio, setFolio] = useState<FolioData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}/folio`);
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error ?? `HTTP ${res.status}`);
+      }
+      const data: FolioData = await res.json();
+      setFolio(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'โหลดข้อมูลล้มเหลว');
+    } finally {
+      setLoading(false);
+    }
+  }, [bookingId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-10 text-gray-400 text-sm">
+        <svg className="animate-spin h-5 w-5 mr-2" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z" />
+        </svg>
+        กำลังโหลด Folio...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        ⚠️ {error}
+        <button onClick={load} className="ml-3 underline hover:no-underline">
+          ลองใหม่
+        </button>
+      </div>
+    );
+  }
+
+  if (!folio) {
+    return (
+      <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-800">
+        ยังไม่มี Folio สำหรับ booking นี้
+      </div>
+    );
+  }
+
+  const unbilledTotal = folio.lineItems
+    .filter((i) => i.billingStatus === 'UNBILLED')
+    .reduce((s, i) => s + Number(i.amount), 0);
+
+  const balance = Number(folio.balance);
+
+  return (
+    <div className="space-y-4">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-base font-semibold text-gray-900">
+            {folio.folioNumber}
+          </h3>
+          <p className="text-xs text-gray-500">
+            {folio.booking.guest.firstName} {folio.booking.guest.lastName} &nbsp;·&nbsp;
+            ห้อง {folio.booking.room.number} &nbsp;·&nbsp;
+            {fmtDate(new Date(folio.booking.checkIn))} – {fmtDate(new Date(folio.booking.checkOut))}
+            {folio.closedAt && (
+              <span className="ml-2 text-red-500">(ปิด Folio แล้ว)</span>
+            )}
+          </p>
+        </div>
+        <button
+          onClick={() => { load(); onRefresh?.(); }}
+          className="text-xs text-blue-600 hover:text-blue-800 flex items-center gap-1"
+        >
+          ↺ รีเฟรช
+        </button>
+      </div>
+
+      {/* ── KPI Summary ── */}
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-lg bg-gray-50 border border-gray-200 p-3 text-center">
+          <p className="text-xs text-gray-500 mb-1">ยอดรวมค่าใช้จ่าย</p>
+          <p className="text-lg font-bold text-gray-900">
+            ฿{fmtBaht(Number(folio.totalCharges))}
+          </p>
+        </div>
+        <div className="rounded-lg bg-green-50 border border-green-200 p-3 text-center">
+          <p className="text-xs text-green-600 mb-1">ชำระแล้ว</p>
+          <p className="text-lg font-bold text-green-700">
+            ฿{fmtBaht(Number(folio.totalPayments))}
+          </p>
+        </div>
+        <div className={`rounded-lg border p-3 text-center ${
+          balance > 0
+            ? 'bg-red-50 border-red-200'
+            : 'bg-blue-50 border-blue-200'
+        }`}>
+          <p className={`text-xs mb-1 ${balance > 0 ? 'text-red-600' : 'text-blue-600'}`}>
+            {balance > 0 ? 'ยอดค้างชำระ' : 'ยอดคงเหลือ'}
+          </p>
+          <p className={`text-lg font-bold ${balance > 0 ? 'text-red-700' : 'text-blue-700'}`}>
+            ฿{fmtBaht(Math.abs(balance))}
+          </p>
+        </div>
+      </div>
+
+      {/* ── Unbilled Alert ── */}
+      {unbilledTotal > 0 && (
+        <div className="flex items-center gap-2 rounded-lg bg-yellow-50 border border-yellow-300 px-3 py-2 text-sm text-yellow-800">
+          <span>⚠️</span>
+          <span>
+            มีรายการ <strong>ยังไม่ออกบิล</strong> มูลค่า{' '}
+            <strong>฿{fmtBaht(unbilledTotal)}</strong> — ต้องออก Invoice ก่อนเช็คเอาท์
+          </span>
+        </div>
+      )}
+
+      {/* ── Line Items ── */}
+      <div>
+        <h4 className="text-sm font-medium text-gray-700 mb-2">
+          รายการค่าใช้จ่าย ({folio.lineItems.length} รายการ)
+        </h4>
+        <div className="rounded-lg border border-gray-200 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
+              <tr>
+                <th className="px-3 py-2 text-left">รายการ</th>
+                {!compact && <th className="px-3 py-2 text-left">วันที่</th>}
+                <th className="px-3 py-2 text-right">จำนวน</th>
+                <th className="px-3 py-2 text-center">สถานะ</th>
+                {!compact && <th className="px-3 py-2 text-left">Invoice</th>}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {folio.lineItems.length === 0 ? (
+                <tr>
+                  <td colSpan={5} className="px-3 py-6 text-center text-gray-400 text-sm">
+                    ยังไม่มีรายการค่าใช้จ่าย
+                  </td>
+                </tr>
+              ) : (
+                folio.lineItems.map((item) => (
+                  <tr
+                    key={item.id}
+                    className={item.billingStatus === 'VOIDED' ? 'opacity-40' : 'hover:bg-gray-50'}
+                  >
+                    <td className="px-3 py-2">
+                      <p className="text-xs text-gray-400 mb-0.5">
+                        {CHARGE_LABEL[item.chargeType] ?? item.chargeType}
+                      </p>
+                      <p className="text-gray-900">{item.description}</p>
+                      {item.notes && (
+                        <p className="text-xs text-gray-400 mt-0.5">{item.notes}</p>
+                      )}
+                    </td>
+                    {!compact && (
+                      <td className="px-3 py-2 text-gray-500 text-xs whitespace-nowrap">
+                        {item.serviceDate
+                          ? fmtDate(new Date(item.serviceDate))
+                          : fmtDate(new Date(item.createdAt))}
+                      </td>
+                    )}
+                    <td className="px-3 py-2 text-right font-mono font-medium text-gray-900">
+                      ฿{fmtBaht(Number(item.amount))}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <StatusBadge
+                        status={item.billingStatus}
+                        config={BILLING_STATUS_CONFIG}
+                      />
+                    </td>
+                    {!compact && (
+                      <td className="px-3 py-2 text-xs text-gray-500">
+                        {item.invoiceItem?.invoice?.invoiceNumber ?? '—'}
+                      </td>
+                    )}
+                  </tr>
+                ))
+              )}
+            </tbody>
+            {folio.lineItems.length > 0 && (
+              <tfoot className="bg-gray-50">
+                <tr>
+                  <td
+                    colSpan={compact ? 1 : 2}
+                    className="px-3 py-2 text-sm font-semibold text-gray-700"
+                  >
+                    รวมทั้งหมด
+                  </td>
+                  <td className="px-3 py-2 text-right font-mono font-bold text-gray-900">
+                    ฿{fmtBaht(Number(folio.totalCharges))}
+                  </td>
+                  <td colSpan={compact ? 1 : 2} />
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </div>
+
+      {/* ── Invoices ── */}
+      {!compact && folio.invoices.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 mb-2">
+            Invoices ({folio.invoices.length} ใบ)
+          </h4>
+          <div className="rounded-lg border border-gray-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                <tr>
+                  <th className="px-3 py-2 text-left">เลขที่</th>
+                  <th className="px-3 py-2 text-left">วันที่</th>
+                  <th className="px-3 py-2 text-right">ยอดรวม</th>
+                  <th className="px-3 py-2 text-right">ชำระแล้ว</th>
+                  <th className="px-3 py-2 text-center">สถานะ</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {folio.invoices.map((inv) => (
+                  <tr key={inv.id} className="hover:bg-gray-50">
+                    <td className="px-3 py-2 font-mono text-xs text-blue-700">
+                      {inv.invoiceNumber}
+                    </td>
+                    <td className="px-3 py-2 text-gray-500 text-xs">
+                      {fmtDate(new Date(inv.issueDate))}
+                    </td>
+                    <td className="px-3 py-2 text-right font-medium text-gray-900">
+                      ฿{fmtBaht(Number(inv.grandTotal))}
+                    </td>
+                    <td className="px-3 py-2 text-right text-green-700">
+                      ฿{fmtBaht(Number(inv.paidAmount))}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <StatusBadge
+                        status={inv.status}
+                        config={INVOICE_STATUS_CONFIG}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="bg-gray-50">
+                <tr>
+                  <td colSpan={2} className="px-3 py-2 text-sm font-semibold text-gray-700">
+                    รวม
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold text-gray-900">
+                    ฿{fmtBaht(folio.invoices.reduce((s, i) => s + Number(i.grandTotal), 0))}
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold text-green-700">
+                    ฿{fmtBaht(folio.invoices.reduce((s, i) => s + Number(i.paidAmount), 0))}
+                  </td>
+                  <td />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

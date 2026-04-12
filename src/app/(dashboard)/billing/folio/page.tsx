@@ -1,0 +1,362 @@
+'use client';
+
+/**
+ * /billing/folio — Guest Folio Ledger Page
+ *
+ * หน้านี้ให้ staff ค้นหา booking และดู Folio Ledger แบบ real-time
+ *
+ * Features:
+ *  - ค้นหา booking ด้วย booking number หรือชื่อลูกค้า
+ *  - แสดง FolioLedger component แบบเต็ม
+ *  - สถานะ Folio (เปิด/ปิด)
+ *  - เพิ่ม charge เสริมได้ (extra service, penalty ฯลฯ)
+ *  - Void invoice ผ่าน UI
+ */
+
+import { useState, useEffect, useCallback } from 'react';
+import FolioLedger from '@/components/folio/FolioLedger';
+import { fmtDate } from '@/lib/date-format';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface BookingSummary {
+  id: string;
+  bookingNumber: string;
+  status: string;
+  checkIn: string;
+  checkOut: string;
+  bookingType: string;
+  room: { number: string };
+  guest: { firstName: string; lastName: string };
+  folio: { id: string; folioNumber: string; balance: number } | null;
+}
+
+const STATUS_LABEL: Record<string, { label: string; cls: string }> = {
+  confirmed:   { label: 'รอเช็คอิน', cls: 'bg-blue-100 text-blue-700'   },
+  checked_in:  { label: 'เช็คอินแล้ว', cls: 'bg-green-100 text-green-700' },
+  checked_out: { label: 'เช็คเอาท์แล้ว', cls: 'bg-gray-100 text-gray-600' },
+  cancelled:   { label: 'ยกเลิก',      cls: 'bg-red-100 text-red-600'    },
+};
+
+const CHARGE_TYPES = [
+  { value: 'ROOM',              label: '🏠 ค่าห้อง'        },
+  { value: 'UTILITY_WATER',     label: '💧 ค่าน้ำ'         },
+  { value: 'UTILITY_ELECTRIC',  label: '⚡ ค่าไฟ'          },
+  { value: 'EXTRA_SERVICE',     label: '🛎 บริการเสริม'    },
+  { value: 'PENALTY',           label: '⚠️ ค่าปรับ'        },
+  { value: 'DISCOUNT',          label: '🏷️ ส่วนลด'        },
+  { value: 'ADJUSTMENT',        label: '📝 ปรับรายการ'     },
+  { value: 'OTHER',             label: '📋 อื่น ๆ'        },
+];
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
+export default function FolioPage() {
+  const [search, setSearch] = useState('');
+  const [bookings, setBookings] = useState<BookingSummary[]>([]);
+  const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [folioKey, setFolioKey] = useState(0); // force FolioLedger to re-mount on refresh
+
+  // Add charge form
+  const [showAddCharge, setShowAddCharge] = useState(false);
+  const [chargeForm, setChargeForm] = useState({
+    chargeType: 'EXTRA_SERVICE',
+    description: '',
+    amount: '',
+    notes: '',
+  });
+  const [saving, setSaving] = useState(false);
+  const [saveMsg, setSaveMsg] = useState('');
+
+  const selectedBooking = bookings.find((b) => b.id === selectedBookingId) ?? null;
+
+  // ── Search bookings ─────────────────────────────────────────────────────────
+  const fetchBookings = useCallback(async () => {
+    if (!search.trim()) return;
+    setLoading(true);
+    try {
+      const q = encodeURIComponent(search.trim());
+      const res = await fetch(`/api/bookings?search=${q}&status=all`);
+      if (!res.ok) throw new Error('โหลดข้อมูลล้มเหลว');
+      const data = await res.json();
+      setBookings(data);
+    } catch {
+      setBookings([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [search]);
+
+  useEffect(() => {
+    if (search.length >= 2) {
+      const t = setTimeout(fetchBookings, 400);
+      return () => clearTimeout(t);
+    }
+  }, [search, fetchBookings]);
+
+  // ── Add extra charge ────────────────────────────────────────────────────────
+  async function handleAddCharge(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selectedBooking?.folio) return;
+
+    const amount = parseFloat(chargeForm.amount);
+    if (isNaN(amount) || amount <= 0) {
+      setSaveMsg('❌ ระบุจำนวนเงินให้ถูกต้อง');
+      return;
+    }
+
+    setSaving(true);
+    setSaveMsg('');
+    try {
+      const res = await fetch(`/api/folios/${selectedBooking.folio.id}/charges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chargeType: chargeForm.chargeType,
+          description: chargeForm.description,
+          amount,
+          notes: chargeForm.notes || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'บันทึกล้มเหลว');
+
+      setSaveMsg('✅ เพิ่มรายการสำเร็จ');
+      setChargeForm({ chargeType: 'EXTRA_SERVICE', description: '', amount: '', notes: '' });
+      setShowAddCharge(false);
+      setFolioKey((k) => k + 1); // refresh FolioLedger
+    } catch (err) {
+      setSaveMsg(`❌ ${err instanceof Error ? err.message : 'เกิดข้อผิดพลาด'}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ── Void invoice ─────────────────────────────────────────────────────────────
+  async function handleVoidInvoice(invoiceId: string, invoiceNumber: string) {
+    const reason = prompt(`เหตุผลในการ Void ${invoiceNumber}:`);
+    if (!reason) return;
+    try {
+      const res = await fetch(`/api/invoices/${invoiceId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'void', reason }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error ?? 'Void ล้มเหลว');
+      alert(`✅ Void ${invoiceNumber} สำเร็จ — รายการถูกปลดล็อกกลับเป็น UNBILLED แล้ว`);
+      setFolioKey((k) => k + 1);
+    } catch (err) {
+      alert(`❌ ${err instanceof Error ? err.message : 'เกิดข้อผิดพลาด'}`);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto">
+
+      {/* Header */}
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-gray-900">Guest Folio Ledger</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          ค้นหา booking เพื่อดูรายการค่าใช้จ่าย, ใบแจ้งหนี้ และยอดคงค้าง
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        {/* ── Left panel: search & booking list ── */}
+        <div className="lg:col-span-1 space-y-3">
+          <div className="relative">
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400"
+              fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="เลข booking, ชื่อลูกค้า..."
+              className="w-full pl-9 pr-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
+
+          {loading && (
+            <p className="text-center text-sm text-gray-400 py-4">กำลังค้นหา...</p>
+          )}
+
+          {!loading && search.length >= 2 && bookings.length === 0 && (
+            <p className="text-center text-sm text-gray-400 py-4">ไม่พบ booking</p>
+          )}
+
+          <div className="space-y-2 max-h-[calc(100vh-280px)] overflow-y-auto pr-1">
+            {bookings.map((b) => {
+              const st = STATUS_LABEL[b.status] ?? { label: b.status, cls: 'bg-gray-100 text-gray-600' };
+              const isSelected = b.id === selectedBookingId;
+              return (
+                <button
+                  key={b.id}
+                  onClick={() => setSelectedBookingId(b.id)}
+                  className={`w-full text-left rounded-lg border p-3 transition-all ${
+                    isSelected
+                      ? 'border-blue-400 bg-blue-50 shadow-sm'
+                      : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <p className="font-medium text-sm text-gray-900">
+                        {b.bookingNumber}
+                      </p>
+                      <p className="text-xs text-gray-600 mt-0.5">
+                        {b.guest.firstName} {b.guest.lastName}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        ห้อง {b.room.number} &nbsp;·&nbsp;
+                        {fmtDate(new Date(b.checkIn))} – {fmtDate(new Date(b.checkOut))}
+                      </p>
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${st.cls}`}>
+                        {st.label}
+                      </span>
+                      {b.folio ? (
+                        <span className={`text-xs font-mono ${
+                          Number(b.folio.balance) > 0 ? 'text-red-600' : 'text-green-600'
+                        }`}>
+                          ฿{Number(b.folio.balance).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-yellow-600">ไม่มี Folio</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ── Right panel: Folio Ledger ── */}
+        <div className="lg:col-span-2">
+          {!selectedBookingId ? (
+            <div className="flex flex-col items-center justify-center h-64 rounded-xl border-2 border-dashed border-gray-200 text-gray-400">
+              <svg className="h-10 w-10 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                  d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              <p className="text-sm">เลือก booking จากด้านซ้ายเพื่อดู Folio</p>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-gray-200 bg-white p-5 space-y-4">
+
+              {/* Action bar */}
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  {selectedBooking?.folio && (
+                    <button
+                      onClick={() => setShowAddCharge(true)}
+                      className="inline-flex items-center gap-1 text-sm bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition"
+                    >
+                      + เพิ่มค่าบริการ
+                    </button>
+                  )}
+                </div>
+                {saveMsg && (
+                  <span className={`text-sm ${saveMsg.startsWith('✅') ? 'text-green-600' : 'text-red-600'}`}>
+                    {saveMsg}
+                  </span>
+                )}
+              </div>
+
+              {/* Add Charge Form */}
+              {showAddCharge && selectedBooking?.folio && (
+                <form
+                  onSubmit={handleAddCharge}
+                  className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-3"
+                >
+                  <h4 className="text-sm font-semibold text-blue-800">เพิ่มรายการค่าบริการ</h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">ประเภท</label>
+                      <select
+                        value={chargeForm.chargeType}
+                        onChange={(e) => setChargeForm({ ...chargeForm, chargeType: e.target.value })}
+                        className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                      >
+                        {CHARGE_TYPES.map((ct) => (
+                          <option key={ct.value} value={ct.value}>{ct.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-600 block mb-1">จำนวนเงิน (฿)</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0.01"
+                        required
+                        value={chargeForm.amount}
+                        onChange={(e) => setChargeForm({ ...chargeForm, amount: e.target.value })}
+                        className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                        placeholder="0.00"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className="text-xs text-gray-600 block mb-1">รายละเอียด *</label>
+                      <input
+                        type="text"
+                        required
+                        value={chargeForm.description}
+                        onChange={(e) => setChargeForm({ ...chargeForm, description: e.target.value })}
+                        className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                        placeholder="เช่น ค่าซักผ้า, ค่าที่จอดรถเพิ่ม"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <label className="text-xs text-gray-600 block mb-1">หมายเหตุ</label>
+                      <input
+                        type="text"
+                        value={chargeForm.notes}
+                        onChange={(e) => setChargeForm({ ...chargeForm, notes: e.target.value })}
+                        className="w-full border border-gray-300 rounded-md px-2 py-1.5 text-sm"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => setShowAddCharge(false)}
+                      className="px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900"
+                    >
+                      ยกเลิก
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={saving}
+                      className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {saving ? 'กำลังบันทึก...' : 'บันทึก'}
+                    </button>
+                  </div>
+                </form>
+              )}
+
+              {/* Folio Ledger */}
+              <FolioLedger
+                key={`${selectedBookingId}-${folioKey}`}
+                bookingId={selectedBookingId}
+                onRefresh={() => setFolioKey((k) => k + 1)}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

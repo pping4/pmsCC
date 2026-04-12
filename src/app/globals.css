@@ -2,43 +2,414 @@
 @tailwind components;
 @tailwind utilities;
 
-@import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700;800&display=swap');
-
+/* ─────────────────────────────────────────────────────────────────────────────
+   CSS Design Tokens — Light Mode (:root)
+   All inline-styled components reference these via var(--token)
+───────────────────────────────────────────────────────────────────────────── */
 :root {
-  --primary: #1e40af;
+  --font-sans: 'Sarabun', 'IBM Plex Sans Thai', system-ui, -apple-system, sans-serif;
+
+  /* Surfaces */
+  --surface-page:    #f8fafc;
+  --surface-card:    #ffffff;
+  --surface-muted:   #f3f4f6;
+  --surface-subtle:  #f9fafb;
+  --surface-active:  #eff6ff;
+  --surface-hover:   #f8fafc;
+
+  /* Borders */
+  --border-strong:   #d1d5db;
+  --border-default:  #e5e7eb;
+  --border-light:    #f3f4f6;
+
+  /* Text */
+  --text-primary:    #111827;
+  --text-secondary:  #374151;
+  --text-tertiary:   #4b5563;
+  --text-muted:      #6b7280;
+  --text-faint:      #9ca3af;
+
+  /* Accent */
+  --accent-blue:     #1e40af;
+  --accent-blue-bg:  #eff6ff;
+  --accent-blue-text:#1e40af;
+
+  /* Scrollbar */
+  --scrollbar-track: #f1f5f9;
+  --scrollbar-thumb: #cbd5e1;
+
+  /* Semantic colours (kept for reference, pages use these directly) */
+  --primary:       #1e40af;
   --primary-light: #3b82f6;
-  --success: #22c55e;
-  --warning: #f59e0b;
-  --danger: #ef4444;
-  --purple: #7c3aed;
+  --success:       #22c55e;
+  --warning:       #f59e0b;
+  --danger:        #ef4444;
+  --purple:        #7c3aed;
 }
 
-* {
+/* ─────────────────────────────────────────────────────────────────────────────
+   Dark Mode Token Overrides
+   Applied when <html class="dark"> is set by ThemeProvider
+───────────────────────────────────────────────────────────────────────────── */
+html.dark {
+  color-scheme: dark;
+
+  --surface-page:    #0f172a;
+  --surface-card:    #1e293b;
+  --surface-muted:   #334155;
+  --surface-subtle:  #1e293b;
+  --surface-active:  #1e3a8a;
+  --surface-hover:   #334155;
+
+  --border-strong:   #475569;
+  --border-default:  #334155;
+  --border-light:    #1e293b;
+
+  --text-primary:    #f1f5f9;
+  --text-secondary:  #e2e8f0;
+  --text-tertiary:   #cbd5e1;
+  --text-muted:      #94a3b8;
+  --text-faint:      #64748b;
+
+  --accent-blue:     #93c5fd;
+  --accent-blue-bg:  #1e3a8a;
+  --accent-blue-text:#bfdbfe;
+
+  --scrollbar-track: #1e293b;
+  --scrollbar-thumb: #475569;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Base Styles
+───────────────────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
 }
 
-body {
-  font-family: 'Sarabun', 'IBM Plex Sans Thai', system-ui, sans-serif;
-  background: #f8fafc;
-  color: #111827;
-  margin: 0;
+html {
+  font-family: var(--font-sans);
 }
 
-/* Mobile scroll behavior */
+body {
+  font-family: var(--font-sans);
+  background: var(--surface-page);
+  color: var(--text-primary);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Force font inheritance on ALL elements */
+input, button, select, textarea, optgroup {
+  font-family: var(--font-sans);
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-sans);
+}
+
+/* Mobile scroll */
 .scroll-touch {
   -webkit-overflow-scrolling: touch;
 }
 
-/* Custom scrollbar */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* ─────────────────────────────────────────────────────────────────────────────
+   Custom Scrollbar
+───────────────────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar          { width: 6px; height: 6px; }
+::-webkit-scrollbar-track    { background: var(--scrollbar-track); }
+::-webkit-scrollbar-thumb    { background: var(--scrollbar-thumb); border-radius: 3px; }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Smooth theme transitions for key CSS properties
+───────────────────────────────────────────────────────────────────────────── */
+.pms-transition {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
-::-webkit-scrollbar-track {
-  background: #f1f5f9;
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   pms-card  — applied to StatCard, DetailPanel, and page content cards
+   These classes let us override inline styles in dark mode without !important
+   on every single element.
+───────────────────────────────────────────────────────────────────────────── */
+.pms-card {
+  background: var(--surface-card) !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-primary) !important;
 }
-::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 3px;
+
+.pms-card-muted {
+  background: var(--surface-muted) !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-primary) !important;
+}
+
+.pms-surface-page {
+  background: var(--surface-page) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Dark-mode overrides for HTML element types that appear throughout pages
+   These use !important to override inline styles (CSS !important > inline style)
+───────────────────────────────────────────────────────────────────────────── */
+
+/* Tables */
+html.dark table {
+  background: var(--surface-card) !important;
+  color: var(--text-primary) !important;
+}
+html.dark table thead tr {
+  background: var(--surface-muted) !important;
+}
+html.dark table th {
+  background: var(--surface-muted) !important;
+  color: var(--text-secondary) !important;
+  border-bottom-color: var(--border-default) !important;
+}
+html.dark table td {
+  color: var(--text-primary) !important;
+  border-bottom-color: var(--border-light) !important;
+}
+html.dark table tr:hover td {
+  background: var(--surface-hover) !important;
+}
+
+/* Inputs, selects, textareas */
+html.dark input:not([type="date"]):not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  background: var(--surface-muted) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-strong) !important;
+}
+html.dark input[type="date"] {
+  background: var(--surface-muted) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-strong) !important;
+  color-scheme: dark;
+}
+
+/* Generic buttons that use inline-style background #f3f4f6 */
+html.dark button[style*="background: #f3f4f6"],
+html.dark button[style*="background: rgb(243, 244, 246)"] {
+  background: var(--surface-muted) !important;
+  color: var(--text-secondary) !important;
+  border-color: var(--border-default) !important;
+}
+
+/* Alert/badge rows at top of dashboard */
+html.dark .pms-alert {
+  border-color: var(--border-default) !important;
+}
+
+/* Stat card sub-text */
+html.dark .pms-stat-sub {
+  color: var(--text-muted) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Dark Mode: Comprehensive inline-style overrides
+   React normalises hex colours to rgb() when writing to the DOM style attr,
+   so CSS attribute selectors like [style*="rgb(255, 255, 255)"] reliably catch
+   every hardcoded #fff / #ffffff / white used across all page files.
+───────────────────────────────────────────────────────────────────────────── */
+
+/* ── White surfaces → surface-card ─────────────────────────────────────────── */
+html.dark [style*="background-color: rgb(255, 255, 255)"],
+html.dark [style*="background: rgb(255, 255, 255)"],
+html.dark [style*="background: white"],
+html.dark [style*="background: #fff"],
+html.dark [style*="background: #ffffff"],
+html.dark [style*="background:#fff"],
+html.dark [style*="background:#ffffff"] {
+  background-color: var(--surface-card) !important;
+}
+
+/* ── Near-white surfaces (#f8fafc / #f9fafb) → surface-subtle ──────────────── */
+html.dark [style*="background-color: rgb(248, 250, 252)"],
+html.dark [style*="background: rgb(248, 250, 252)"],
+html.dark [style*="background: #f8fafc"],
+html.dark [style*="background:#f8fafc"],
+html.dark [style*="background-color: rgb(249, 250, 251)"],
+html.dark [style*="background: rgb(249, 250, 251)"],
+html.dark [style*="background: #f9fafb"],
+html.dark [style*="background:#f9fafb"] {
+  background-color: var(--surface-subtle) !important;
+}
+
+/* ── Light-gray surfaces (#f3f4f6 / #f1f5f9) → surface-muted ──────────────── */
+html.dark [style*="background-color: rgb(243, 244, 246)"],
+html.dark [style*="background: rgb(243, 244, 246)"],
+html.dark [style*="background: #f3f4f6"],
+html.dark [style*="background:#f3f4f6"],
+html.dark [style*="background-color: rgb(241, 245, 249)"],
+html.dark [style*="background: rgb(241, 245, 249)"],
+html.dark [style*="background: #f1f5f9"],
+html.dark [style*="background:#f1f5f9"] {
+  background-color: var(--surface-muted) !important;
+}
+
+/* ── Dark text colours → semantic text tokens ───────────────────────────────── */
+html.dark [style*="color: rgb(17, 24, 39)"],
+html.dark [style*="color: rgb(31, 41, 55)"] {
+  color: var(--text-primary) !important;
+}
+html.dark [style*="color: rgb(55, 65, 81)"],
+html.dark [style*="color: rgb(75, 85, 99)"] {
+  color: var(--text-secondary) !important;
+}
+html.dark [style*="color: rgb(107, 114, 128)"] {
+  color: var(--text-muted) !important;
+}
+html.dark [style*="color: rgb(156, 163, 175)"] {
+  color: var(--text-faint) !important;
+}
+/* #666 / #999 shorthand grays used in some pages */
+html.dark [style*="color: rgb(102, 102, 102)"] {
+  color: var(--text-muted) !important;
+}
+html.dark [style*="color: rgb(153, 153, 153)"] {
+  color: var(--text-faint) !important;
+}
+/* No-space raw hex text colors (SSR-rendered, not yet normalized by React) */
+html.dark [style*="color:#111827"],
+html.dark [style*="color:#1f2937"] {
+  color: var(--text-primary) !important;
+}
+html.dark [style*="color:#374151"],
+html.dark [style*="color:#4b5563"] {
+  color: var(--text-secondary) !important;
+}
+html.dark [style*="color:#6b7280"] {
+  color: var(--text-muted) !important;
+}
+html.dark [style*="color:#9ca3af"] {
+  color: var(--text-faint) !important;
+}
+html.dark [style*="color:#666"] {
+  color: var(--text-muted) !important;
+}
+html.dark [style*="color:#999"] {
+  color: var(--text-faint) !important;
+}
+
+/* ── Light border colours → border tokens ───────────────────────────────────── */
+html.dark [style*="border-color: rgb(229, 231, 235)"],
+html.dark [style*="border-color: rgb(226, 232, 240)"] {
+  border-color: var(--border-default) !important;
+}
+html.dark [style*="border-color: rgb(209, 213, 219)"] {
+  border-color: var(--border-strong) !important;
+}
+html.dark [style*="border: 1px solid rgb(229, 231, 235)"] { border-color: var(--border-default) !important; }
+html.dark [style*="border: 1px solid rgb(209, 213, 219)"] { border-color: var(--border-strong) !important; }
+html.dark [style*="border: 2px solid rgb(229, 231, 235)"] { border-color: var(--border-default) !important; }
+html.dark [style*="border-bottom: 1px solid rgb(229, 231, 235)"] { border-bottom-color: var(--border-default) !important; }
+html.dark [style*="border-bottom: 2px solid rgb(229, 231, 235)"] { border-bottom-color: var(--border-default) !important; }
+html.dark [style*="border-right: 2px solid rgb(229, 231, 235)"] { border-right-color: var(--border-default) !important; }
+/* No-space raw hex border colors (SSR) */
+html.dark [style*="border:1px solid #e5e7eb"] { border-color: var(--border-default) !important; }
+html.dark [style*="border:1px solid #d1d5db"] { border-color: var(--border-strong) !important; }
+html.dark [style*="border:2px solid #e5e7eb"] { border-color: var(--border-default) !important; }
+html.dark [style*="border-color:#e5e7eb"] { border-color: var(--border-default) !important; }
+html.dark [style*="border-color:#d1d5db"] { border-color: var(--border-strong) !important; }
+
+/* ── Semantic tint backgrounds — darken for readability in dark mode ─────────── */
+html.dark [style*="background-color: rgb(239, 246, 255)"],
+html.dark [style*="background: rgb(239, 246, 255)"],
+html.dark [style*="background: #eff6ff"],
+html.dark [style*="background:#eff6ff"],
+html.dark [style*="background-color: rgb(240, 249, 255)"],
+html.dark [style*="background: rgb(240, 249, 255)"],
+html.dark [style*="background: #f0f9ff"],
+html.dark [style*="background:#f0f9ff"] {
+  background-color: #1e3a5f !important;
+  color: var(--text-secondary) !important;
+}
+html.dark [style*="background-color: rgb(236, 253, 245)"],
+html.dark [style*="background: rgb(236, 253, 245)"],
+html.dark [style*="background: #ecfdf5"],
+html.dark [style*="background:#ecfdf5"],
+html.dark [style*="background-color: rgb(220, 252, 231)"],
+html.dark [style*="background: rgb(220, 252, 231)"],
+html.dark [style*="background: #dcfce7"],
+html.dark [style*="background:#dcfce7"],
+html.dark [style*="background-color: rgb(240, 253, 244)"],
+html.dark [style*="background: rgb(240, 253, 244)"],
+html.dark [style*="background: #f0fdf4"],
+html.dark [style*="background:#f0fdf4"],
+html.dark [style*="background-color: rgb(187, 247, 208)"],
+html.dark [style*="background: rgb(187, 247, 208)"],
+html.dark [style*="background: #bbf7d0"],
+html.dark [style*="background:#bbf7d0"] {
+  background-color: #14532d !important;
+  color: #86efac !important;
+}
+html.dark [style*="background-color: rgb(254, 226, 226)"],
+html.dark [style*="background: rgb(254, 226, 226)"],
+html.dark [style*="background: #fee2e2"],
+html.dark [style*="background:#fee2e2"],
+html.dark [style*="background-color: rgb(254, 242, 242)"],
+html.dark [style*="background: rgb(254, 242, 242)"],
+html.dark [style*="background: #fef2f2"],
+html.dark [style*="background:#fef2f2"] {
+  background-color: #450a0a !important;
+  color: #fca5a5 !important;
+}
+html.dark [style*="background: rgb(254, 249, 195)"],
+html.dark [style*="background: #fef9c3"],
+html.dark [style*="background:#fef9c3"],
+html.dark [style*="background: rgb(255, 251, 235)"],
+html.dark [style*="background: #fffbeb"],
+html.dark [style*="background:#fffbeb"],
+html.dark [style*="background-color: rgb(254, 243, 199)"],
+html.dark [style*="background: rgb(254, 243, 199)"],
+html.dark [style*="background: #fef3c7"],
+html.dark [style*="background:#fef3c7"] {
+  background-color: #422006 !important;
+  color: #fcd34d !important;
+}
+
+/* ── Box shadows — deepen for dark mode ─────────────────────────────────────── */
+html.dark [style*="box-shadow: 0 20px 25px rgba(0, 0, 0, 0.15)"] {
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6) !important;
+}
+html.dark [style*="box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1)"],
+html.dark [style*="box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1)"] {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+}
+html.dark [style*="box-shadow: 0 2px 4px rgba(0,0,0,0.04)"],
+html.dark [style*="box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04)"] {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Sidebar collapse — ensures the Tailwind wrapper div doesn't clip the
+   transition (it has no width of its own, so the child drives it)
+───────────────────────────────────────────────────────────────────────────── */
+.sidebar-wrapper {
+  display: flex;
+  flex-direction: column;
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Theme toggle animation
+───────────────────────────────────────────────────────────────────────────── */
+@keyframes spin-once {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+.theme-toggle-icon {
+  display: inline-block;
+  transition: transform 0.3s ease;
+}
+.theme-toggle-icon:active {
+  animation: spin-once 0.4s ease;
 }

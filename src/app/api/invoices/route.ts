@@ -9,13 +9,17 @@ export async function GET(request: NextRequest) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
-  const status = searchParams.get('status');
-  const guestId = searchParams.get('guestId');
+  const status    = searchParams.get('status');
+  const guestId   = searchParams.get('guestId');
+  const bookingId = searchParams.get('bookingId');
+  const invoiceType = searchParams.get('invoiceType');
 
   const invoices = await prisma.invoice.findMany({
     where: {
-      ...(status && status !== 'all' ? { status: status as never } : {}),
-      ...(guestId ? { guestId } : {}),
+      ...(status      && status      !== 'all' ? { status:      status      as never } : {}),
+      ...(guestId     ? { guestId }     : {}),
+      ...(bookingId   ? { bookingId }   : {}),
+      ...(invoiceType ? { invoiceType: invoiceType as never } : {}),
     },
     include: {
       guest: true,
@@ -40,11 +44,11 @@ export async function POST(request: NextRequest) {
 
   // Calculate totals
   let subtotal = 0;
-  let taxTotal = 0;
+  let vatAmount = 0;
   const processedItems = data.items.map((item: { description: string; amount: number; taxType: string; productId?: string }) => {
     const result = calcTax(Number(item.amount), item.taxType as 'included' | 'excluded' | 'no_tax');
     subtotal += result.net;
-    taxTotal += result.tax;
+    vatAmount += result.tax;
     return {
       description: item.description,
       amount: item.amount,
@@ -53,7 +57,7 @@ export async function POST(request: NextRequest) {
     };
   });
 
-  const grandTotal = subtotal + taxTotal;
+  const grandTotal = subtotal + vatAmount;
 
   const invoice = await prisma.invoice.create({
     data: {
@@ -63,7 +67,7 @@ export async function POST(request: NextRequest) {
       issueDate: new Date(data.issueDate || new Date()),
       dueDate: new Date(data.dueDate || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)),
       subtotal: Math.round(subtotal * 100) / 100,
-      taxTotal: Math.round(taxTotal * 100) / 100,
+      vatAmount: Math.round(vatAmount * 100) / 100,
       grandTotal: Math.round(grandTotal * 100) / 100,
       status: 'unpaid',
       notes: data.notes || null,

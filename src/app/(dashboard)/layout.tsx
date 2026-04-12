@@ -14,22 +14,33 @@ export default async function DashboardLayout({
   if (!session) redirect('/login');
 
   return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: '#f8fafc' }}>
-      {/* Desktop Sidebar */}
-      <div className="hidden lg:block">
+    // min-h-screen + bg token keeps the shell dark even before children paint
+    <div
+      className="pms-transition"
+      style={{
+        display:    'flex',
+        minHeight:  '100vh',
+        background: 'var(--surface-page)',
+      }}
+    >
+      {/* Desktop Sidebar — sidebar-wrapper allows smooth width transition */}
+      <div className="hidden lg:flex sidebar-wrapper">
         <Sidebar />
       </div>
 
-      {/* Main content */}
+      {/* Main content column */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
         <Header user={session.user} />
-        <main style={{
-          flex: 1,
-          padding: '16px',
-          overflowY: 'auto',
-          paddingBottom: '80px', // space for bottom nav on mobile
-        }}
-        className="lg:pb-6 lg:px-6"
+        <main
+          className="lg:pb-6 lg:px-6 pms-transition"
+          style={{
+            flex:       1,
+            padding:    '16px',
+            overflowY:  'auto',
+            paddingBottom: '80px', // space for mobile bottom nav
+            background: 'var(--surface-page)',
+            color:      'var(--text-primary)',
+          }}
         >
           {children}
         </main>

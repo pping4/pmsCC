@@ -1,0 +1,160 @@
+'use client';
+
+import { useState, useEffect } from 'react';
+
+interface Maid {
+  id: string;
+  name: string;
+  phone: string;
+  active: boolean;
+}
+
+interface MaidTeam {
+  id: string;
+  name: string;
+  members: { maid: Maid }[];
+}
+
+export default function TeamsTab() {
+  const [maids, setMaids] = useState<Maid[]>([]);
+  const [teams, setTeams] = useState<MaidTeam[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // Form states
+  const [newMaidName, setNewMaidName] = useState('');
+  const [newMaidPhone, setNewMaidPhone] = useState('');
+  
+  const [newTeamName, setNewTeamName] = useState('');
+  const [selectedMaidsForTeam, setSelectedMaidsForTeam] = useState<string[]>([]);
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const [maidsRes, teamsRes] = await Promise.all([
+        fetch('/api/maids'),
+        fetch('/api/maid-teams')
+      ]);
+      setMaids(await maidsRes.json());
+      setTeams(await teamsRes.json());
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const createMaid = async () => {
+    if (!newMaidName) return;
+    await fetch('/api/maids', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newMaidName, phone: newMaidPhone })
+    });
+    setNewMaidName('');
+    setNewMaidPhone('');
+    fetchData();
+  };
+
+  const createTeam = async () => {
+    if (!newTeamName) return;
+    await fetch('/api/maid-teams', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newTeamName, memberIds: selectedMaidsForTeam })
+    });
+    setNewTeamName('');
+    setSelectedMaidsForTeam([]);
+    fetchData();
+  };
+
+  const toggleMaidSelection = (id: string) => {
+    setSelectedMaidsForTeam(prev => 
+      prev.includes(id) ? prev.filter(mId => mId !== id) : [...prev, id]
+    );
+  };
+
+  const cardStyle = { background: '#fff', borderRadius: 12, padding: 20, boxShadow: '0 1px 3px rgba(0,0,0,0.1)' };
+  const inputStyle = { width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: 8, marginBottom: 10 };
+  const btnStyle = { padding: '10px 16px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 };
+
+  if (loading) return <div>กำลังโหลด...</div>;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+      {/* Maids Section */}
+      <div style={cardStyle}>
+        <h2 style={{ fontSize: 18, marginTop: 0 }}>จัดการแม่บ้าน</h2>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 20 }}>
+          <input 
+            placeholder="ชื่อแม่บ้าน" 
+            value={newMaidName} 
+            onChange={e => setNewMaidName(e.target.value)} 
+            style={inputStyle} 
+          />
+          <input 
+            placeholder="เบอร์โทร (ไม่บังคับ)" 
+            value={newMaidPhone} 
+            onChange={e => setNewMaidPhone(e.target.value)} 
+            style={inputStyle} 
+          />
+          <button onClick={createMaid} style={{ ...btnStyle, whiteSpace: 'nowrap', height: 42 }}>เพิ่ม</button>
+        </div>
+
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+          {maids.map(m => (
+            <li key={m.id} style={{ padding: '10px 0', borderBottom: '1px solid #f3f4f6', display: 'flex', justifyContent: 'space-between' }}>
+              <div>
+                <strong>{m.name}</strong> 
+                {m.phone && <span style={{ color: '#6b7280', fontSize: 12, marginLeft: 10 }}>{m.phone}</span>}
+              </div>
+              <span style={{ fontSize: 12, color: m.active ? '#10b981' : '#ef4444' }}>{m.active ? 'ใช้งาน' : 'ระงับ'}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Teams Section */}
+      <div style={cardStyle}>
+        <h2 style={{ fontSize: 18, marginTop: 0 }}>จัดการทีม</h2>
+        <div style={{ marginBottom: 20 }}>
+          <input 
+            placeholder="ชื่อทีม" 
+            value={newTeamName} 
+            onChange={e => setNewTeamName(e.target.value)} 
+            style={inputStyle} 
+          />
+          <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>เลือกสมาชิกในทีม:</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14 }}>
+            {maids.map(m => (
+              <label key={m.id} style={{ background: '#f3f4f6', padding: '6px 12px', borderRadius: 20, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', border: selectedMaidsForTeam.includes(m.id) ? '2px solid #1e40af' : '2px solid transparent' }}>
+                <input 
+                  type="checkbox" 
+                  checked={selectedMaidsForTeam.includes(m.id)}
+                  onChange={() => toggleMaidSelection(m.id)}
+                  style={{ display: 'none' }}
+                />
+                {m.name}
+              </label>
+            ))}
+          </div>
+          <button onClick={createTeam} style={{ ...btnStyle, width: '100%' }}>สร้างทีมย่อย</button>
+        </div>
+
+        <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+          {teams.map(t => (
+            <li key={t.id} style={{ padding: '14px', background: '#f9fafb', borderRadius: 8, marginBottom: 10 }}>
+              <strong style={{ display: 'block', marginBottom: 6 }}>{t.name}</strong>
+              <div style={{ fontSize: 12, color: '#4b5563' }}>
+                สมาชิก: {t.members.map(m => m.maid.name).join(', ') || '-ไม่มีสมาชิก-'}
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
