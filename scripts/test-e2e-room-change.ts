@@ -27,6 +27,7 @@ import { PrismaClient, Prisma } from '@prisma/client';
 import {
   shuffleRoomInTx,
   moveRoomInTx,
+  splitSegmentInTx,
   listShuffleCandidates,
   listMoveCandidates,
   RoomChangeError,
@@ -430,6 +431,120 @@ async function main() {
     ok('roomA (current) excluded', !ids.includes(fx.roomA.id));
     ok('roomB (free, same type) included', ids.includes(fx.roomB.id));
     ok('roomC (free, cross type) included', ids.includes(fx.roomC.id));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('SPLIT — happy path (rate change, same room)');
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    const b = await createBooking({
+      num: 'SP1', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 100), checkOut: addDays(day0, 105),
+      status: 'confirmed', rate: 1000,
+    });
+    const seg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+    const res = await prisma.$transaction(
+      (tx) => splitSegmentInTx(tx, {
+        bookingId: b.id, segmentId: seg!.id,
+        splitDate: addDays(day0, 102),
+        newRate: 1500,
+        reason: 'rate adjusted mid-stay', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    ok('originalSegmentId returned', res.originalSegmentId === seg!.id);
+    ok('newSegmentId differs', res.newSegmentId !== seg!.id);
+    ok('nightsAfterSplit = 3', res.nightsAfterSplit === 3);
+    ok('billingImpact = 500 × 3 = 1500', res.billingImpact === '1500');
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    ok('2 segments after split', segs.length === 2);
+    ok('seg[0] rate unchanged', segs[0].rate.toString() === '1000');
+    ok('seg[1] rate = 1500', segs[1].rate.toString() === '1500');
+    ok('both segments same room', segs[0].roomId === fx.roomA.id && segs[1].roomId === fx.roomA.id);
+    const hist = await prisma.roomMoveHistory.findFirst({
+      where: { bookingId: b.id, mode: 'SPLIT' },
+    });
+    ok('history mode=SPLIT', !!hist);
+    ok('history billingImpact = 1500', hist?.billingImpact.toString() === '1500');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('SPLIT — room + rate change');
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    const b = await createBooking({
+      num: 'SP2', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 110), checkOut: addDays(day0, 114),
+      status: 'confirmed', rate: 1000,
+    });
+    const seg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+    const res = await prisma.$transaction(
+      (tx) => splitSegmentInTx(tx, {
+        bookingId: b.id, segmentId: seg!.id,
+        splitDate: addDays(day0, 112),
+        newRoomId: fx.roomC.id,
+        newRate: 2000,
+        reason: 'upgrade mid-stay', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    ok('newSegment roomId is C', res.newSegmentId !== seg!.id);
+    const bAfter = await prisma.booking.findUnique({ where: { id: b.id } });
+    ok('booking.roomId updated to latest (C)', bAfter?.roomId === fx.roomC.id);
+    ok('version bumped', bAfter?.version === b.version + 1);
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    ok('seg[0] still roomA', segs[0].roomId === fx.roomA.id);
+    ok('seg[1] now roomC', segs[1].roomId === fx.roomC.id);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('SPLIT — rejects NO_CHANGE (same room + rate + type)');
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    const b = await createBooking({
+      num: 'SP3', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 120), checkOut: addDays(day0, 123),
+      status: 'confirmed', rate: 1000,
+    });
+    const seg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+    await okThrows('no-op split', 'NO_CHANGE', () =>
+      prisma.$transaction(
+        (tx) => splitSegmentInTx(tx, {
+          bookingId: b.id, segmentId: seg!.id,
+          splitDate: addDays(day0, 121),
+          newRate: 1000,  // same as current
+          reason: 'x', expectedVersion: b.version, createdBy: 'e2e',
+        }),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('SPLIT — rejects out-of-range splitDate');
+  // ─────────────────────────────────────────────────────────────────────────
+  {
+    const b = await createBooking({
+      num: 'SP4', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 130), checkOut: addDays(day0, 133),
+      status: 'confirmed', rate: 1000,
+    });
+    const seg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+    await okThrows('splitDate = fromDate', 'INVALID_SPLIT_DATE', () =>
+      prisma.$transaction(
+        (tx) => splitSegmentInTx(tx, {
+          bookingId: b.id, segmentId: seg!.id,
+          splitDate: addDays(day0, 130),  // == fromDate
+          newRate: 2000,
+          reason: 'x', expectedVersion: b.version, createdBy: 'e2e',
+        }),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
   }
 
   // ─── Summary ─────────────────────────────────────────────────────────────

@@ -4,11 +4,14 @@ import { useState, useEffect } from 'react';
 import type { BookingItem, RoomItem } from '../lib/types';
 import { STATUS_STYLE, BOOKING_TYPE_LABEL, SOURCE_LABEL, FONT } from '../lib/constants';
 import { fmtThaiLong, fmtCurrency, guestDisplayName, diffDays, parseUTCDate } from '../lib/date-utils';
-import { fmtDateTime } from '@/lib/date-format';
+import { fmtDateTime, fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
 import InvoiceModal from '@/components/invoice/InvoiceModal';
+import MoveRoomDialog from './MoveRoomDialog';
+import SplitSegmentDialog from './SplitSegmentDialog';
 import type { InvoiceDocumentData } from '@/components/invoice/types';
+import { useToast } from '@/components/ui';
 
 interface DetailPanelProps {
   booking: BookingItem | null;
@@ -72,12 +75,21 @@ const PAYMENT_METHODS = [
   { value: 'credit_card', label: '💳 บัตรเครดิต' },
 ];
 
+// Payment methods accepted by the add-service endpoint
+const SVC_PAYMENT_METHODS = [
+  { value: 'cash',          label: '💵 เงินสด' },
+  { value: 'credit_card',   label: '💳 บัตรเครดิต' },
+  { value: 'bank_transfer', label: '🏦 โอนเงิน' },
+  { value: 'qr_code',       label: '📱 QR Code' },
+];
+
 export default function DetailPanel({
   booking,
   room,
   onClose,
   onRefresh,
 }: DetailPanelProps): JSX.Element {
+  const toast = useToast();
   const [loading, setLoading]         = useState<boolean>(false);
   const [error, setError]             = useState<string>('');
   const [activeTab, setActiveTab]     = useState<'details' | 'activity' | 'billing'>('details');
@@ -85,6 +97,8 @@ export default function DetailPanel({
   const [logsLoading, setLogsLoading] = useState(false);
 
   // ── Billing tab: invoice list ─────────────────────────────────────────────
+  const [moveDialogOpen, setMoveDialogOpen]   = useState(false);
+  const [splitDialogOpen, setSplitDialogOpen] = useState(false);
   const [billingInvoices, setBillingInvoices] = useState<BillingInvoice[]>([]);
   const [billingLoading, setBillingLoading]   = useState(false);
   const [reprintData,  setReprintData]        = useState<ReceiptData | null>(null);
@@ -109,21 +123,65 @@ export default function DetailPanel({
   const [cashSessionId,   setCashSessionId]   = useState<string | null>(null);
 
   // ── Check-out payment step ────────────────────────────────────────────────
-  // 'idle'    → normal action buttons
-  // 'collect' → show outstanding + payment method selection
-  const [checkoutStep,          setCheckoutStep]          = useState<'idle' | 'collect'>('idle');
+  // 'idle'      → normal action buttons
+  // 'collect'   → show outstanding + payment method selection
+  // 'bad_debt'  → bad-debt reason form (checkout without collecting payment)
+  const [checkoutStep,          setCheckoutStep]          = useState<'idle' | 'collect' | 'bad_debt'>('idle');
+  const [badDebtNote,           setBadDebtNote]           = useState<string>('');
   const [checkoutPayMethod,     setCheckoutPayMethod]     = useState<string>('cash');
   const [checkoutCashSessionId, setCheckoutCashSessionId] = useState<string | null>(null);
   // Actual outstanding fetched from folio (replaces stale booking.totalPaid calculation)
   const [checkoutFolioBalance,  setCheckoutFolioBalance]  = useState<number | null>(null);
+  // Separate loading flag so we can distinguish "still fetching" vs "fetched but no folio"
+  const [folioBalanceLoading,   setFolioBalanceLoading]   = useState<boolean>(false);
+
+  // ── Extend booking step ───────────────────────────────────────────────────
+  // 'idle'    → normal action buttons
+  // 'form'    → date picker + charge preview
+  // 'payment' → choose to collect now or pay later
+  const [extendStep,        setExtendStep]        = useState<'idle' | 'form' | 'payment'>('idle');
+  const [extendNewCheckOut, setExtendNewCheckOut] = useState<string>('');
+  const [extendNewRate,     setExtendNewRate]      = useState<string>('');
+  const [extendCollectNow,  setExtendCollectNow]   = useState<boolean>(true);
+  const [extendPayMethod,   setExtendPayMethod]    = useState<string>('cash');
+  const [extendCashSessId,  setExtendCashSessId]   = useState<string | null>(null);
+  const [extendNotes,       setExtendNotes]        = useState<string>('');
+
+  // ── Add Extra Service step ────────────────────────────────────────────────
+  // 'idle'    → normal action buttons
+  // 'form'    → product catalogue + cart
+  // 'payment' → collect now / later + method
+  const [serviceStep,      setServiceStep]      = useState<'idle' | 'form' | 'payment'>('idle');
+  // Cart items
+  const [svcCart,          setSvcCart]          = useState<{ tempId: string; description: string; qty: number; unitPrice: number; unit?: string }[]>([]);
+  // Currently selected product / manual entry (pending add to cart)
+  const [svcPendingDesc,   setSvcPendingDesc]   = useState<string>('');
+  const [svcPendingPrice,  setSvcPendingPrice]  = useState<number>(0);
+  const [svcPendingUnit,   setSvcPendingUnit]   = useState<string>('');
+  const [svcPendingQty,    setSvcPendingQty]    = useState<number>(1);
+  // Payment
+  const [svcCollectNow,    setSvcCollectNow]    = useState<boolean>(true);
+  const [svcPayMethod,     setSvcPayMethod]     = useState<string>('cash');
+  const [svcCashSessId,    setSvcCashSessId]    = useState<string>('');
+  const [svcNotes,         setSvcNotes]         = useState<string>('');
+  // Product catalogue
+  const [svcProducts,      setSvcProducts]      = useState<{ id: string; name: string; price: number; unit?: string; category: string }[]>([]);
+  const [svcSearch,        setSvcSearch]        = useState<string>('');
 
   // ── Receipt modal ─────────────────────────────────────────────────────────
   const [receiptData, setReceiptData] = useState<ReceiptData | null>(null);
 
   const isOpen = booking !== null && room !== null;
 
-  // Reset all steps when panel opens a new booking
+  // Reset all steps when panel opens a new booking.
+  // IMPORTANT: loading states MUST be reset here too — if an in-flight
+  // request never completed (network error, unmount, etc.) the loading flag
+  // stays true and disables every button in the newly-opened panel.
   useEffect(() => {
+    setLoading(false);
+    setLogsLoading(false);
+    setBillingLoading(false);
+    setBillingPayLoading(false);
     setCheckinStep('idle');
     setDepositAmount(0);
     setDepositMethod('cash');
@@ -134,6 +192,27 @@ export default function DetailPanel({
     setCheckoutPayMethod('cash');
     setCheckoutCashSessionId(null);
     setCheckoutFolioBalance(null);
+    setFolioBalanceLoading(false);
+    setBadDebtNote('');
+    setExtendStep('idle');
+    setExtendNewCheckOut('');
+    setExtendNewRate('');
+    setExtendCollectNow(true);
+    setExtendPayMethod('cash');
+    setExtendCashSessId(null);
+    setExtendNotes('');
+    setServiceStep('idle');
+    setSvcCart([]);
+    setSvcPendingDesc('');
+    setSvcPendingPrice(0);
+    setSvcPendingUnit('');
+    setSvcPendingQty(1);
+    setSvcCollectNow(true);
+    setSvcPayMethod('cash');
+    setSvcCashSessId('');
+    setSvcNotes('');
+    setSvcProducts([]);
+    setSvcSearch('');
     setReceiptData(null);
     setReprintData(null);
     setInvoiceDoc(null);
@@ -166,20 +245,59 @@ export default function DetailPanel({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkoutPayMethod, booking?.id, checkoutStep]);
 
+  // Auto-fetch current open cash session for extend payment
+  useEffect(() => {
+    if (extendStep !== 'payment' || !extendCollectNow || extendPayMethod !== 'cash') {
+      setExtendCashSessId(null);
+      return;
+    }
+    fetch('/api/cash-sessions/current')
+      .then(r => r.json())
+      .then(d => setExtendCashSessId(d.session?.id ?? null))
+      .catch(() => setExtendCashSessId(null));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extendPayMethod, extendCollectNow, extendStep, booking?.id]);
+
+  // Fetch product catalogue when entering the service form step
+  useEffect(() => {
+    if (serviceStep !== 'form') return;
+    fetch('/api/products')
+      .then(r => r.json())
+      .then((products: { id: string; name: string; price: number; unit?: string; category: string }[]) => setSvcProducts(products))
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceStep]);
+
+  // Auto-fetch current open cash session for add-service payment
+  useEffect(() => {
+    if (serviceStep !== 'payment' || !svcCollectNow || svcPayMethod !== 'cash') {
+      setSvcCashSessId('');
+      return;
+    }
+    fetch('/api/cash-sessions/current')
+      .then(r => r.json())
+      .then(d => setSvcCashSessId(d.session?.id ?? ''))
+      .catch(() => setSvcCashSessId(''));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [svcPayMethod, svcCollectNow, serviceStep, booking?.id]);
+
   // Fetch actual folio balance when entering checkout collect step.
-  // This replaces the stale booking.totalPaid calculation and correctly reflects
-  // any payment already collected at check-in or from the billing tab.
+  // Uses folioBalanceLoading (not checkoutFolioBalance===null) to drive the
+  // "กำลังตรวจสอบ..." indicator so that a missing-folio result (null) no
+  // longer leaves the spinner stuck forever.
   useEffect(() => {
     if (checkoutStep !== 'collect' || !booking?.id) return;
+    setFolioBalanceLoading(true);
+    setCheckoutFolioBalance(null);
     fetch(`/api/bookings/${booking.id}/folio`)
       .then(r => r.json())
       .then((folio: { balance?: number } | null) => {
         // folio.balance = totalCharges - totalPayments (from recalculateFolioBalance)
-        // A positive balance means money still owed; negative or zero = fully paid.
         const balance = folio ? Math.max(0, Number(folio.balance ?? 0)) : null;
         setCheckoutFolioBalance(balance);
       })
-      .catch(() => setCheckoutFolioBalance(null));
+      .catch(() => setCheckoutFolioBalance(null))
+      .finally(() => setFolioBalanceLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [checkoutStep, booking?.id]);
 
@@ -281,8 +399,11 @@ export default function DetailPanel({
       // Reload billing tab invoices & show receipt
       await loadBillingInvoices(booking.id);
       if (data.receipt) setReceiptData(data.receipt);
+      toast.success('บันทึกการชำระเงินสำเร็จ');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('ชำระเงินไม่สำเร็จ', msg);
     } finally {
       setBillingPayLoading(false);
     }
@@ -296,7 +417,9 @@ export default function DetailPanel({
       if (!res.ok || !data.document) throw new Error(data.error ?? 'ไม่พบข้อมูล');
       setInvoiceDoc(data.document);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้');
+      const msg = err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้';
+      setError(msg);
+      toast.error('โหลดใบแจ้งหนี้ไม่สำเร็จ', msg);
     }
   };
 
@@ -307,7 +430,9 @@ export default function DetailPanel({
       if (!res.ok || !data.receipt) throw new Error(data.error ?? 'ไม่พบข้อมูล');
       setReprintData(data.receipt);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'ไม่สามารถโหลดใบเสร็จได้');
+      const msg = err instanceof Error ? err.message : 'ไม่สามารถโหลดใบเสร็จได้';
+      setError(msg);
+      toast.error('โหลดใบเสร็จไม่สำเร็จ', msg);
     }
   };
 
@@ -318,7 +443,9 @@ export default function DetailPanel({
       if (!res.ok || !data.document) throw new Error(data.error ?? 'ไม่พบข้อมูล');
       setInvoiceDoc(data.document);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้');
+      const msg = err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้';
+      setError(msg);
+      toast.error('โหลดใบแจ้งหนี้ไม่สำเร็จ', msg);
     }
   };
 
@@ -358,6 +485,7 @@ export default function DetailPanel({
       setCheckinStep('idle');
       setLoading(false);
       onRefresh();
+      toast.success('เช็คอินสำเร็จ');
       // Show receipt if payment was collected
       if (data.receipt) {
         setReceiptData(data.receipt);
@@ -365,7 +493,99 @@ export default function DetailPanel({
         onClose();
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('เช็คอินไม่สำเร็จ', msg);
+      setLoading(false);
+    }
+  };
+
+  // ── Extend booking handler ────────────────────────────────────────────────
+  const handleExtendBooking = async (): Promise<void> => {
+    if (!booking || loading || !extendNewCheckOut) return;
+    setLoading(true);
+    setError('');
+    try {
+      const effectiveRate = extendNewRate ? parseFloat(extendNewRate) : Number(booking.rate);
+      const oldOut  = new Date(booking.checkOut);
+      const newOut  = new Date(`${extendNewCheckOut}T00:00:00.000Z`);
+      const extraDays = Math.round((newOut.getTime() - oldOut.getTime()) / 86_400_000);
+
+      const payload: Record<string, unknown> = {
+        newCheckOut: extendNewCheckOut,
+        newRate:     extendNewRate ? effectiveRate : undefined,
+        collectNow:  extendCollectNow && extraDays * effectiveRate > 0,
+        notes:       extendNotes || undefined,
+      };
+      if (extendCollectNow && extraDays * effectiveRate > 0) {
+        payload.paymentMethod = extendPayMethod;
+        if (extendPayMethod === 'cash') payload.cashSessionId = extendCashSessId;
+      }
+
+      const res = await fetch(`/api/bookings/${booking.id}/extend`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+      });
+      const data = await res.json() as { success?: boolean; error?: string };
+      if (!res.ok || !data.success) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      setExtendStep('idle');
+      setLoading(false);
+      onRefresh();
+      toast.success('ขยายเวลาการจองสำเร็จ');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('ขยายเวลาการจองไม่สำเร็จ', msg);
+      setLoading(false);
+    }
+  };
+
+  // ── Add extra service handler ─────────────────────────────────────────────
+  const handleAddService = async (): Promise<void> => {
+    if (!booking || loading || svcCart.length === 0) return;
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(`/api/bookings/${booking.id}/add-service`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: svcCart.map(c => ({
+            description: c.description,
+            quantity:    c.qty,
+            unitPrice:   c.unitPrice,
+          })),
+          collectNow:    svcCollectNow,
+          paymentMethod: svcCollectNow ? svcPayMethod : undefined,
+          cashSessionId: svcCollectNow && svcPayMethod === 'cash' ? svcCashSessId : undefined,
+          notes: svcNotes || undefined,
+        }),
+      });
+      const data = await res.json() as { success?: boolean; error?: string };
+      if (!res.ok || !data.success) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      // Reset all svc* states
+      setServiceStep('idle');
+      setSvcCart([]);
+      setSvcPendingDesc('');
+      setSvcPendingPrice(0);
+      setSvcPendingUnit('');
+      setSvcPendingQty(1);
+      setSvcCollectNow(true);
+      setSvcPayMethod('cash');
+      setSvcCashSessId('');
+      setSvcNotes('');
+      setSvcProducts([]);
+      setSvcSearch('');
+      setLoading(false);
+      onRefresh();
+      toast.success('เพิ่มบริการสำเร็จ');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('เพิ่มบริการไม่สำเร็จ', msg);
       setLoading(false);
     }
   };
@@ -389,10 +609,14 @@ export default function DetailPanel({
         } catch { /* non-JSON */ }
         throw new Error(errMsg);
       }
+      setLoading(false);
       onClose();
       onRefresh();
+      toast.success('ดำเนินการสำเร็จ');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Unknown error occurred');
+      const msg = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(msg);
+      toast.error('ดำเนินการไม่สำเร็จ', msg);
       setLoading(false);
     }
   };
@@ -424,14 +648,49 @@ export default function DetailPanel({
       }
 
       setCheckoutStep('idle');
+      setLoading(false);
       onRefresh();
+      toast.success('เช็คเอาท์สำเร็จ');
       if (data.receipt) {
         setReceiptData(data.receipt);
       } else {
         onClose();
       }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('เช็คเอาท์ไม่สำเร็จ', msg);
+      setLoading(false);
+    }
+  };
+
+  // ── Bad-debt checkout (checkout without collecting payment) ────────────────
+  const handleBadDebtCheckout = async (): Promise<void> => {
+    if (!booking || loading) return;
+    const note = badDebtNote.trim();
+    if (!note) { setError('กรุณาระบุเหตุผล'); toast.warning('กรุณาระบุเหตุผล'); return; }
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bookingId: booking.id, badDebt: true, badDebtNote: note }),
+      });
+      const data = await res.json() as { success?: boolean; error?: string };
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setCheckoutStep('idle');
+      setLoading(false);
+      setBadDebtNote('');
+      onRefresh();
+      onClose();
+      toast.success('บันทึกหนี้สูญสำเร็จ');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('บันทึกหนี้สูญไม่สำเร็จ', msg);
       setLoading(false);
     }
   };
@@ -451,16 +710,19 @@ export default function DetailPanel({
   const statusStyle = booking ? STATUS_STYLE[booking.status] : null;
 
   // Outstanding balance that will be collected at checkout.
-  // Prefer the live folio balance (fetched when checkout step opens) — it correctly
-  // reflects payments already made at check-in or from the billing tab.
-  // Fall back to booking.totalPaid calculation only when folio hasn't loaded yet.
+  // Priority: (1) live folio balance from API, (2) fallback from booking.totalPaid.
+  // While folioBalanceLoading is true we keep outstanding at 0 so the confirm
+  // button stays disabled until we know the real amount.
   const checkoutOutstanding =
-    checkoutFolioBalance !== null
-      ? checkoutFolioBalance
-      : booking
-        ? Math.max(0, total - (booking.totalPaid ?? 0))
-        : 0;
+    folioBalanceLoading
+      ? 0
+      : checkoutFolioBalance !== null
+        ? checkoutFolioBalance
+        : booking
+          ? Math.max(0, total - (booking.totalPaid ?? 0))
+          : 0;
   const checkoutCashMissing =
+    !folioBalanceLoading &&
     checkoutOutstanding > 0 &&
     checkoutPayMethod === 'cash' &&
     !checkoutCashSessionId;
@@ -516,7 +778,7 @@ export default function DetailPanel({
         </div>
 
         {/* Tab Navigation */}
-        {booking && checkinStep === 'idle' && checkoutStep === 'idle' && (
+        {booking && checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && (
           <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', padding: '0 20px' }}>
             {(['details', 'billing', 'activity'] as const).map((tab) => (
               <button
@@ -550,6 +812,49 @@ export default function DetailPanel({
           </div>
         )}
 
+        {/* ── CHECK-OUT BAD DEBT STEP header ── */}
+        {booking && checkoutStep === 'bad_debt' && (
+          <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: '#fff7ed' }}>
+            <span style={{ fontSize: 18 }}>⚠️</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#c2410c' }}>เช็คเอาท์โดยไม่รับชำระเงิน</div>
+              <div style={{ fontSize: 11, color: '#ea580c' }}>ยอดค้างชำระ {fmtCurrency(checkoutOutstanding)} จะถูกบันทึกเป็นหนี้เสีย</div>
+            </div>
+          </div>
+        )}
+
+        {/* ── EXTEND STEP header ── */}
+        {booking && extendStep !== 'idle' && (
+          <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: '#faf5ff' }}>
+            <span style={{ fontSize: 18 }}>📅</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#6d28d9' }}>
+                ต่ออายุการจอง — ห้อง {room?.number}
+              </div>
+              <div style={{ fontSize: 11, color: '#a78bfa' }}>
+                {extendStep === 'form' ? 'ขั้นที่ 1: เลือกวันเช็คเอาท์ใหม่' : 'ขั้นที่ 2: เลือกวิธีชำระเงิน'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── ADD SERVICE STEP header ── */}
+        {booking && serviceStep !== 'idle' && (
+          <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: '#f0fdf4' }}>
+            <span style={{ fontSize: 18 }}>🛒</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#166534' }}>
+                เพิ่มบริการ/สินค้า — ห้อง {room?.number}
+              </div>
+              <div style={{ fontSize: 11, color: '#4ade80' }}>
+                {serviceStep === 'form'
+                  ? `ขั้นที่ 1: เลือกสินค้า/บริการ${svcCart.length > 0 ? ` (${svcCart.length} รายการในตะกร้า)` : ''}`
+                  : 'ขั้นที่ 2: ยืนยันการชำระเงิน'}
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── CHECK-OUT COLLECT STEP header ── */}
         {booking && checkoutStep === 'collect' && (
           <div style={{ padding: '12px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', alignItems: 'center', gap: 10, backgroundColor: booking.cityLedgerAccountId ? '#f5f3ff' : '#eff6ff' }}>
@@ -561,7 +866,7 @@ export default function DetailPanel({
               <div style={{ fontSize: 11, color: booking.cityLedgerAccountId ? '#a78bfa' : '#60a5fa' }}>
                 {booking.cityLedgerAccountId
                   ? `บิลจะถูกส่งไปยัง ${booking.cityLedgerAccount?.companyName ?? 'บัญชี City Ledger'}`
-                  : checkoutFolioBalance === null
+                  : folioBalanceLoading
                     ? 'กำลังตรวจสอบยอดค้างชำระ...'
                     : checkoutOutstanding > 0
                       ? `ยอดค้างชำระ ${fmtCurrency(checkoutOutstanding)} — เลือกช่องทางชำระ`
@@ -902,31 +1207,744 @@ export default function DetailPanel({
                     </button>
                     <button
                       onClick={handleCheckoutConfirm}
-                      disabled={loading || (!booking.cityLedgerAccountId && checkoutCashMissing)}
+                      disabled={loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)}
                       style={{
                         flex: 2, padding: '10px', borderRadius: 6,
                         background: booking.cityLedgerAccountId
                           ? '#7c3aed'
                           : (!booking.cityLedgerAccountId && checkoutCashMissing) ? '#93c5fd' : '#3b82f6',
                         color: '#fff', border: 'none', fontSize: 13, fontWeight: 700,
-                        cursor: (loading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 'not-allowed' : 'pointer',
-                        opacity: (loading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 0.6 : 1,
+                        cursor: (loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 'not-allowed' : 'pointer',
+                        opacity: (loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 0.6 : 1,
                         fontFamily: FONT,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                       }}
                     >
                       {loading
                         ? '⏳ กำลังดำเนินการ...'
-                        : booking.cityLedgerAccountId
-                          ? '🏢 บันทึกเข้า City Ledger และเช็คเอาท์'
-                          : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
+                        : folioBalanceLoading
+                          ? '⏳ กำลังตรวจสอบยอด...'
+                          : booking.cityLedgerAccountId
+                            ? '🏢 บันทึกเข้า City Ledger และเช็คเอาท์'
+                            : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
+                    </button>
+                  </div>
+
+                  {/* Bad-debt escape hatch — only when there is outstanding AND not City Ledger */}
+                  {!booking.cityLedgerAccountId && checkoutOutstanding > 0 && !folioBalanceLoading && (
+                    <button
+                      onClick={() => { setError(''); setBadDebtNote(''); setCheckoutStep('bad_debt'); }}
+                      disabled={loading}
+                      style={{
+                        width: '100%', marginTop: 10, padding: '9px', borderRadius: 6,
+                        background: 'transparent', color: '#c2410c',
+                        border: '1.5px solid #fb923c', fontSize: 12, fontWeight: 600,
+                        cursor: loading ? 'not-allowed' : 'pointer', fontFamily: FONT,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      }}
+                    >
+                      ⚠️ เช็คเอาท์ (ไม่สามารถเก็บเงินได้)
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* ─── BAD DEBT CHECKOUT FORM ──────────────────────────────────── */}
+              {checkoutStep === 'bad_debt' && (
+                <div>
+                  <div style={{ marginBottom: 16, padding: '14px 16px', background: '#fff7ed', border: '1px solid #fed7aa', borderRadius: 10 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: '#c2410c', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      ⚠️ เช็คเอาท์โดยไม่รับชำระเงิน
+                    </div>
+                    <div style={{ fontSize: 12, color: '#9a3412', lineHeight: 1.5 }}>
+                      ยอดค้างชำระ <strong>{fmtCurrency(checkoutOutstanding)}</strong> จะถูกบันทึกเป็น<strong>หนี้เสีย</strong> ในบัญชี
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: 16 }}>
+                    <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6 }}>
+                      เหตุผล <span style={{ color: '#dc2626' }}>*</span>
+                    </label>
+                    <textarea
+                      value={badDebtNote}
+                      onChange={e => setBadDebtNote(e.target.value)}
+                      placeholder='ระบุเหตุผล เช่น ลูกค้าหนี ไม่ยู่รับสาย ฯลฯ'
+                      rows={3}
+                      style={{
+                        width: '100%', boxSizing: 'border-box',
+                        padding: '9px 12px', borderRadius: 8,
+                        border: `1.5px solid ${error && !badDebtNote.trim() ? '#f87171' : '#d1d5db'}`,
+                        fontSize: 13, fontFamily: FONT, resize: 'vertical',
+                        outline: 'none', color: '#1f2937',
+                      }}
+                    />
+                  </div>
+
+                  {error && (
+                    <div style={{ marginBottom: 12, padding: '10px 14px', background: '#fee2e2', borderRadius: 8, fontSize: 12, color: '#991b1b' }}>
+                      {error}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => { setCheckoutStep('collect'); setError(''); }}
+                      disabled={loading}
+                      style={{ flex: 1, padding: '10px', borderRadius: 6, background: '#e5e7eb', color: '#1f2937', border: 'none', fontSize: 13, fontWeight: 500, cursor: 'pointer', fontFamily: FONT }}
+                    >
+                      ← กลับ
+                    </button>
+                    <button
+                      onClick={handleBadDebtCheckout}
+                      disabled={loading || !badDebtNote.trim()}
+                      style={{
+                        flex: 2, padding: '10px', borderRadius: 6,
+                        background: (loading || !badDebtNote.trim()) ? '#fca5a5' : '#ef4444',
+                        color: '#fff', border: 'none', fontSize: 13, fontWeight: 700,
+                        cursor: (loading || !badDebtNote.trim()) ? 'not-allowed' : 'pointer',
+                        opacity: (loading || !badDebtNote.trim()) ? 0.7 : 1,
+                        fontFamily: FONT,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                      }}
+                    >
+                      {loading ? '⏳ กำลังดำเนินการ...' : '✅ ยืนยัน — บันทึกเป็นหนี้เสีย'}
                     </button>
                   </div>
                 </div>
               )}
 
+              {/* ─── EXTEND BOOKING STEP ─────────────────────────────────────── */}
+              {extendStep !== 'idle' && booking && (() => {
+                const oldOut      = new Date(booking.checkOut);
+                const newOut      = extendNewCheckOut ? new Date(`${extendNewCheckOut}T00:00:00.000Z`) : null;
+                const extraDays   = newOut && newOut > oldOut
+                  ? Math.round((newOut.getTime() - oldOut.getTime()) / 86_400_000)
+                  : 0;
+                const effectiveRate = extendNewRate ? parseFloat(extendNewRate) || Number(booking.rate) : Number(booking.rate);
+                const extraCharge   = +(extraDays * effectiveRate).toFixed(2);
+                const isValid       = extraDays > 0;
+                const cashMissing   = extendCollectNow && extendPayMethod === 'cash' && !extendCashSessId;
+
+                return (
+                  <div>
+                    {/* ── FORM STEP ──────────────────────────────────────────── */}
+                    {extendStep === 'form' && (
+                      <div>
+                        {/* Current checkout summary */}
+                        <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: '#6d28d9', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            สรุปการจองปัจจุบัน
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 13 }}>
+                            <div>
+                              <div style={{ fontSize: 11, color: '#9ca3af' }}>เช็คเอาท์เดิม</div>
+                              <div style={{ fontWeight: 700 }}>{fmtDateTime(booking.checkOut)}</div>
+                            </div>
+                            <div>
+                              <div style={{ fontSize: 11, color: '#9ca3af' }}>ราคา / {booking.bookingType === 'daily' ? 'คืน' : 'เดือน'}</div>
+                              <div style={{ fontWeight: 700 }}>{fmtCurrency(booking.rate)}</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* New checkout date */}
+                        <div style={{ marginBottom: 14 }}>
+                          <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
+                            📅 วันเช็คเอาท์ใหม่ *
+                          </label>
+                          <input
+                            type="date"
+                            value={extendNewCheckOut}
+                            min={(() => {
+                              const d = new Date(booking.checkOut);
+                              d.setDate(d.getDate() + 1);
+                              return d.toISOString().slice(0, 10);
+                            })()}
+                            onChange={e => setExtendNewCheckOut(e.target.value)}
+                            style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #d1d5db', borderRadius: 8, fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: FONT }}
+                          />
+                        </div>
+
+                        {/* Optional rate change (monthly only) */}
+                        {booking.bookingType !== 'daily' && (
+                          <div style={{ marginBottom: 14 }}>
+                            <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
+                              💰 ราคาใหม่ต่อเดือน (ถ้าเปลี่ยน)
+                            </label>
+                            <input
+                              type="number"
+                              placeholder={String(booking.rate)}
+                              value={extendNewRate}
+                              onChange={e => setExtendNewRate(e.target.value)}
+                              style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #d1d5db', borderRadius: 8, fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: FONT }}
+                            />
+                          </div>
+                        )}
+
+                        {/* Notes */}
+                        <div style={{ marginBottom: 14 }}>
+                          <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 6 }}>
+                            📝 หมายเหตุ (ไม่บังคับ)
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="เช่น ลูกค้าขอต่อเพิ่มเนื่องจาก..."
+                            value={extendNotes}
+                            onChange={e => setExtendNotes(e.target.value)}
+                            style={{ width: '100%', padding: '9px 12px', border: '1.5px solid #d1d5db', borderRadius: 8, fontSize: 14, outline: 'none', boxSizing: 'border-box', fontFamily: FONT }}
+                          />
+                        </div>
+
+                        {/* Live preview */}
+                        {isValid && (
+                          <div style={{ background: '#faf5ff', border: '1.5px solid #c4b5fd', borderRadius: 10, padding: '12px 16px', marginBottom: 16 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#6d28d9', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              สรุปการต่ออายุ
+                            </div>
+                            <div style={{ display: 'grid', gap: 6, fontSize: 13 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: '#6b7280' }}>จำนวนวันที่ต่อเพิ่ม</span>
+                                <span style={{ fontWeight: 600 }}>{extraDays} วัน</span>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <span style={{ color: '#6b7280' }}>ราคาต่อ{booking.bookingType === 'daily' ? 'คืน' : 'วัน'}</span>
+                                <span style={{ fontWeight: 600 }}>{fmtCurrency(effectiveRate)}</span>
+                              </div>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px solid #c4b5fd', paddingTop: 8, marginTop: 2 }}>
+                                <span style={{ fontWeight: 700, color: '#6d28d9' }}>ค่าใช้จ่ายเพิ่มเติม</span>
+                                <span style={{ fontWeight: 800, fontSize: 16, color: '#6d28d9' }}>{fmtCurrency(extraCharge)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {error && <div style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                        {/* Buttons */}
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            onClick={() => { setExtendStep('idle'); setError(''); }}
+                            style={{ flex: 1, padding: '10px 12px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}
+                          >
+                            ← ยกเลิก
+                          </button>
+                          <button
+                            onClick={() => { setError(''); setExtendStep('payment'); }}
+                            disabled={!isValid}
+                            style={{ flex: 2, padding: '10px 12px', background: isValid ? '#7c3aed' : '#e9d5ff', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: isValid ? 'pointer' : 'not-allowed', fontFamily: FONT }}
+                          >
+                            ดำเนินการต่อ →
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── PAYMENT STEP ───────────────────────────────────────── */}
+                    {extendStep === 'payment' && (
+                      <div>
+                        {/* Charge summary */}
+                        <div style={{ background: '#faf5ff', border: '1.5px solid #c4b5fd', borderRadius: 10, padding: '14px 16px', marginBottom: 16 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: '#6d28d9', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            สรุปค่าใช้จ่ายเพิ่มเติม
+                          </div>
+                          <div style={{ display: 'grid', gap: 6, fontSize: 13 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: '#6b7280' }}>ต่ออายุ {extraDays} วัน × {fmtCurrency(effectiveRate)}</span>
+                              <span style={{ fontWeight: 600 }}>{fmtCurrency(extraCharge)}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ color: '#6b7280' }}>เช็คเอาท์ใหม่</span>
+                              <span style={{ fontWeight: 600 }}>{extendNewCheckOut}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Collect now toggle */}
+                        {extraCharge > 0 && (
+                          <div style={{ marginBottom: 14 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 8 }}>
+                              💳 การชำระเงิน
+                            </div>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                onClick={() => setExtendCollectNow(true)}
+                                style={{ flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, border: `1.5px solid ${extendCollectNow ? '#7c3aed' : '#e5e7eb'}`, background: extendCollectNow ? '#f5f3ff' : '#fff', color: extendCollectNow ? '#6d28d9' : '#6b7280', cursor: 'pointer' }}
+                              >
+                                💰 รับชำระตอนนี้
+                              </button>
+                              <button
+                                onClick={() => setExtendCollectNow(false)}
+                                style={{ flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, border: `1.5px solid ${!extendCollectNow ? '#7c3aed' : '#e5e7eb'}`, background: !extendCollectNow ? '#f5f3ff' : '#fff', color: !extendCollectNow ? '#6d28d9' : '#6b7280', cursor: 'pointer' }}
+                              >
+                                ⏸ เก็บเงินภายหลัง
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Payment method (if collect now) */}
+                        {extendCollectNow && extraCharge > 0 && (
+                          <div style={{ marginBottom: 14, padding: '12px 14px', background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
+                              💳 ช่องทางชำระเงิน
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {PAYMENT_METHODS.map(pm => (
+                                <button
+                                  key={pm.value}
+                                  onClick={() => setExtendPayMethod(pm.value)}
+                                  style={{
+                                    padding: '6px 14px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                                    border: `1.5px solid ${extendPayMethod === pm.value ? '#7c3aed' : '#e5e7eb'}`,
+                                    background: extendPayMethod === pm.value ? '#f5f3ff' : '#fff',
+                                    color: extendPayMethod === pm.value ? '#7c3aed' : '#6b7280',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  {pm.label}
+                                </button>
+                              ))}
+                            </div>
+                            {extendPayMethod === 'cash' && (
+                              <div style={{ marginTop: 8, fontSize: 11, color: extendCashSessId ? '#16a34a' : '#dc2626' }}>
+                                {extendCashSessId ? `✅ กะแคชเชียร์: ${extendCashSessId.slice(-6)}` : '⚠️ ไม่มีกะแคชเชียร์ที่เปิดอยู่'}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* "Pay later" info */}
+                        {!extendCollectNow && extraCharge > 0 && (
+                          <div style={{ marginBottom: 14, padding: '12px 14px', background: '#fffbeb', borderRadius: 8, border: '1px solid #fde68a', fontSize: 12, color: '#92400e' }}>
+                            💡 ค่าใช้จ่าย <strong>{fmtCurrency(extraCharge)}</strong> จะถูกบันทึกในโฟลิโอ และสามารถเก็บเงินได้ทีหลังจากแท็บ "💳 บิล" หรือตอนเช็คเอาท์
+                          </div>
+                        )}
+
+                        {error && <div style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{error}</div>}
+
+                        {/* Buttons */}
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            onClick={() => { setExtendStep('form'); setError(''); }}
+                            style={{ flex: 1, padding: '10px 12px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}
+                          >
+                            ← กลับ
+                          </button>
+                          <button
+                            onClick={handleExtendBooking}
+                            disabled={loading || (extendCollectNow && extraCharge > 0 && cashMissing)}
+                            style={{ flex: 2, padding: '10px 12px', background: loading ? '#e9d5ff' : '#7c3aed', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: loading ? 'not-allowed' : 'pointer', opacity: (extendCollectNow && extraCharge > 0 && cashMissing) ? 0.5 : 1, fontFamily: FONT }}
+                          >
+                            {loading
+                              ? '⏳ กำลังดำเนินการ...'
+                              : extendCollectNow && extraCharge > 0
+                                ? `✅ ยืนยันต่ออายุ + รับเงิน ${fmtCurrency(extraCharge)}`
+                                : '✅ ยืนยันต่ออายุ (ยังไม่รับชำระ)'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* ─── ADD SERVICE STEP ────────────────────────────────────────── */}
+              {serviceStep !== 'idle' && (() => {
+                const cartTotal   = +svcCart.reduce((s, c) => s + c.qty * c.unitPrice, 0).toFixed(2);
+                const pendingTotal = +(svcPendingQty * svcPendingPrice).toFixed(2);
+                const filteredProducts = svcProducts.filter(p =>
+                  p.name.toLowerCase().includes(svcSearch.toLowerCase()),
+                );
+                const svcCashMissing = svcCollectNow && svcPayMethod === 'cash' && !svcCashSessId;
+
+                const resetSvc = () => {
+                  setServiceStep('idle');
+                  setSvcCart([]);
+                  setSvcPendingDesc('');
+                  setSvcPendingPrice(0);
+                  setSvcPendingUnit('');
+                  setSvcPendingQty(1);
+                  setSvcCollectNow(true);
+                  setSvcPayMethod('cash');
+                  setSvcCashSessId('');
+                  setSvcNotes('');
+                  setSvcProducts([]);
+                  setSvcSearch('');
+                  setError('');
+                };
+
+                const addToCart = () => {
+                  if (!svcPendingDesc.trim() || svcPendingPrice <= 0) return;
+                  setSvcCart(prev => [...prev, {
+                    tempId:      `${Date.now()}-${Math.random()}`,
+                    description: svcPendingDesc.trim(),
+                    qty:         svcPendingQty,
+                    unitPrice:   svcPendingPrice,
+                    unit:        svcPendingUnit || undefined,
+                  }]);
+                  // Reset pending but keep search/products open
+                  setSvcPendingDesc('');
+                  setSvcPendingPrice(0);
+                  setSvcPendingUnit('');
+                  setSvcPendingQty(1);
+                };
+
+                return (
+                  <div>
+                    {/* ── FORM STEP ──────────────────────────────────────────── */}
+                    {serviceStep === 'form' && (
+                      <div>
+                        {/* Search bar */}
+                        <div style={{ marginBottom: 8 }}>
+                          <input
+                            type="text"
+                            placeholder="🔍 ค้นหาสินค้า/บริการ..."
+                            value={svcSearch}
+                            onChange={e => setSvcSearch(e.target.value)}
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '8px 12px', borderRadius: 8,
+                              border: '1.5px solid #d1d5db', fontSize: 13,
+                              fontFamily: FONT, outline: 'none',
+                            }}
+                          />
+                        </div>
+
+                        {/* Product catalogue list */}
+                        <div style={{ maxHeight: 150, overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: 8, marginBottom: 12 }}>
+                          {filteredProducts.length === 0 ? (
+                            <div style={{ padding: '14px 12px', fontSize: 12, color: '#9ca3af', textAlign: 'center' }}>
+                              {svcProducts.length === 0 ? 'กำลังโหลด...' : 'ไม่พบสินค้า'}
+                            </div>
+                          ) : (
+                            filteredProducts.map(p => {
+                              const isSelected = svcPendingDesc === p.name && svcPendingPrice === Number(p.price);
+                              return (
+                                <div
+                                  key={p.id}
+                                  onClick={() => {
+                                    setSvcPendingDesc(p.name);
+                                    setSvcPendingPrice(Number(p.price));
+                                    setSvcPendingUnit(p.unit ?? '');
+                                    setSvcPendingQty(1);
+                                  }}
+                                  style={{
+                                    padding: '7px 12px', cursor: 'pointer', fontSize: 13,
+                                    borderBottom: '1px solid #f3f4f6',
+                                    background: isSelected ? '#dcfce7' : '#fff',
+                                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                  }}
+                                >
+                                  <div>
+                                    <span style={{ fontWeight: isSelected ? 700 : 500, color: isSelected ? '#15803d' : '#1f2937' }}>
+                                      {p.name}
+                                    </span>
+                                    {p.unit && <span style={{ fontSize: 11, color: '#9ca3af', marginLeft: 4 }}>/ {p.unit}</span>}
+                                  </div>
+                                  <span style={{ fontSize: 12, fontWeight: 600, color: '#374151', flexShrink: 0 }}>
+                                    ฿{fmtBaht(Number(p.price))}
+                                  </span>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+
+                        {/* Pending-item editor */}
+                        <div style={{ background: '#f9fafb', border: '1.5px solid #e5e7eb', borderRadius: 10, padding: '10px 12px', marginBottom: 12 }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginBottom: 8 }}>
+                            {/* Description */}
+                            <input
+                              type="text"
+                              placeholder="ชื่อสินค้า / บริการ *"
+                              value={svcPendingDesc}
+                              onChange={e => setSvcPendingDesc(e.target.value)}
+                              style={{
+                                padding: '7px 10px', borderRadius: 7,
+                                border: '1.5px solid #d1d5db', fontSize: 13,
+                                fontFamily: FONT, outline: 'none', boxSizing: 'border-box', width: '100%',
+                              }}
+                            />
+                            {/* Quantity stepper */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                              <button
+                                onClick={() => setSvcPendingQty(q => Math.max(1, q - 1))}
+                                style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #d1d5db', background: '#fff', fontSize: 15, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                              >−</button>
+                              <span style={{ minWidth: 24, textAlign: 'center', fontSize: 13, fontWeight: 700, color: '#1f2937' }}>
+                                {svcPendingQty}
+                              </span>
+                              <button
+                                onClick={() => setSvcPendingQty(q => Math.min(999, q + 1))}
+                                style={{ width: 28, height: 28, borderRadius: 6, border: '1.5px solid #16a34a', background: '#f0fdf4', fontSize: 15, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#16a34a' }}
+                              >+</button>
+                            </div>
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, alignItems: 'center' }}>
+                            {/* Unit price */}
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={svcPendingPrice || ''}
+                              placeholder="ราคาต่อหน่วย (฿) *"
+                              onChange={e => setSvcPendingPrice(parseFloat(e.target.value) || 0)}
+                              style={{
+                                padding: '7px 10px', borderRadius: 7,
+                                border: '1.5px solid #d1d5db', fontSize: 13,
+                                fontFamily: FONT, outline: 'none', boxSizing: 'border-box', width: '100%',
+                              }}
+                            />
+                            {/* Add to cart button */}
+                            <button
+                              onClick={addToCart}
+                              disabled={!svcPendingDesc.trim() || svcPendingPrice <= 0}
+                              style={{
+                                padding: '7px 14px', borderRadius: 7, fontSize: 13, fontWeight: 700,
+                                border: 'none', cursor: (!svcPendingDesc.trim() || svcPendingPrice <= 0) ? 'not-allowed' : 'pointer',
+                                background: (!svcPendingDesc.trim() || svcPendingPrice <= 0) ? '#bbf7d0' : '#16a34a',
+                                color: '#fff', whiteSpace: 'nowrap', fontFamily: FONT,
+                              }}
+                            >
+                              + เพิ่ม
+                            </button>
+                          </div>
+                          {pendingTotal > 0 && (
+                            <div style={{ marginTop: 6, fontSize: 12, color: '#374151', textAlign: 'right' }}>
+                              {svcPendingQty} × ฿{fmtBaht(svcPendingPrice)} = <strong style={{ color: '#15803d' }}>฿{fmtBaht(pendingTotal)}</strong>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ── Cart ── */}
+                        {svcCart.length > 0 && (
+                          <div style={{ marginBottom: 12 }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                              🛒 ตะกร้า ({svcCart.length} รายการ)
+                            </div>
+                            <div style={{ border: '1.5px solid #86efac', borderRadius: 10, overflow: 'hidden' }}>
+                              {svcCart.map((item, idx) => (
+                                <div
+                                  key={item.tempId}
+                                  style={{
+                                    display: 'flex', alignItems: 'center', gap: 8,
+                                    padding: '8px 12px',
+                                    background: idx % 2 === 0 ? '#f0fdf4' : '#fff',
+                                    borderBottom: idx < svcCart.length - 1 ? '1px solid #bbf7d0' : 'none',
+                                  }}
+                                >
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: '#1f2937', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                      {item.description}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: '#6b7280' }}>
+                                      {item.qty} × ฿{fmtBaht(item.unitPrice)}
+                                    </div>
+                                  </div>
+                                  {/* Qty controls */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                                    <button
+                                      onClick={() => setSvcCart(prev => prev.map(c => c.tempId === item.tempId ? { ...c, qty: Math.max(1, c.qty - 1) } : c))}
+                                      style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #d1d5db', background: '#fff', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                    >−</button>
+                                    <span style={{ fontSize: 12, fontWeight: 700, minWidth: 20, textAlign: 'center' }}>{item.qty}</span>
+                                    <button
+                                      onClick={() => setSvcCart(prev => prev.map(c => c.tempId === item.tempId ? { ...c, qty: Math.min(999, c.qty + 1) } : c))}
+                                      style={{ width: 22, height: 22, borderRadius: 4, border: '1px solid #16a34a', background: '#f0fdf4', fontSize: 13, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#16a34a' }}
+                                    >+</button>
+                                  </div>
+                                  <div style={{ fontSize: 13, fontWeight: 700, color: '#15803d', minWidth: 60, textAlign: 'right' }}>
+                                    ฿{fmtBaht(item.qty * item.unitPrice)}
+                                  </div>
+                                  <button
+                                    onClick={() => setSvcCart(prev => prev.filter(c => c.tempId !== item.tempId))}
+                                    style={{ width: 22, height: 22, borderRadius: 4, border: 'none', background: '#fef2f2', color: '#dc2626', fontSize: 14, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+                                  >×</button>
+                                </div>
+                              ))}
+                              {/* Cart total */}
+                              <div style={{ padding: '8px 12px', background: '#dcfce7', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <span style={{ fontSize: 12, fontWeight: 700, color: '#166534' }}>รวมทั้งหมด</span>
+                                <span style={{ fontSize: 16, fontWeight: 800, color: '#15803d' }}>฿{fmtBaht(cartTotal)}</span>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {error && <div style={{ color: '#dc2626', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            onClick={resetSvc}
+                            style={{ flex: 1, padding: '10px 12px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}
+                          >
+                            ✕ ยกเลิก
+                          </button>
+                          <button
+                            onClick={() => { setError(''); setServiceStep('payment'); }}
+                            disabled={svcCart.length === 0}
+                            style={{
+                              flex: 2, padding: '10px 12px',
+                              background: svcCart.length === 0 ? '#bbf7d0' : '#16a34a',
+                              color: '#fff', border: 'none', borderRadius: 8,
+                              fontSize: 13, fontWeight: 700,
+                              cursor: svcCart.length === 0 ? 'not-allowed' : 'pointer',
+                              fontFamily: FONT,
+                            }}
+                          >
+                            ถัดไป → ({svcCart.length} รายการ)
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ── PAYMENT STEP ───────────────────────────────────────── */}
+                    {serviceStep === 'payment' && (
+                      <div>
+                        {/* Summary card — all cart items */}
+                        <div style={{ background: '#f0fdf4', border: '1.5px solid #86efac', borderRadius: 10, padding: '14px 16px', marginBottom: 16 }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: '#166534', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                            สรุปรายการ ({svcCart.length} รายการ)
+                          </div>
+                          <div style={{ display: 'grid', gap: 6 }}>
+                            {svcCart.map(item => (
+                              <div key={item.tempId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                                <span style={{ color: '#374151', flex: 1, marginRight: 8 }}>
+                                  {item.description}
+                                  <span style={{ color: '#9ca3af', fontSize: 11, marginLeft: 4 }}>× {item.qty}</span>
+                                </span>
+                                <span style={{ fontWeight: 600, color: '#1f2937', flexShrink: 0 }}>฿{fmtBaht(item.qty * item.unitPrice)}</span>
+                              </div>
+                            ))}
+                            <div style={{ borderTop: '1px solid #bbf7d0', paddingTop: 8, marginTop: 4, display: 'flex', justifyContent: 'space-between' }}>
+                              <span style={{ fontWeight: 700, color: '#166534' }}>รวม</span>
+                              <span style={{ fontWeight: 800, fontSize: 16, color: '#15803d' }}>฿{fmtBaht(cartTotal)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Collect now toggle */}
+                        <div style={{ marginBottom: 14 }}>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 8 }}>
+                            💳 การชำระเงิน
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              onClick={() => setSvcCollectNow(true)}
+                              style={{ flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, border: `1.5px solid ${svcCollectNow ? '#16a34a' : '#e5e7eb'}`, background: svcCollectNow ? '#dcfce7' : '#fff', color: svcCollectNow ? '#15803d' : '#6b7280', cursor: 'pointer' }}
+                            >
+                              💰 เก็บเงินทันที
+                            </button>
+                            <button
+                              onClick={() => setSvcCollectNow(false)}
+                              style={{ flex: 1, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, border: `1.5px solid ${!svcCollectNow ? '#16a34a' : '#e5e7eb'}`, background: !svcCollectNow ? '#dcfce7' : '#fff', color: !svcCollectNow ? '#15803d' : '#6b7280', cursor: 'pointer' }}
+                            >
+                              ⏸ ลงบิลไว้ก่อน
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Payment method selector (collect now) */}
+                        {svcCollectNow && (
+                          <div style={{ marginBottom: 14, padding: '12px 14px', background: '#f9fafb', borderRadius: 8, border: '1px solid #e5e7eb' }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>
+                              💳 ช่องทางชำระเงิน
+                            </div>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                              {SVC_PAYMENT_METHODS.map(pm => (
+                                <button
+                                  key={pm.value}
+                                  onClick={() => setSvcPayMethod(pm.value)}
+                                  style={{
+                                    padding: '6px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                                    border: `1.5px solid ${svcPayMethod === pm.value ? '#16a34a' : '#e5e7eb'}`,
+                                    background: svcPayMethod === pm.value ? '#dcfce7' : '#fff',
+                                    color: svcPayMethod === pm.value ? '#15803d' : '#6b7280',
+                                    cursor: 'pointer',
+                                  }}
+                                >
+                                  {pm.label}
+                                </button>
+                              ))}
+                            </div>
+                            {svcPayMethod === 'cash' && (
+                              <div style={{ marginTop: 8, fontSize: 11, color: svcCashSessId ? '#16a34a' : '#dc2626' }}>
+                                {svcCashSessId ? `✅ กะแคชเชียร์: ${svcCashSessId.slice(-6)}` : '⚠️ ไม่มีกะแคชเชียร์ที่เปิดอยู่'}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Pay later info */}
+                        {!svcCollectNow && (
+                          <div style={{ marginBottom: 14, padding: '12px 14px', background: '#fffbeb', borderRadius: 8, border: '1px solid #fde68a', fontSize: 12, color: '#92400e' }}>
+                            💡 ค่าใช้จ่าย <strong>฿{fmtBaht(cartTotal)}</strong> จะถูกบันทึกในโฟลิโอ และสามารถเก็บเงินได้ทีหลังจากแท็บ "💳 บิล" หรือตอนเช็คเอาท์
+                          </div>
+                        )}
+
+                        {/* Notes */}
+                        <div style={{ marginBottom: 14 }}>
+                          <label style={{ display: 'block', fontSize: 12, fontWeight: 700, color: '#374151', marginBottom: 4 }}>
+                            📝 หมายเหตุ (ไม่บังคับ)
+                          </label>
+                          <textarea
+                            value={svcNotes}
+                            onChange={e => setSvcNotes(e.target.value)}
+                            placeholder="เช่น ห้อง 301 ขอน้ำแข็ง..."
+                            rows={2}
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '8px 12px', borderRadius: 8,
+                              border: '1.5px solid #d1d5db', fontSize: 13,
+                              fontFamily: FONT, resize: 'vertical', outline: 'none',
+                            }}
+                          />
+                        </div>
+
+                        {error && <div style={{ color: '#dc2626', fontSize: 12, marginBottom: 10 }}>{error}</div>}
+
+                        {svcCashMissing && (
+                          <div style={{ marginBottom: 10, padding: '8px 12px', background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 12, color: '#b91c1c' }}>
+                            ⚠️ ยังไม่มีกะแคชเชียร์ที่เปิดอยู่ — กรุณาเลือกช่องทางชำระอื่น
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: 8 }}>
+                          <button
+                            onClick={() => { setServiceStep('form'); setError(''); }}
+                            style={{ flex: 1, padding: '10px 12px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}
+                          >
+                            ← ย้อนกลับ
+                          </button>
+                          <button
+                            onClick={handleAddService}
+                            disabled={loading || (svcCollectNow && svcCashMissing)}
+                            style={{
+                              flex: 2, padding: '10px 12px',
+                              background: loading ? '#bbf7d0' : '#16a34a',
+                              color: '#fff', border: 'none', borderRadius: 8,
+                              fontSize: 13, fontWeight: 700,
+                              cursor: loading ? 'not-allowed' : 'pointer',
+                              opacity: (svcCollectNow && svcCashMissing) ? 0.5 : 1,
+                              fontFamily: FONT,
+                              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                            }}
+                          >
+                            {loading
+                              ? '⏳ กำลังดำเนินการ...'
+                              : svcCollectNow
+                                ? `✅ ยืนยัน + รับ ฿${fmtBaht(cartTotal)}`
+                                : '✅ ยืนยัน (ลงบิลไว้ก่อน)'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
               {/* ─── DETAILS TAB (idle only) ──────────────────────────────────── */}
-              {checkinStep === 'idle' && checkoutStep === 'idle' && activeTab === 'details' && (
+              {checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && activeTab === 'details' && (
                 <>
                   {/* Guest Section */}
                   <div style={{ marginBottom: 24 }}>
@@ -1042,7 +2060,7 @@ export default function DetailPanel({
               )}
 
               {/* ── BILLING TAB ──────────────────────────────────────────────── */}
-              {checkinStep === 'idle' && checkoutStep === 'idle' && activeTab === 'billing' && (
+              {checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && activeTab === 'billing' && (
                 <div>
                   {billingLoading ? (
                     <div style={{ textAlign: 'center', padding: 32, color: '#9ca3af', fontSize: 13 }}>กำลังโหลด...</div>
@@ -1229,7 +2247,7 @@ export default function DetailPanel({
               )}
 
               {/* ── ACTIVITY TAB ─────────────────────────────────────────────── */}
-              {checkinStep === 'idle' && checkoutStep === 'idle' && activeTab === 'activity' && (
+              {checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && activeTab === 'activity' && (
                 <div>
                   {logsLoading ? (
                     <div style={{ textAlign: 'center', padding: 32, color: '#9ca3af', fontSize: 13 }}>กำลังโหลด...</div>
@@ -1268,7 +2286,7 @@ export default function DetailPanel({
         </div>
 
         {/* ─── Actions Footer (idle state only) ────────────────────────────────── */}
-        {booking && checkinStep === 'idle' && checkoutStep === 'idle' && (
+        {booking && checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && (
           <div style={{ padding: '16px 20px', borderTop: '1px solid #e5e7eb', display: 'grid', gap: 8, gridTemplateColumns: '1fr 1fr' }}>
             {booking.status === 'confirmed' && (
               <button
@@ -1287,6 +2305,50 @@ export default function DetailPanel({
                 style={{ padding: '10px 12px', backgroundColor: '#3b82f6', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
               >
                 🧳 เช็คเอาท์
+              </button>
+            )}
+
+            {/* ── ต่ออายุ — for checked_in bookings ─────────────────────────── */}
+            {booking.status === 'checked_in' && (
+              <button
+                onClick={() => { setError(''); setExtendStep('form'); }}
+                disabled={loading}
+                style={{ padding: '10px 12px', backgroundColor: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
+              >
+                📅 ต่ออายุ
+              </button>
+            )}
+
+            {/* ── บริการ — add extra service for checked_in bookings ─────────── */}
+            {booking.status === 'checked_in' && (
+              <button
+                onClick={() => { setError(''); setSvcSearch(''); setServiceStep('form'); }}
+                disabled={loading}
+                style={{ padding: '10px 12px', backgroundColor: '#16a34a', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
+              >
+                🛒 บริการ
+              </button>
+            )}
+
+            {(booking.status === 'confirmed' || booking.status === 'checked_in') && !booking.roomLocked && (
+              <button
+                onClick={() => { setError(''); setMoveDialogOpen(true); }}
+                disabled={loading}
+                style={{ padding: '10px 12px', backgroundColor: '#7c3aed', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
+                title="ย้ายห้องโดยไม่กระทบยอดเงินที่ชำระแล้ว"
+              >
+                🔀 ย้ายห้อง
+              </button>
+            )}
+
+            {(booking.status === 'confirmed' || booking.status === 'checked_in') && !booking.roomLocked && (
+              <button
+                onClick={() => { setError(''); setSplitDialogOpen(true); }}
+                disabled={loading}
+                style={{ padding: '10px 12px', backgroundColor: '#db2777', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
+                title="แยกช่วงการพัก: เปลี่ยนเรท/ห้อง ในช่วงหลังวันที่เลือก"
+              >
+                ✂️ แยกช่วง
               </button>
             )}
 
@@ -1339,6 +2401,23 @@ export default function DetailPanel({
         document={invoiceDoc}
         isReprint={false}
         onClose={() => setInvoiceDoc(null)}
+      />
+
+      {/* Move Room — guest-initiated, billing-invariant */}
+      <MoveRoomDialog
+        open={moveDialogOpen}
+        booking={booking}
+        currentRoom={room}
+        onClose={() => setMoveDialogOpen(false)}
+        onMoved={onRefresh}
+      />
+
+      {/* Split Segment — manual multi-room stay / rate change at a point in time */}
+      <SplitSegmentDialog
+        open={splitDialogOpen}
+        booking={booking}
+        onClose={() => setSplitDialogOpen(false)}
+        onSplit={onRefresh}
       />
     </>
   );

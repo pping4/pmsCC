@@ -15,7 +15,7 @@
  *  - Idempotency is handled at the API layer (`room-change:` key prefix).
  */
 
-import { Prisma, RoomChangeMode } from '@prisma/client';
+import { Prisma, RoomChangeMode, BookingType } from '@prisma/client';
 
 type Tx = Prisma.TransactionClient;
 
@@ -514,6 +514,247 @@ export async function moveRoomInTx(
     historyId:   history.id,
     newVersion:  booking.version + 1,
     splitApplied,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SPLIT — explicit multi-room stay wizard. Unlike MOVE, SPLIT is
+// billing-NON-invariant: the operator chooses a new rate (and optionally a
+// new room + bookingType) for the `[splitDate, segment.toDate)` portion.
+//
+// What SPLIT does:
+//   1. Shrinks the chosen segment to [fromDate, splitDate).
+//   2. Creates a new segment [splitDate, toDate) with the operator-supplied
+//      roomId / rate / bookingType. These may all equal the original (then the
+//      split is a pure timeline cut — rejected as NO_CHANGE).
+//   3. Records a RoomMoveHistory row with mode=SPLIT, oldRate + newRate, and
+//      billingImpact = (newRate - oldRate) * nightsInNewPortion (signal for
+//      downstream folio reconciliation — this tx does NOT touch folio /
+//      invoice / payment rows).
+//
+// What SPLIT does NOT do:
+//   - Mutate Folio, Invoice, LineItem, Payment (posted-record immutable).
+//     A follow-up rate-adjustment operation handles money movement.
+//   - Merge segments. Use the future merge/undo op for that.
+//   - Touch booking.roomId — splitDate is strictly after activeSegment.fromDate,
+//     so the LAST segment by date may or may not change depending on which
+//     segment was split. We recompute `booking.roomId` from the final-day
+//     segment after the cut.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface SplitSegmentInput {
+  bookingId:       string;
+  segmentId:       string;
+  splitDate:       Date;            // strictly within (segment.fromDate, segment.toDate)
+  newRoomId?:      string;          // defaults to the segment's current roomId
+  newRate:         Prisma.Decimal | number | string;
+  newBookingType?: BookingType;           // defaults to the segment's type
+  reason:          string;
+  notes?:          string;
+  expectedVersion: number;
+  createdBy:       string;
+}
+
+export interface SplitSegmentResult {
+  bookingId:       string;
+  originalSegmentId: string;   // the shrunk segment
+  newSegmentId:    string;
+  historyId:       string;
+  newVersion:      number;
+  billingImpact:   string;     // stringified Decimal (signal)
+  nightsAfterSplit: number;
+}
+
+export async function splitSegmentInTx(
+  tx: Tx,
+  input: SplitSegmentInput,
+): Promise<SplitSegmentResult> {
+  const booking = await tx.booking.findUnique({
+    where: { id: input.bookingId },
+    select: {
+      id: true,
+      status: true,
+      checkIn: true,
+      checkOut: true,
+      roomId: true,
+      roomLocked: true,
+      version: true,
+      rate: true,
+      bookingType: true,
+      roomSegments: {
+        orderBy: { fromDate: 'asc' },
+        select: {
+          id: true, roomId: true, fromDate: true, toDate: true,
+          rate: true, bookingType: true,
+        },
+      },
+    },
+  });
+  if (!booking) {
+    throw new RoomChangeError('ไม่พบการจอง', 'BOOKING_NOT_FOUND', 404);
+  }
+  if (booking.version !== input.expectedVersion) {
+    throw new RoomChangeError(
+      'การจองถูกแก้ไขโดยผู้อื่น กรุณาลองใหม่อีกครั้ง',
+      'VERSION_CONFLICT', 409,
+    );
+  }
+  if (booking.roomLocked) {
+    throw new RoomChangeError(
+      'การจองนี้ถูกล็อคห้องไว้ — ปลดล็อคก่อนแยกช่วง',
+      'BOOKING_LOCKED',
+    );
+  }
+  if (booking.status !== 'confirmed' && booking.status !== 'checked_in') {
+    throw new RoomChangeError(
+      'SPLIT ใช้ได้เฉพาะการจองที่ยังไม่ check-out หรือยกเลิก',
+      'INVALID_STATUS',
+    );
+  }
+
+  const target = booking.roomSegments.find(s => s.id === input.segmentId);
+  if (!target) {
+    throw new RoomChangeError(
+      'ไม่พบช่วงการพักที่จะแยก',
+      'SEGMENT_NOT_FOUND', 404,
+    );
+  }
+
+  // Normalize splitDate to UTC midnight (date-only)
+  const split = new Date(Date.UTC(
+    input.splitDate.getUTCFullYear(),
+    input.splitDate.getUTCMonth(),
+    input.splitDate.getUTCDate(),
+  ));
+
+  // splitDate must be strictly INSIDE the segment — both ends equal means
+  // there's nothing to split.
+  if (
+    split.getTime() <= target.fromDate.getTime() ||
+    split.getTime() >= target.toDate.getTime()
+  ) {
+    throw new RoomChangeError(
+      'วันที่แยกต้องอยู่ในช่วงการพักนี้ (ไม่ใช่วันเริ่มต้น/สิ้นสุด)',
+      'INVALID_SPLIT_DATE',
+    );
+  }
+
+  const newRoomId      = input.newRoomId      ?? target.roomId;
+  const newBookingType = input.newBookingType ?? target.bookingType;
+  const newRate        = new Prisma.Decimal(input.newRate);
+
+  // No-change guard: if nothing about the new half differs from the old, this
+  // is just a timeline cut with no semantic change — reject to prevent noise.
+  const sameRoom = newRoomId === target.roomId;
+  const sameRate = newRate.equals(target.rate);
+  const sameType = newBookingType === target.bookingType;
+  if (sameRoom && sameRate && sameType) {
+    throw new RoomChangeError(
+      'ไม่มีการเปลี่ยนแปลงในช่วงใหม่ (ห้อง/เรท/ประเภท เหมือนเดิม)',
+      'NO_CHANGE',
+    );
+  }
+
+  // If room changes → validate target room + availability for [split, target.toDate)
+  if (!sameRoom) {
+    const newRoom = await tx.room.findUnique({
+      where: { id: newRoomId },
+      select: { id: true, status: true },
+    });
+    if (!newRoom) {
+      throw new RoomChangeError('ไม่พบห้องปลายทาง', 'ROOM_NOT_FOUND', 404);
+    }
+    if (newRoom.status === 'maintenance') {
+      throw new RoomChangeError('ห้องปลายทางอยู่ระหว่างซ่อมบำรุง', 'ROOM_UNAVAILABLE');
+    }
+    const overlap = await tx.bookingRoomSegment.findFirst({
+      where: {
+        roomId:    newRoomId,
+        bookingId: { not: input.bookingId },
+        fromDate:  { lt: target.toDate },
+        toDate:    { gt: split },
+        booking:   { status: { not: 'cancelled' } },
+      },
+      select: { id: true },
+    });
+    if (overlap) {
+      throw new RoomChangeError(
+        'ห้องปลายทางไม่ว่างในช่วงที่ต้องการ (ชนกับการจองอื่น)',
+        'ROOM_UNAVAILABLE',
+      );
+    }
+  }
+
+  // Apply: shrink target + insert new segment
+  await tx.bookingRoomSegment.update({
+    where: { id: target.id },
+    data:  { toDate: split },
+  });
+  const created = await tx.bookingRoomSegment.create({
+    data: {
+      bookingId:   booking.id,
+      roomId:      newRoomId,
+      fromDate:    split,
+      toDate:      target.toDate,
+      rate:        newRate,
+      bookingType: newBookingType,
+      createdBy:   input.createdBy,
+    },
+    select: { id: true },
+  });
+
+  // Recompute booking.roomId from the LATEST segment (by fromDate) — this is
+  // the room the guest will be in on their final night. If we split the last
+  // segment, booking.roomId should follow the new half.
+  const allSegments = await tx.bookingRoomSegment.findMany({
+    where:   { bookingId: booking.id },
+    orderBy: { fromDate: 'desc' },
+    take:    1,
+    select:  { roomId: true },
+  });
+  const latestRoomId = allSegments[0]?.roomId ?? booking.roomId;
+
+  await tx.booking.update({
+    where: { id: booking.id },
+    data: {
+      roomId:  latestRoomId,
+      version: { increment: 1 },
+    },
+  });
+
+  // Billing-impact signal: Δrate × nights in the new half.
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const nightsAfterSplit = Math.round(
+    (target.toDate.getTime() - split.getTime()) / MS_PER_DAY,
+  );
+  const rateDelta = newRate.minus(target.rate);
+  const billingImpact = rateDelta.times(nightsAfterSplit);
+
+  const history = await tx.roomMoveHistory.create({
+    data: {
+      bookingId:     booking.id,
+      mode:          RoomChangeMode.SPLIT,
+      fromRoomId:    target.roomId,
+      toRoomId:      newRoomId,
+      effectiveDate: split,
+      reason:        input.reason,
+      notes:         input.notes ?? null,
+      oldRate:       target.rate,
+      newRate,
+      billingImpact,
+      createdBy:     input.createdBy,
+    },
+    select: { id: true },
+  });
+
+  return {
+    bookingId:         booking.id,
+    originalSegmentId: target.id,
+    newSegmentId:      created.id,
+    historyId:         history.id,
+    newVersion:        booking.version + 1,
+    billingImpact:     billingImpact.toString(),
+    nightsAfterSplit,
   };
 }
 
