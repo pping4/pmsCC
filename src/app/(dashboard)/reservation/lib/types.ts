@@ -55,6 +55,19 @@ export interface BookingItem {
   /** City Ledger / AR — set when booking is billed to a corporate account */
   cityLedgerAccountId?: string | null;
   cityLedgerAccount?: { id: string; companyName: string; accountCode: string } | null;
+
+  // ── Segment metadata (present only when the booking has been split across
+  // rooms). A split booking appears as multiple BookingItem entries — one per
+  // segment — each landing in the corresponding room row. These fields
+  // override checkIn/checkOut FOR TAPE-CHART POSITIONING ONLY; all other UI
+  // (detail panel, invoices, forms) should still use checkIn/checkOut which
+  // remain the booking-wide range.
+  segmentFrom?:    string;   // "YYYY-MM-DD" inclusive start of this segment
+  segmentTo?:      string;   // "YYYY-MM-DD" exclusive end of this segment
+  isFirstSegment?: boolean;  // false → dashed LEFT edge (continues from elsewhere)
+  isLastSegment?:  boolean;  // false → dashed RIGHT edge (continues elsewhere)
+  segmentIndex?:   number;   // 0-based
+  segmentCount?:   number;   // total segments for this booking
 }
 
 export interface RoomRateInfo {
@@ -102,6 +115,12 @@ export interface DragState {
   originalRate: number;          // original booking rate for calculating previews
   currentDeltaX: number;         // day offset
   currentDeltaY: number;         // room row offset (for cross-room drag)
+  /** Raw cursor position (viewport-relative) */
+  currentClientX: number;
+  currentClientY: number;
+  /** Pixel Y translation to apply to the dragged block so it sits on the target row.
+   * Computed from real DOM row positions — accounts for group-header gaps. */
+  currentTranslateY: number;
   mode: 'move' | 'resize';
   hasMoved: boolean;             // true once cursor moves > DRAG_THRESHOLD px
 }

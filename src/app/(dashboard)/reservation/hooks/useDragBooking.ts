@@ -1,5 +1,6 @@
 'use client';
 import { useState, useCallback, useRef } from 'react';
+import { useToast } from '@/components/ui';
 import type { DragState, BookingItem, RoomItem } from '../lib/types';
 import { DRAG_THRESHOLD, DAY_W, ROW_H } from '../lib/constants';
 import { parseUTCDate, addDays, formatDateStr } from '../lib/date-utils';
@@ -41,23 +42,40 @@ interface UseDragBookingOptions {
   }) => Promise<void>;
 }
 
+/**
+ * Pure cross-room drag (no date change) → routes to billing-invariant MOVE,
+ * not preview-resize. Caller opens the MoveRoomDialog pre-filled with the
+ * target room.
+ */
+export interface PendingMove {
+  bookingId:      string;
+  originalRoomId: string;
+  targetRoomId:   string;
+}
+
 interface UseDragBookingReturn {
   dragState: DragState | null;
-  startDrag: (e: React.MouseEvent, booking: BookingItem, room: RoomItem, mode: 'move' | 'resize') => void;
-  onMouseMove: (e: React.MouseEvent) => void;
-  onMouseUp: (e: React.MouseEvent) => void;
+  // NOTE: consumer should apply `style={{ touchAction: 'none' }}` to the draggable
+  // element so mobile browsers don't hijack pointerdown for scroll/pinch/zoom.
+  startDrag: (e: React.PointerEvent, booking: BookingItem, room: RoomItem, mode: 'move' | 'resize') => void;
+  onPointerMove: (e: React.PointerEvent) => void;
+  onPointerUp: (e: React.PointerEvent) => void;
   isDragging: (bookingId: string) => boolean;
   getDragDelta: (bookingId: string) => { deltaX: number; targetRoomId: string };
   confirmState: ConfirmState | null;
   handleConfirm: () => Promise<void>;
   handleCancelConfirm: () => void;
   isPatching: boolean;
+  pendingMove: PendingMove | null;
+  clearPendingMove: () => void;
 }
 
 export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBookingOptions): UseDragBookingReturn {
+  const toast = useToast();
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
   const [isPatching, setIsPatching] = useState(false);
+  const [pendingMove, setPendingMove] = useState<PendingMove | null>(null);
   const commitRef = useRef(onDragEnd);
   commitRef.current = onDragEnd;
 
@@ -91,13 +109,13 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
 
         if (patchRes.status === 409) {
           // Version mismatch
-          alert('การจองถูกแก้ไขโดยผู้อื่น กรุณาลองใหม่อีกครั้ง');
+          toast.error('ย้ายไม่สำเร็จ', 'การจองถูกแก้ไขโดยผู้อื่น กรุณาลองใหม่อีกครั้ง');
           return;
         }
 
         if (!patchRes.ok) {
           const err = await patchRes.json();
-          alert(err.error || 'ไม่สามารถเลื่อนการจองได้');
+          toast.error('ย้ายไม่สำเร็จ', err.error || 'ไม่สามารถเลื่อนการจองได้');
           return;
         }
 
@@ -110,7 +128,7 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
         });
       } catch (err) {
         console.error('PATCH error:', err);
-        alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+        toast.error('บันทึกไม่สำเร็จ', err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
       } finally {
         setIsPatching(false);
       }
@@ -119,13 +137,20 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
   );
 
   const startDrag = useCallback((
-    e: React.MouseEvent,
+    e: React.PointerEvent,
     booking: BookingItem,
     room: RoomItem,
     mode: 'move' | 'resize'
   ) => {
     e.preventDefault();
     e.stopPropagation();
+    // Capture the pointer so move/up events keep firing even if the pointer
+    // leaves the element (important on touch & when dragging across rooms).
+    try {
+      (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
+    } catch {
+      // Some environments / synthetic events may not support capture — ignore.
+    }
     setDragState({
       bookingId:       booking.id,
       originalRoomId:  room.id,
@@ -137,12 +162,15 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
       originalRate:    booking.rate,
       currentDeltaX:   0,
       currentDeltaY:   0,
+      currentClientX:  e.clientX,
+      currentClientY:  e.clientY,
+      currentTranslateY: 0,
       mode,
       hasMoved:        false,
     });
   }, []);
 
-  const onMouseMove = useCallback((e: React.MouseEvent) => {
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!dragState) return;
 
     const dx = e.clientX - dragState.startX;
@@ -150,24 +178,38 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
     const totalDistance = Math.sqrt(dx * dx + dy * dy);
 
     const deltaX = Math.round(dx / DAY_W);
-    // For cross-room: calculate which room index we're over
-    const deltaY = Math.round(dy / ROW_H);
 
+    // Resolve target room from the DOM under the cursor. This handles room-type
+    // group headers (different height than ROW_H) correctly — pure `dy / ROW_H`
+    // math miscounts whenever the pointer crosses a group header and causes
+    // visible "2-row jumps".
+    const deltaY = Math.round(dy / ROW_H);
     const currentRoomIdx = flatRooms.findIndex(r => r.id === dragState.originalRoomId);
     const targetRoomIdx  = Math.max(0, Math.min(flatRooms.length - 1, currentRoomIdx + deltaY));
     const targetRoomId   = flatRooms[targetRoomIdx]?.id ?? dragState.originalRoomId;
+    const translateY     = deltaY * ROW_H;
 
     setDragState(prev => prev ? {
       ...prev,
       hasMoved:     totalDistance > DRAG_THRESHOLD,
       currentDeltaX: deltaX,
       currentDeltaY: deltaY,
+      currentClientX: e.clientX,
+      currentClientY: e.clientY,
+      currentTranslateY: translateY,
       targetRoomId,
     } : null);
   }, [dragState, flatRooms]);
 
-  const onMouseUp = useCallback(async (e: React.MouseEvent) => {
+  const onPointerUp = useCallback(async (e: React.PointerEvent) => {
     if (!dragState) return;
+
+    // Release pointer capture (safe no-op if not captured).
+    try {
+      (e.currentTarget as Element).releasePointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
 
     if (!dragState.hasMoved) {
       // It was a click, not a drag — just clear state, let onClick fire
@@ -175,7 +217,21 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
       return;
     }
 
-    const { mode, originalCheckIn, originalCheckOut, currentDeltaX, targetRoomId, bookingId } = dragState;
+    const { mode, originalCheckIn, originalCheckOut, currentDeltaX, targetRoomId, bookingId, originalRoomId } = dragState;
+
+    // ── Pure cross-room drag (no date change) → route to MOVE wizard ─────────
+    // MOVE is billing-invariant: no rate preview, no invoice changes. The
+    // MoveRoomDialog handles confirmation + serializable tx.
+    //
+    // NOTE: `setDragState(null)` is deferred one tick so the synthetic `click`
+    // that fires right after `pointerup` still sees `dragState.hasMoved === true`
+    // inside BookingBlock's onClick guard. If we cleared dragState synchronously,
+    // the click would leak through and open DetailPanel on top of MoveRoomDialog.
+    if (mode === 'move' && currentDeltaX === 0 && targetRoomId !== originalRoomId) {
+      setPendingMove({ bookingId, originalRoomId, targetRoomId });
+      setTimeout(() => setDragState(null), 0);
+      return;
+    }
 
     let newCheckIn:  Date;
     let newCheckOut: Date;
@@ -215,7 +271,7 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
 
       if (!previewRes.ok) {
         const err = await previewRes.json();
-        alert(err.error || 'ข้อผิดพลาดในการตรวจสอบการปรับแต่ง');
+        toast.error('ชนกับการจองอื่น', err.error || 'ข้อผิดพลาดในการตรวจสอบการปรับแต่ง');
         setDragState(null);
         setOriginalDragState(null);
         return;
@@ -278,7 +334,7 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
       }
     } catch (err) {
       console.error('Preview error:', err);
-      alert('เกิดข้อผิดพลาดในการประมวลผล');
+      toast.error('ย้ายไม่สำเร็จ', err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการประมวลผล');
       setDragState(null);
       setOriginalDragState(null);
     }
@@ -319,17 +375,21 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
     setOriginalDragState(null);
   }, []);
 
+  const clearPendingMove = useCallback(() => setPendingMove(null), []);
+
   return {
     dragState,
     startDrag,
-    onMouseMove,
-    onMouseUp,
+    onPointerMove,
+    onPointerUp,
     isDragging,
     getDragDelta,
     confirmState,
     handleConfirm,
     handleCancelConfirm,
     isPatching,
+    pendingMove,
+    clearPendingMove,
   };
 }
 

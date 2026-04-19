@@ -11,6 +11,13 @@ interface UseCreateDragOptions {
   onDragComplete: (roomItem: RoomItem, checkIn: string, checkOut: string) => void;
 }
 
+/**
+ * Create-drag hook for the tape chart.
+ *
+ * NOTE: Consumer should apply `style={{ touchAction: 'none' }}` to the draggable
+ * cells so mobile browsers do not hijack pointerdown for scroll/pinch gestures.
+ * This hook uses Pointer Events which unify mouse + touch + pen input.
+ */
 export function useCreateDrag({
   rightPanelRef,
   days,
@@ -19,7 +26,11 @@ export function useCreateDrag({
   const [dragState, setDragState] = useState<CreateDragState | null>(null);
   const rafRef = useRef<number>(0);
   const commitRef = useRef(onDragComplete);
-  const mouseListenersRef = useRef<{ move: (e: MouseEvent) => void; up: (e: MouseEvent) => void } | null>(null);
+  const pointerListenersRef = useRef<{
+    move: (e: PointerEvent) => void;
+    up: (e: PointerEvent) => void;
+    cancel: (e: PointerEvent) => void;
+  } | null>(null);
   commitRef.current = onDragComplete;
 
   // Calculate collision detection — use room-specific bookings from the dragged room
@@ -32,14 +43,29 @@ export function useCreateDrag({
     const proposedCheckInStr = formatDateStr(proposedCheckIn);
     const proposedCheckOutStr = formatDateStr(proposedCheckOut);
 
-    // Use the dragged room's own bookings (not the flat list which includes all rooms)
+    // Use the dragged room's own bookings (not the flat list which includes all rooms).
+    // For split bookings, the entry in this room covers only [segmentFrom, segmentTo);
+    // outside that range the guest is physically in another room, so we must use the
+    // SEGMENT range (when present), not the booking-wide checkIn/checkOut, otherwise
+    // we'd falsely block dates where this room is actually free.
     const roomBookings = dragState.roomItem.bookings;
     return roomBookings.some((b) => {
       if (b.status === 'cancelled') return false;
-      // Standard overlap check: existing.checkIn < proposed.checkOut && existing.checkOut > proposed.checkIn
-      return b.checkIn < proposedCheckOutStr && b.checkOut > proposedCheckInStr;
+      const fromStr = b.segmentFrom ?? b.checkIn;
+      const toStr   = b.segmentTo   ?? b.checkOut;
+      // Standard overlap check: existing.from < proposed.to && existing.to > proposed.from
+      return fromStr < proposedCheckOutStr && toStr > proposedCheckInStr;
     });
   }, [dragState, days]);
+
+  const cleanupListeners = useCallback(() => {
+    if (pointerListenersRef.current) {
+      window.removeEventListener('pointermove', pointerListenersRef.current.move);
+      window.removeEventListener('pointerup', pointerListenersRef.current.up);
+      window.removeEventListener('pointercancel', pointerListenersRef.current.cancel);
+      pointerListenersRef.current = null;
+    }
+  }, []);
 
   const startDrag = useCallback(
     (roomItem: RoomItem, startDayIdx: number) => {
@@ -66,7 +92,7 @@ export function useCreateDrag({
         return Math.max(0, Math.min(days.length - 1, raw));
       };
 
-      const handleWindowMouseMove = (e: MouseEvent) => {
+      const handlePointerMove = (e: PointerEvent) => {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = requestAnimationFrame(() => {
           const clampedDayIdx = clientXToDayIdx(e.clientX);
@@ -85,16 +111,12 @@ export function useCreateDrag({
         });
       };
 
-      const handleWindowMouseUp = (e: MouseEvent) => {
+      const handlePointerUp = (e: PointerEvent) => {
         // Cancel any pending rAF — we compute the final position directly from the event
         cancelAnimationFrame(rafRef.current);
-        if (mouseListenersRef.current) {
-          window.removeEventListener('mousemove', mouseListenersRef.current.move);
-          window.removeEventListener('mouseup', mouseListenersRef.current.up);
-          mouseListenersRef.current = null;
-        }
+        cleanupListeners();
 
-        // Compute the authoritative final day index from the actual mouseup position
+        // Compute the authoritative final day index from the actual pointerup position
         const finalDayIdx = clientXToDayIdx(e.clientX);
 
         setDragState((prev) => {
@@ -103,7 +125,7 @@ export function useCreateDrag({
           const minIdx = Math.min(prev.startDayIdx, finalDayIdx);
           const maxIdx = Math.max(prev.startDayIdx, finalDayIdx);
 
-          // Single click (no drag across cells) — cancel silently
+          // Single click/tap (no drag across cells) — cancel silently
           if (minIdx === maxIdx) return null;
 
           const finalCheckIn  = formatDateStr(days[minIdx]);
@@ -115,24 +137,32 @@ export function useCreateDrag({
         });
       };
 
-      mouseListenersRef.current = { move: handleWindowMouseMove, up: handleWindowMouseUp };
-      window.addEventListener('mousemove', handleWindowMouseMove);
-      window.addEventListener('mouseup', handleWindowMouseUp);
+      // pointercancel fires when the OS/browser takes over (e.g. touch gesture
+      // recognized as a system gesture). Treat it as a cancel — clear state.
+      const handlePointerCancel = (_e: PointerEvent) => {
+        cancelAnimationFrame(rafRef.current);
+        cleanupListeners();
+        setDragState(null);
+      };
+
+      pointerListenersRef.current = {
+        move: handlePointerMove,
+        up: handlePointerUp,
+        cancel: handlePointerCancel,
+      };
+      window.addEventListener('pointermove', handlePointerMove);
+      window.addEventListener('pointerup', handlePointerUp);
+      window.addEventListener('pointercancel', handlePointerCancel);
     },
-    [rightPanelRef, days, dragState]
+    [rightPanelRef, days, cleanupListeners]
   );
 
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafRef.current);
-      // Clean up any pending event listeners
-      if (mouseListenersRef.current) {
-        window.removeEventListener('mousemove', mouseListenersRef.current.move);
-        window.removeEventListener('mouseup', mouseListenersRef.current.up);
-        mouseListenersRef.current = null;
-      }
+      cleanupListeners();
     };
-  }, []);
+  }, [cleanupListeners]);
 
   const isDragging = dragState !== null && dragState.startDayIdx !== dragState.currentDayIdx;
 

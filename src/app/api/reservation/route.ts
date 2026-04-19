@@ -78,6 +78,42 @@ export async function GET(request: NextRequest) {
   const floorFilter    = searchParams.get('floor')      ? Number(searchParams.get('floor'))      : undefined;
   const roomTypeFilter = searchParams.get('roomTypeId') || undefined;
 
+  // ── Fetch room segments in the date range ──
+  // BookingRoomSegment is the authoritative source of "where was this booking
+  // physically staying on a given day". For bookings that were split across
+  // rooms (guest-initiated MOVE mid-stay), one booking has multiple segments
+  // landing in different rooms. We use segments to drive tape-chart placement
+  // so split bookings render as distinct blocks in each room row.
+  // We fetch ALL segments of bookings whose stay overlaps the window (not
+  // just segments that themselves overlap). Why: for a split booking where
+  // only one segment is visible in the window, we still need to know the TRUE
+  // total segment count so continuation markers (dashed edges, "✂ ช่วงที่ 2/3")
+  // render correctly on the visible segment.
+  const segmentRows = await prisma.bookingRoomSegment.findMany({
+    where: {
+      booking: {
+        status:   { not: 'cancelled' },
+        checkIn:  { lt: toDate   },
+        checkOut: { gt: fromDate },
+      },
+    },
+    select: {
+      bookingId: true,
+      roomId:    true,
+      fromDate:  true,
+      toDate:    true,
+    },
+    orderBy: [{ bookingId: 'asc' }, { fromDate: 'asc' }],
+  });
+
+  // segmentsByBooking: bookingId → ordered list of segments (across all rooms)
+  const segmentsByBooking = new Map<string, Array<{ roomId: string; fromDate: Date; toDate: Date }>>();
+  for (const s of segmentRows) {
+    const arr = segmentsByBooking.get(s.bookingId) ?? [];
+    arr.push({ roomId: s.roomId, fromDate: s.fromDate, toDate: s.toDate });
+    segmentsByBooking.set(s.bookingId, arr);
+  }
+
   // ── Fetch room types + rooms + their bookings in the date range ──
   const roomTypes = await prisma.roomType.findMany({
     orderBy: { code: 'asc' },
@@ -126,7 +162,7 @@ export async function GET(request: NextRequest) {
                   email:       true,
                 },
               },
-              // City Ledger account (if booking is billed to a corporate account)
+              // City Ledger account (populated after migration)
               cityLedgerAccountId: true,
               cityLedgerAccount: {
                 select: { id: true, companyName: true, accountCode: true },
@@ -135,6 +171,7 @@ export async function GET(request: NextRequest) {
               invoices: {
                 select: {
                   grandTotal: true,
+                  paidAmount: true,
                   status:     true,
                 },
               },
@@ -173,35 +210,54 @@ export async function GET(request: NextRequest) {
   const totalRooms = roomTypes.reduce((s, rt) => s + rt.rooms.length, 0);
 
   // ── Serialize + compute payment level per booking ────────────────────────
-  const serialized = roomTypes.map(rt => ({
-    ...rt,
-    rooms: rt.rooms.map(room => ({
-      ...room,
-      rate: room.rate
-        ? {
-            dailyRate:        room.rate.dailyRate        ? Number(room.rate.dailyRate)        : null,
-            monthlyShortRate: room.rate.monthlyShortRate ? Number(room.rate.monthlyShortRate) : null,
-            monthlyLongRate:  room.rate.monthlyLongRate  ? Number(room.rate.monthlyLongRate)  : null,
-          }
-        : null,
-      bookings: room.bookings.map(b => {
+  // First: build a per-booking snapshot keyed by id. This lets us emit the
+  // same booking in multiple rooms (for split bookings) without recomputing
+  // totalPaid / paymentLevel / expectedTotal each time.
+  type BookingSnapshot = {
+    id:            string;
+    bookingNumber: string;
+    status:        string;
+    bookingType:   string;
+    source:        string;
+    notes:         string | null;
+    version:       number;
+    guest:         unknown;
+    rate:          number;
+    deposit:       number;
+    roomLocked:    boolean;
+    paymentLevel:  'pending' | 'deposit_paid' | 'fully_paid';
+    totalPaid:     number;
+    expectedTotal: number;
+    cityLedgerAccountId: string | null;
+    cityLedgerAccount:   unknown;
+    checkIn:       string;
+    checkOut:      string;
+    // which room booking.roomId points to (for fallback when no segments)
+    _roomId:       string;
+  };
+
+  const bookingsById = new Map<string, BookingSnapshot>();
+  for (const rt of roomTypes) {
+    for (const room of rt.rooms) {
+      for (const b of room.bookings) {
+        if (bookingsById.has(b.id)) continue;
+        // `booking.roomId` isn't in the select; since this booking is nested
+        // under `room`, we know its canonical roomId is the parent room.id.
+        const bookingRoomId = room.id;
         const rate    = Number(b.rate);
         const deposit = Number(b.deposit);
         const invoices = (b as any).invoices || [];
 
-        // Calculate expected total for this booking
         let expectedTotal = rate;
         if (b.bookingType === 'daily') {
           const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
           expectedTotal = rate * Math.max(1, nights);
         }
 
-        // Sum paid invoices
         const totalPaid = invoices
-          .filter((inv: any) => inv.status === 'paid')
-          .reduce((sum: number, inv: any) => sum + Number(inv.grandTotal), 0);
+          .filter((inv: any) => inv.status !== 'voided' && inv.status !== 'cancelled')
+          .reduce((sum: number, inv: any) => sum + Number(inv.paidAmount ?? 0), 0);
 
-        // Determine payment level
         let paymentLevel: 'pending' | 'deposit_paid' | 'fully_paid' = 'pending';
         if (totalPaid >= expectedTotal && expectedTotal > 0) {
           paymentLevel = 'fully_paid';
@@ -209,7 +265,7 @@ export async function GET(request: NextRequest) {
           paymentLevel = 'deposit_paid';
         }
 
-        return {
+        bookingsById.set(b.id, {
           id:            b.id,
           bookingNumber: b.bookingNumber,
           status:        b.status,
@@ -226,12 +282,84 @@ export async function GET(request: NextRequest) {
           expectedTotal,
           cityLedgerAccountId: (b as any).cityLedgerAccountId ?? null,
           cityLedgerAccount:   (b as any).cityLedgerAccount   ?? null,
-          // Normalize dates: always return "YYYY-MM-DD" strings
           checkIn:  formatUTCDate(new Date(b.checkIn)),
           checkOut: formatUTCDate(new Date(b.checkOut)),
-        };
-      }),
-    })),
+          _roomId:  bookingRoomId,
+        });
+      }
+    }
+  }
+
+  // Second: bucket bookings into rooms using BookingRoomSegment as the
+  // authoritative placement. For each room, collect the segments that land
+  // in it and emit one entry per segment. If a booking has no segments
+  // (legacy), fall back to placing it in booking.roomId for its full range.
+  type RenderEntry = BookingSnapshot & {
+    segmentFrom?:    string;
+    segmentTo?:      string;
+    isFirstSegment?: boolean;
+    isLastSegment?:  boolean;
+    segmentIndex?:   number;
+    segmentCount?:   number;
+  };
+
+  const entriesByRoom = new Map<string, RenderEntry[]>();
+  const pushEntry = (roomId: string, entry: RenderEntry) => {
+    const arr = entriesByRoom.get(roomId) ?? [];
+    arr.push(entry);
+    entriesByRoom.set(roomId, arr);
+  };
+
+  for (const snap of bookingsById.values()) {
+    const segs = segmentsByBooking.get(snap.id);
+    if (!segs || segs.length === 0) {
+      // Legacy booking with no segments — render as one block in booking.roomId
+      pushEntry(snap._roomId, { ...snap });
+      continue;
+    }
+    // Stable ordering by fromDate (already ordered from query). We keep the
+    // TOTAL segment count so the rendered entries know they're part of a
+    // split even if other segments fall outside the visible window.
+    const totalSegs = segs.length;
+    segs.forEach((s, idx) => {
+      // Skip segments that don't overlap the visible window — they produce
+      // no rendered block but their existence still informs segmentCount.
+      if (s.fromDate.getTime() >= toDate.getTime())   return;
+      if (s.toDate.getTime()   <= fromDate.getTime()) return;
+      pushEntry(s.roomId, {
+        ...snap,
+        segmentFrom:    formatUTCDate(new Date(s.fromDate)),
+        segmentTo:      formatUTCDate(new Date(s.toDate)),
+        isFirstSegment: idx === 0,
+        isLastSegment:  idx === totalSegs - 1,
+        segmentIndex:   idx,
+        segmentCount:   totalSegs,
+      });
+    });
+  }
+
+  const serialized = roomTypes.map(rt => ({
+    ...rt,
+    rooms: rt.rooms.map(room => {
+      const entries = entriesByRoom.get(room.id) ?? [];
+      // Sort by (segmentFrom || checkIn) ascending for stable layout
+      entries.sort((a, b) => {
+        const ka = a.segmentFrom ?? a.checkIn;
+        const kb = b.segmentFrom ?? b.checkIn;
+        return ka.localeCompare(kb);
+      });
+      return {
+        ...room,
+        rate: room.rate
+          ? {
+              dailyRate:        room.rate.dailyRate        ? Number(room.rate.dailyRate)        : null,
+              monthlyShortRate: room.rate.monthlyShortRate ? Number(room.rate.monthlyShortRate) : null,
+              monthlyLongRate:  room.rate.monthlyLongRate  ? Number(room.rate.monthlyLongRate)  : null,
+            }
+          : null,
+        bookings: entries.map(({ _roomId, ...rest }) => rest),
+      };
+    }),
   }));
 
   return NextResponse.json({
@@ -340,19 +468,26 @@ export async function PATCH(request: NextRequest) {
     }
 
     // === DOUBLE-BOOKING VALIDATION ===
-    const conflict = await prisma.booking.findFirst({
+    // Segment-aware: BookingRoomSegment is authoritative for "who physically
+    // occupies this room on these dates" (see preview-resize for rationale).
+    const conflictSegment = await prisma.bookingRoomSegment.findFirst({
       where: {
-        id: { not: bookingId },
-        roomId: targetRoomId,
-        status: { in: ['confirmed', 'checked_in'] },
-        checkIn: { lt: newCheckOut },
-        checkOut: { gt: newCheckIn },
+        roomId:    targetRoomId,
+        bookingId: { not: bookingId },
+        fromDate:  { lt: newCheckOut },
+        toDate:    { gt: newCheckIn },
+        booking:   { status: { in: ['confirmed', 'checked_in'] } },
       },
       select: {
-        bookingNumber: true,
-        guest: { select: { firstName: true, lastName: true, firstNameTH: true, lastNameTH: true } },
+        booking: {
+          select: {
+            bookingNumber: true,
+            guest: { select: { firstName: true, lastName: true, firstNameTH: true, lastNameTH: true } },
+          },
+        },
       },
     });
+    const conflict = conflictSegment?.booking ?? null;
 
     if (conflict) {
       const guestName =
@@ -402,9 +537,62 @@ export async function PATCH(request: NextRequest) {
         data: updateData,
       })) as any;
 
+      // ── Keep BookingRoomSegment in sync ────────────────────────────────────
+      // The tape chart and availability queries read segments as authoritative.
+      // Drag-resize / same-room drag here mutates the booking-wide dates / room,
+      // so the single segment covering [checkIn, checkOut) must follow.
+      //
+      // Multi-segment bookings (split across rooms) are guarded at the UI:
+      // partial-segment blocks are NOT draggable, so we shouldn't reach here
+      // with >1 segment. Defence in depth: if we do, reject rather than silently
+      // corrupt the timeline.
+      const existingSegs = await tx.bookingRoomSegment.findMany({
+        where:  { bookingId },
+        select: { id: true },
+      });
+      if (existingSegs.length > 1) {
+        throw new Error('MULTI_SEGMENT_DRAG_REJECTED');
+      }
+      if (existingSegs.length === 1) {
+        await tx.bookingRoomSegment.update({
+          where: { id: existingSegs[0].id },
+          data: {
+            roomId:   targetRoomId,
+            fromDate: newCheckIn,
+            toDate:   newCheckOut,
+          },
+        });
+      } else {
+        // Zero segments — legacy booking. Lazy-create so future reads are
+        // consistent (same pattern as moveRoomInTx / backfill script).
+        await tx.bookingRoomSegment.create({
+          data: {
+            bookingId,
+            roomId:      targetRoomId,
+            fromDate:    newCheckIn,
+            toDate:      newCheckOut,
+            rate:        rateResult.newRate,
+            bookingType: booking.bookingType,
+            createdBy:   'system-lazy-backfill',
+          },
+        });
+      }
+
       // Determine what changed
       const roomChanged = roomId && roomId !== booking.roomId;
       const datesChanged = formatUTCDate(newCheckIn) !== formatUTCDate(new Date(booking.checkIn)) || formatUTCDate(newCheckOut) !== formatUTCDate(new Date(booking.checkOut));
+
+      // Resolve room numbers for human-readable history descriptions.
+      // Without this, the history tab shows raw UUIDs like
+      // "ย้ายห้อง BK-XXX: ห้อง f84f79b9-... → ห้อง 1819a956-..." — unreadable.
+      const [fromRoomRec, toRoomRec] = roomChanged
+        ? await Promise.all([
+            tx.room.findUnique({ where: { id: booking.roomId }, select: { number: true } }),
+            tx.room.findUnique({ where: { id: roomId! },        select: { number: true } }),
+          ])
+        : [null, null];
+      const fromRoomLabel = fromRoomRec?.number ?? String(booking.roomId).slice(0, 8);
+      const toRoomLabel   = toRoomRec?.number   ?? String(roomId ?? booking.roomId).slice(0, 8);
 
       let action = 'booking.updated';
       let description = `อัปเดตการจอง ${booking.bookingNumber}`;
@@ -412,11 +600,11 @@ export async function PATCH(request: NextRequest) {
 
       if (roomChanged && datesChanged) {
         action = 'booking.movedAndRescheduled';
-        description = `ย้ายและเลื่อนวัน ${booking.bookingNumber}: ห้อง ${booking.roomId} → ห้อง ${roomId}, ${formatUTCDate(new Date(booking.checkIn))} → ${formatUTCDate(newCheckIn)}`;
+        description = `ย้ายและเลื่อนวัน ${booking.bookingNumber}: ห้อง ${fromRoomLabel} → ห้อง ${toRoomLabel}, ${formatUTCDate(new Date(booking.checkIn))} → ${formatUTCDate(newCheckIn)}`;
         icon = '🔀';
       } else if (roomChanged) {
         action = 'booking.roomMoved';
-        description = `ย้ายห้อง ${booking.bookingNumber}: ห้อง ${booking.roomId} → ห้อง ${roomId ?? booking.roomId}`;
+        description = `ย้ายห้อง ${booking.bookingNumber}: ห้อง ${fromRoomLabel} → ห้อง ${toRoomLabel}`;
         icon = '🚪';
       } else if (newNights > originalNights) {
         action = 'booking.extended';
@@ -552,6 +740,14 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json(
         { error: 'ข้อมูลถูกเปลี่ยนแปลงโดยผู้ใช้อื่น กรุณารีเฟรชหน้าจอ' },
         { status: 409 }
+      );
+    }
+    if (error instanceof Error && error.message === 'MULTI_SEGMENT_DRAG_REJECTED') {
+      return NextResponse.json(
+        {
+          error: 'การจองนี้ถูก split ข้ามห้อง — ไม่สามารถใช้ drag-resize ได้ กรุณาใช้เมนู "ย้ายห้อง" / "แยกช่วง" ใน Detail Panel',
+        },
+        { status: 400 }
       );
     }
     console.error('PATCH /api/reservation error:', error);

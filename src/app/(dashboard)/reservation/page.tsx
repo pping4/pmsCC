@@ -15,14 +15,17 @@ import DetailPanel from './components/DetailPanel';
 import ContextMenu from './components/ContextMenu';
 import NewBookingDialog from './components/NewBookingDialog';
 import ResizeConfirmDialog from './components/ResizeConfirmDialog';
+import MoveRoomDialog from './components/MoveRoomDialog';
 import BookingTableView from './components/BookingTableView';
 import BookingListView from './components/BookingListView';
 import { useDragBooking } from './hooks/useDragBooking';
 import { useCreateDrag } from './hooks/useCreateDrag';
 import { useTooltip } from './hooks/useTooltip';
 import { useKeyboard } from './hooks/useKeyboard';
+import { useToast, ErrorBoundary } from '@/components/ui';
 
 export default function ReservationPage() {
+  const toast = useToast();
   // ──── Data State ────
   const [data, setData] = useState<ApiData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -55,9 +58,16 @@ export default function ReservationPage() {
   const rightPanelRef = useRef<HTMLDivElement>(null);
 
   // ──── Data Fetching ────
+  // Stale-while-revalidate: only show the full-screen loader on the FIRST fetch
+  // (when `data` is still null). Subsequent refreshes keep the current view
+  // mounted so room moves / check-ins don't cause the whole tape chart to
+  // unmount → remount and flicker.
   const fetchData = useCallback(async () => {
-    setLoading(true);
     setError(null);
+    setData((prev) => {
+      if (prev === null) setLoading(true);
+      return prev;
+    });
     try {
       const toDate = addDays(parseUTCDate(fromStr), rangeDays - 1);
       const toStr = formatDateStr(toDate);
@@ -66,11 +76,13 @@ export default function ReservationPage() {
       const json = await res.json();
       setData(json);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'เกิดข้อผิดพลาด');
+      const msg = e instanceof Error ? e.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('โหลดข้อมูลการจองไม่สำเร็จ', msg);
     } finally {
       setLoading(false);
     }
-  }, [fromStr, rangeDays]);
+  }, [fromStr, rangeDays, toast]);
 
   useEffect(() => {
     fetchData();
@@ -157,12 +169,14 @@ export default function ReservationPage() {
   const {
     dragState,
     startDrag,
-    onMouseMove: dragMouseMove,
-    onMouseUp: dragMouseUp,
+    onPointerMove: dragPointerMove,
+    onPointerUp: dragPointerUp,
     confirmState,
     handleConfirm,
     handleCancelConfirm,
     isPatching,
+    pendingMove,
+    clearPendingMove,
   } = useDragBooking({
     flatRooms,
     rangeStart,
@@ -191,6 +205,29 @@ export default function ReservationPage() {
 
   // ──── Tooltip ────
   const { tooltipData, tooltipRef, showTooltip, hideTooltip, updatePosition } = useTooltip();
+
+  // ──── Stable callbacks for BookingBlock (so React.memo can short-circuit) ────
+  const handleBookingPointerDown = useCallback(
+    (e: React.PointerEvent, b: BookingItem, r: RoomItem, mode: 'move' | 'resize') => {
+      startDrag(e, b, r, mode);
+    },
+    [startDrag],
+  );
+  const handleBookingClick = useCallback(
+    (b: BookingItem, r: RoomItem) => setDetailBooking({ booking: b, room: r }),
+    [],
+  );
+  const handleBookingMouseEnter = useCallback(
+    (_e: React.MouseEvent, b: BookingItem, r: RoomItem) => {
+      showTooltip({ booking: b, room: r });
+    },
+    [showTooltip],
+  );
+  const handleBookingContextMenu = useCallback(
+    (e: React.MouseEvent, b: BookingItem, r: RoomItem) =>
+      setContextMenu({ booking: b, room: r, x: e.clientX, y: e.clientY }),
+    [],
+  );
 
   // ──── Keyboard shortcuts ────
   useKeyboard({
@@ -259,8 +296,10 @@ export default function ReservationPage() {
         onRefresh={fetchData}
       />
 
-      {/* ──── Loading / Error ──── */}
-      {loading && <div style={{ padding: 24, textAlign: 'center', color: '#6b7280' }}>กำลังโหลด...</div>}
+      {/* ──── Loading / Error ────
+          Only show the full-screen loader on the FIRST load (no data yet).
+          Background refreshes keep the current view visible — no flicker. */}
+      {loading && !data && <div style={{ padding: 24, textAlign: 'center', color: '#6b7280' }}>กำลังโหลด...</div>}
       {error && (
         <div style={{ padding: 16, background: '#fef2f2', color: '#991b1b', margin: 16, borderRadius: 8 }}>
           {error}
@@ -268,7 +307,7 @@ export default function ReservationPage() {
       )}
 
       {/* ──── Table View ──── */}
-      {data && !loading && viewMode === 'table' && (
+      {data && viewMode === 'table' && (
         <BookingTableView
           roomTypes={filteredRoomTypes}
           filters={filters}
@@ -281,7 +320,7 @@ export default function ReservationPage() {
       )}
 
       {/* ──── List View ──── */}
-      {data && !loading && viewMode === 'list' && (
+      {data && viewMode === 'list' && (
         <BookingListView
           roomTypes={filteredRoomTypes}
           filters={filters}
@@ -294,17 +333,18 @@ export default function ReservationPage() {
       )}
 
       {/* ──── Tape Chart (Main 2-Panel Layout) ──── */}
-      {data && !loading && viewMode === 'tape' && (
+      {data && viewMode === 'tape' && (
+        <ErrorBoundary onReset={fetchData}>
         <div
-          style={{ display: 'flex', flex: 1, overflow: 'hidden' }}
-          onMouseMove={(e) => {
-            if (!isCreating) dragMouseMove(e);
+          style={{ display: 'flex', flex: 1, overflow: 'hidden', touchAction: 'none' }}
+          onPointerMove={(e) => {
+            if (!isCreating) dragPointerMove(e);
           }}
-          onMouseUp={(e) => {
-            dragMouseUp(e);
+          onPointerUp={(e) => {
+            dragPointerUp(e);
           }}
-          onMouseLeave={(e) => {
-            dragMouseUp(e);
+          onPointerCancel={(e) => {
+            dragPointerUp(e);
           }}
         >
           {/* ──── LEFT PANEL: Room Names (fixed width, scrolls vertically in sync) ──── */}
@@ -493,14 +533,12 @@ export default function ReservationPage() {
                           rangeStart={rangeStart}
                           rangeDays={rangeDays}
                           dragState={dragState}
-                          onMouseDown={(e, b, r, mode) => startDrag(e, b, r, mode)}
-                          onClick={(b, r) => setDetailBooking({ booking: b, room: r })}
-                          onMouseEnter={(e, b, r) => {
-                            showTooltip({ booking: b, room: r });
-                          }}
+                          onPointerDown={handleBookingPointerDown}
+                          onClick={handleBookingClick}
+                          onMouseEnter={handleBookingMouseEnter}
                           onMouseLeave={hideTooltip}
                           onMouseMove={updatePosition}
-                          onContextMenu={(e, b, r) => setContextMenu({ booking: b, room: r, x: e.clientX, y: e.clientY })}
+                          onContextMenu={handleBookingContextMenu}
                           isHighlighted={filters.search ? highlightedIds.has(booking.id) : undefined}
                         />
                       ))}
@@ -511,7 +549,9 @@ export default function ReservationPage() {
             ))}
           </div>
         </div>
+        </ErrorBoundary>
       )}
+
 
       {/* ──── Tooltip ──── */}
       {tooltipData && <Tooltip divRef={tooltipRef} data={tooltipData} />}
@@ -538,41 +578,77 @@ export default function ReservationPage() {
               setContextMenu(null);
             }}
             onCheckIn={async (b) => {
-              await fetch(`/api/bookings/${b.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'checkin' }),
-              });
-              setContextMenu(null);
-              fetchData();
+              try {
+                const res = await fetch(`/api/bookings/${b.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'checkin' }),
+                });
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err?.message || `HTTP ${res.status}`);
+                }
+                toast.success(`เช็คอิน ${b.bookingNumber} สำเร็จ`);
+                setContextMenu(null);
+                fetchData();
+              } catch (e) {
+                toast.error('เช็คอินไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+              }
             }}
             onCheckOut={async (b) => {
-              await fetch(`/api/bookings/${b.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'checkout' }),
-              });
-              setContextMenu(null);
-              fetchData();
+              try {
+                const res = await fetch(`/api/bookings/${b.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'checkout' }),
+                });
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err?.message || `HTTP ${res.status}`);
+                }
+                toast.success(`เช็คเอาท์ ${b.bookingNumber} สำเร็จ`);
+                setContextMenu(null);
+                fetchData();
+              } catch (e) {
+                toast.error('เช็คเอาท์ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+              }
             }}
             onCancel={async (b) => {
               if (!confirm(`ยืนยันการยกเลิกการจอง ${b.bookingNumber}?`)) return;
-              await fetch(`/api/bookings/${b.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'cancel' }),
-              });
-              setContextMenu(null);
-              fetchData();
+              try {
+                const res = await fetch(`/api/bookings/${b.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'cancel' }),
+                });
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err?.message || `HTTP ${res.status}`);
+                }
+                toast.success(`ยกเลิกการจอง ${b.bookingNumber} สำเร็จ`);
+                setContextMenu(null);
+                fetchData();
+              } catch (e) {
+                toast.error('ยกเลิกการจองไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+              }
             }}
             onToggleLock={async (b) => {
-              await fetch(`/api/bookings/${b.id}`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: 'toggleLock' }),
-              });
-              setContextMenu(null);
-              fetchData();
+              try {
+                const res = await fetch(`/api/bookings/${b.id}`, {
+                  method: 'PATCH',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ action: 'toggleLock' }),
+                });
+                if (!res.ok) {
+                  const err = await res.json().catch(() => ({}));
+                  throw new Error(err?.message || `HTTP ${res.status}`);
+                }
+                toast.success('เปลี่ยนสถานะล็อกสำเร็จ');
+                setContextMenu(null);
+                fetchData();
+              } catch (e) {
+                toast.error('เปลี่ยนสถานะล็อกไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+              }
             }}
             onNewBooking={(r, dateStr) => {
               setNewBookingState({ room: r, checkIn: dateStr });
@@ -609,6 +685,22 @@ export default function ReservationPage() {
         onCancel={handleCancelConfirm}
         isLoading={isPatching}
       />
+
+      {/* ──── Move Dialog — opened when a tape-chart drag lands on another room without changing dates ──── */}
+      {pendingMove && (() => {
+        const origRoom   = flatRooms.find(r => r.id === pendingMove.originalRoomId) ?? null;
+        const pendingBkg = origRoom?.bookings.find(b => b.id === pendingMove.bookingId) ?? null;
+        return (
+          <MoveRoomDialog
+            open={true}
+            booking={pendingBkg}
+            currentRoom={origRoom}
+            initialTargetRoomId={pendingMove.targetRoomId}
+            onClose={clearPendingMove}
+            onMoved={() => { clearPendingMove(); fetchData(); }}
+          />
+        );
+      })()}
     </div>
   );
 }

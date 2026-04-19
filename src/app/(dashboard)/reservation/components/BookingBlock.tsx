@@ -99,7 +99,7 @@ interface BookingBlockProps {
   rangeStart:  Date;
   rangeDays:   number;
   dragState:   DragState | null;
-  onMouseDown: (e: React.MouseEvent, booking: BookingItem, room: RoomItem, mode: 'move' | 'resize') => void;
+  onPointerDown: (e: React.PointerEvent, booking: BookingItem, room: RoomItem, mode: 'move' | 'resize') => void;
   onClick:     (booking: BookingItem, room: RoomItem) => void;
   onMouseEnter:(e: React.MouseEvent, booking: BookingItem, room: RoomItem) => void;
   onMouseLeave:() => void;
@@ -110,19 +110,30 @@ interface BookingBlockProps {
 
 const BookingBlock = React.memo(function BookingBlock({
   booking, room, rangeStart, rangeDays, dragState,
-  onMouseDown, onClick, onMouseEnter, onMouseLeave, onMouseMove, onContextMenu,
+  onPointerDown, onClick, onMouseEnter, onMouseLeave, onMouseMove, onContextMenu,
   isHighlighted,
 }: BookingBlockProps) {
   const s = resolveBlockStyle(booking);
   const guestName = guestDisplayName(booking.guest);
   const isLocked = booking.roomLocked;
 
-  const ciDay = dayIndex(booking.checkIn,  rangeStart);
-  const coDay = dayIndex(booking.checkOut, rangeStart);
+  // For split bookings, use the per-segment range for POSITIONING; the
+  // booking-wide checkIn/checkOut still drive the detail panel, totals, etc.
+  // `segmentFrom` / `segmentTo` are only set by the API when the booking has
+  // been split across rooms.
+  const rangeFromStr = booking.segmentFrom ?? booking.checkIn;
+  const rangeToStr   = booking.segmentTo   ?? booking.checkOut;
+  const isPartial    = booking.segmentCount !== undefined && booking.segmentCount > 1;
+  const continuesFromLeft  = isPartial && booking.isFirstSegment === false;
+  const continuesToRight   = isPartial && booking.isLastSegment  === false;
+
+  const ciDay = dayIndex(rangeFromStr, rangeStart);
+  const coDay = dayIndex(rangeToStr,   rangeStart);
 
   // Determine display position (apply drag delta if this block is being dragged)
   const isThisDragging = dragState?.bookingId === booking.id && dragState.hasMoved;
   const deltaX = isThisDragging ? dragState!.currentDeltaX : 0;
+  const translateY = isThisDragging && dragState!.mode === 'move' ? dragState!.currentTranslateY : 0;
 
   const displayCiDay = dragState?.mode === 'resize' ? ciDay : ciDay + deltaX;
   const displayCoDay = coDay + deltaX;
@@ -146,6 +157,20 @@ const BookingBlock = React.memo(function BookingBlock({
   // Locked style: thick red border around the block
   const lockedBorder = isLocked ? '2px solid #dc2626' : 'none';
 
+  // Continuation edges — dashed border on the side where the booking
+  // continues in another room. Reduce corner radius on that side so the
+  // dashed edge reads as "cut" rather than "end".
+  const borderLeftStyle  = continuesFromLeft ? 'dashed' : 'solid';
+  const borderRightStyle = continuesToRight  ? 'dashed' : 'none';
+  const radiusLeft  = continuesFromLeft ? 0 : 5;
+  const radiusRight = continuesToRight  ? 0 : 5;
+
+  // Disable drag for partial segments — dragging a segment that represents
+  // only part of the stay is semantically ambiguous (move the whole booking?
+  // just this segment? reshape the split?). Force the user through the
+  // detail panel's MoveRoomDialog / Split wizard for clarity.
+  const dragDisabled = isLocked || isPartial;
+
   return (
     <div
       data-booking-block
@@ -156,18 +181,22 @@ const BookingBlock = React.memo(function BookingBlock({
         left:        blockLeft,
         width:       Math.max(blockWidth, 18),
         background:  blockBg,
-        borderLeft:  `3px solid ${s.border}`,
+        borderLeft:  `3px ${borderLeftStyle} ${s.border}`,
+        borderRight: continuesToRight ? `3px ${borderRightStyle} ${s.border}` : undefined,
         border:      isLocked ? lockedBorder : undefined,
-        borderLeftWidth: isLocked ? 3 : undefined,
-        borderLeftColor: isLocked ? s.border : undefined,
-        borderLeftStyle: 'solid',
-        borderRadius: 5,
+        borderLeftWidth: isLocked ? 3 : 3,
+        borderLeftColor: isLocked ? s.border : s.border,
+        borderLeftStyle: isLocked ? 'solid' : borderLeftStyle,
+        borderTopLeftRadius:    radiusLeft,
+        borderBottomLeftRadius: radiusLeft,
+        borderTopRightRadius:   radiusRight,
+        borderBottomRightRadius:radiusRight,
         display:     'flex',
         alignItems:  'center',
         paddingLeft:  isLocked ? 4 : 6,
         paddingRight: 10,
         overflow:    'hidden',
-        cursor:      isLocked ? 'not-allowed' : isThisDragging ? 'grabbing' : 'grab',
+        cursor:      dragDisabled ? (isLocked ? 'not-allowed' : 'pointer') : isThisDragging ? 'grabbing' : 'grab',
         boxShadow:   isThisDragging
           ? `0 6px 20px rgba(0,0,0,0.25), 0 0 0 2px ${s.border}`
           : isHighlighted
@@ -176,22 +205,37 @@ const BookingBlock = React.memo(function BookingBlock({
         opacity:     isThisDragging ? 0.9 : 1,
         zIndex:      isThisDragging ? 20 : 2,
         userSelect:  'none',
+        touchAction: 'none',
+        transform:   translateY !== 0 ? `translateY(${translateY}px)` : undefined,
         transition:  isThisDragging ? 'none' : 'box-shadow 0.15s',
       }}
       onMouseEnter={e => onMouseEnter(e, booking, room)}
       onMouseLeave={onMouseLeave}
       onMouseMove={onMouseMove}
       onContextMenu={e => { e.preventDefault(); onContextMenu(e, booking, room); }}
-      onMouseDown={e => {
-        if (isLocked) return; // prevent drag if locked
+      onPointerDown={e => {
+        if (dragDisabled) return; // locked OR partial-segment → click-only
         if ((e.target as HTMLElement).dataset.resize === 'true') return;
-        onMouseDown(e, booking, room, 'move');
+        onPointerDown(e, booking, room, 'move');
       }}
       onClick={e => {
         e.stopPropagation();
         if (!dragState?.hasMoved) onClick(booking, room);
       }}
     >
+      {/* ✂️ Split indicator — shown when this block is only part of a split booking */}
+      {isPartial && blockWidth > 24 && (
+        <span
+          title={`ช่วงที่ ${(booking.segmentIndex ?? 0) + 1} จาก ${booking.segmentCount} (booking นี้ถูก split ข้ามห้อง)`}
+          style={{
+            fontSize: 9, marginRight: 3, flexShrink: 0, lineHeight: 1,
+            color: s.text, opacity: 0.8,
+          }}
+        >
+          ✂
+        </span>
+      )}
+
       {/* 🔒 Lock icon — shown at left when roomLocked */}
       {isLocked && blockWidth > 30 && (
         <span style={{
@@ -227,22 +271,9 @@ const BookingBlock = React.memo(function BookingBlock({
         </span>
       )}
 
-      {/* Resize handle — right edge (disabled if locked) */}
-      {!isLocked && (
-        <div
-          data-resize="true"
-          style={{
-            position: 'absolute', right: 0, top: 0, bottom: 0, width: 8,
-            cursor: 'col-resize',
-            background: `linear-gradient(to left, ${s.border}50, transparent)`,
-            borderRadius: '0 5px 5px 0',
-          }}
-          onMouseDown={e => {
-            e.stopPropagation();
-            onMouseDown(e, booking, room, 'resize');
-          }}
-        />
-      )}
+      {/* Resize handle removed — extending a stay must go through the "อยู่ต่อ"
+          wizard in DetailPanel which creates the correct extension invoice.
+          Drag-resize bypassed rate recalculation / invoice generation. */}
     </div>
   );
 }, (prev, next) => {
@@ -255,13 +286,20 @@ const BookingBlock = React.memo(function BookingBlock({
     prev.booking.roomLocked    === next.booking.roomLocked &&
     prev.booking.checkIn       === next.booking.checkIn &&
     prev.booking.checkOut      === next.booking.checkOut &&
+    prev.booking.segmentFrom   === next.booking.segmentFrom &&
+    prev.booking.segmentTo     === next.booking.segmentTo &&
+    prev.booking.segmentIndex  === next.booking.segmentIndex &&
+    prev.booking.segmentCount  === next.booking.segmentCount &&
+    prev.booking.isFirstSegment === next.booking.isFirstSegment &&
+    prev.booking.isLastSegment === next.booking.isLastSegment &&
     prev.rangeDays             === next.rangeDays &&
     prev.isHighlighted         === next.isHighlighted &&
     prev.rangeStart.getTime()  === next.rangeStart.getTime() &&
     (prev.dragState?.bookingId !== prev.booking.id && next.dragState?.bookingId !== next.booking.id
       ? true
-      : prev.dragState?.currentDeltaX === next.dragState?.currentDeltaX &&
-        prev.dragState?.hasMoved      === next.dragState?.hasMoved)
+      : prev.dragState?.currentDeltaX   === next.dragState?.currentDeltaX &&
+        prev.dragState?.currentTranslateY === next.dragState?.currentTranslateY &&
+        prev.dragState?.hasMoved        === next.dragState?.hasMoved)
   );
 });
 

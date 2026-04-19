@@ -103,26 +103,39 @@ export async function POST(request: NextRequest) {
     });
 
     // === DOUBLE-BOOKING VALIDATION ===
-    const conflict = await prisma.booking.findFirst({
+    // Query BookingRoomSegment (not Booking) — segments are the authoritative
+    // record of which room a booking physically occupies on each day. For
+    // split bookings, booking.roomId points only to the LATEST room while the
+    // earlier segment(s) may be in different rooms. Using Booking here would:
+    //   (a) over-detect on the latest room (the booking appears to span its
+    //       full checkIn→checkOut there, even on days it was in another room)
+    //   (b) under-detect on earlier rooms (the booking isn't indexed there
+    //       at all via booking.roomId)
+    const conflictSegment = await prisma.bookingRoomSegment.findFirst({
       where: {
-        id: { not: bookingId },
-        roomId: targetRoomId,
-        status: { in: ['confirmed', 'checked_in'] },
-        checkIn: { lt: newCheckOut },
-        checkOut: { gt: newCheckIn },
+        roomId:    targetRoomId,
+        bookingId: { not: bookingId },
+        fromDate:  { lt: newCheckOut },
+        toDate:    { gt: newCheckIn },
+        booking:   { status: { in: ['confirmed', 'checked_in'] } },
       },
       select: {
-        bookingNumber: true,
-        guest: {
+        booking: {
           select: {
-            firstName: true,
-            lastName: true,
-            firstNameTH: true,
-            lastNameTH: true,
+            bookingNumber: true,
+            guest: {
+              select: {
+                firstName:   true,
+                lastName:    true,
+                firstNameTH: true,
+                lastNameTH:  true,
+              },
+            },
           },
         },
       },
     });
+    const conflict = conflictSegment?.booking ?? null;
 
     if (conflict) {
       const guestName =
