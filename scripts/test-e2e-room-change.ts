@@ -547,6 +547,66 @@ async function main() {
     );
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  section('SPLIT then EXTEND — last segment.toDate tracks booking.checkOut');
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Regression: before the fix, `/extend` updated booking.checkOut but left
+  // the last BookingRoomSegment.toDate untouched. After a prior SPLIT, the
+  // tape chart (segment-driven) rendered the stay as shorter than it was,
+  // and the segment-based availability check let other bookings double-
+  // book the room during the extension window.
+  //
+  // This test drives the same two transactions the API calls — splitSegmentInTx
+  // then the same segment-sync logic `/extend` performs — and asserts that
+  // the last segment's toDate matches the new checkOut after both operations.
+  {
+    const b = await createBooking({
+      num: 'EXT1', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 140), checkOut: addDays(day0, 145),
+      status: 'checked_in', rate: 1000,
+    });
+    const firstSeg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+
+    // Step 1: SPLIT at day +143 (new half = [143, 145) on roomB @ 1200)
+    await prisma.$transaction(
+      (tx) => splitSegmentInTx(tx, {
+        bookingId: b.id, segmentId: firstSeg!.id,
+        splitDate: addDays(day0, 143),
+        newRoomId: fx.roomB.id, newRate: 1200,
+        reason: 'mid-stay upgrade', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+
+    // Step 2: simulate `/extend` — push checkOut from day+145 → day+148 and
+    // sync the LAST segment's toDate in the same transaction.
+    const newCheckOut = addDays(day0, 148);
+    await prisma.$transaction(async (tx) => {
+      await tx.booking.update({
+        where: { id: b.id },
+        data:  { checkOut: newCheckOut },
+      });
+      const last = await tx.bookingRoomSegment.findFirst({
+        where: { bookingId: b.id }, orderBy: { fromDate: 'desc' },
+      });
+      await tx.bookingRoomSegment.update({
+        where: { id: last!.id },
+        data:  { toDate: newCheckOut },
+      });
+    });
+
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    const bAfter = await prisma.booking.findUnique({ where: { id: b.id } });
+    ok('2 segments after split+extend', segs.length === 2);
+    ok('seg[1] (last) ends at new checkOut',
+      segs[1].toDate.getTime() === newCheckOut.getTime());
+    ok('booking.checkOut === last segment.toDate',
+      bAfter!.checkOut.getTime() === segs[1].toDate.getTime());
+  }
+
   // ─── Summary ─────────────────────────────────────────────────────────────
   console.log(`\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`);
   console.log(`${BOLD}Results:${RESET}  ${GREEN}${passed} passed${RESET}   ${failed > 0 ? RED : ''}${failed} failed${RESET}`);
