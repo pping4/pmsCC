@@ -44,34 +44,45 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ hasOverlap: false });
     }
 
-    const conflict = await prisma.booking.findFirst({
+    // Segment-based overlap check. BookingRoomSegment is authoritative for
+    // multi-segment stays (MOVE / SPLIT split a booking across rooms) —
+    // checking Booking alone over/under-detects. See /api/bookings POST for
+    // the full rationale.
+    const conflictSeg = await prisma.bookingRoomSegment.findFirst({
       where: {
         roomId,
-        status:   { in: ['confirmed', 'checked_in'] },
-        checkIn:  { lt: newCheckOut },
-        checkOut: { gt: newCheckIn  },
-        ...(excludeId ? { id: { not: excludeId } } : {}),
+        fromDate: { lt: newCheckOut },
+        toDate:   { gt: newCheckIn  },
+        booking:  { status: { in: ['confirmed', 'checked_in'] } },
+        ...(excludeId ? { bookingId: { not: excludeId } } : {}),
       },
       select: {
-        id:            true,
-        bookingNumber: true,
-        checkIn:       true,
-        checkOut:      true,
-        guest: {
+        fromDate: true,
+        toDate:   true,
+        booking:  {
           select: {
-            firstName:   true,
-            lastName:    true,
-            firstNameTH: true,
-            lastNameTH:  true,
+            id:            true,
+            bookingNumber: true,
+            checkIn:       true,
+            checkOut:      true,
+            guest: {
+              select: {
+                firstName:   true,
+                lastName:    true,
+                firstNameTH: true,
+                lastNameTH:  true,
+              },
+            },
           },
         },
       },
     });
 
-    if (!conflict) {
+    if (!conflictSeg) {
       return NextResponse.json({ hasOverlap: false });
     }
 
+    const conflict = conflictSeg.booking;
     const guestName = conflict.guest.firstNameTH && conflict.guest.lastNameTH
       ? `${conflict.guest.firstNameTH} ${conflict.guest.lastNameTH}`
       : `${conflict.guest.firstName} ${conflict.guest.lastName}`;
@@ -82,8 +93,10 @@ export async function GET(request: NextRequest) {
         id:            conflict.id,
         bookingNumber: conflict.bookingNumber,
         guestName,
-        checkIn:  formatDate(conflict.checkIn),
-        checkOut: formatDate(conflict.checkOut),
+        // Return the SEGMENT window, not the booking window — the overlap
+        // is specifically with this segment's occupancy of this room.
+        checkIn:  formatDate(conflictSeg.fromDate),
+        checkOut: formatDate(conflictSeg.toDate),
       },
     });
   } catch (error) {

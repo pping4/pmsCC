@@ -726,6 +726,68 @@ async function main() {
     ok('seg[2] rate still 1500 (SPLIT rate preserved)', segs[2].rate.toString() === '1500');
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  section('Segment-based overlap — post-MOVE availability on vacated room');
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Regression (user report: "จองห้องไม่ได้ ทั้งๆที่ห้องว่าง"):
+  //
+  // Old Booking-based overlap kept rejecting a new booking on room A for the
+  // post-move days, because booking.checkIn/checkOut still spanned the whole
+  // stay. Fix: /api/bookings POST and /api/reservation/check-overlap now use
+  // segment-based findFirst. Here we exercise the SAME query shape directly.
+  {
+    // Existing stay A[200,205), mid-stay MOVE at day 202 to B.
+    // After MOVE: segments A[200,202), B[202,205).
+    // → Room A must be available for a NEW booking in [202,205).
+    // → Room A must still be BUSY for [200,202).
+    // → Room B must be BUSY for [202,205).
+    const b = await createBooking({
+      num: 'OV1', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 200), checkOut: addDays(day0, 205),
+      status: 'confirmed', rate: 1000,
+    });
+    await prisma.$transaction(
+      (tx) => moveRoomInTx(tx, {
+        bookingId: b.id, newRoomId: fx.roomB.id,
+        effectiveDate: addDays(day0, 202),
+        reason: 'vacate A mid-stay', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+
+    // Segment-aware overlap query — identical shape to /api/bookings POST
+    // and /api/reservation/check-overlap GET.
+    async function segBusy(roomId: string, ci: Date, co: Date) {
+      return prisma.bookingRoomSegment.findFirst({
+        where: {
+          roomId,
+          fromDate: { lt: co },
+          toDate:   { gt: ci },
+          booking:  { status: { in: ['confirmed', 'checked_in'] } },
+        },
+        select: { id: true },
+      });
+    }
+
+    const roomAPostMove = await segBusy(fx.roomA.id, addDays(day0, 202), addDays(day0, 205));
+    ok('room A free for [202,205) after MOVE', roomAPostMove === null);
+
+    const roomAPreMove = await segBusy(fx.roomA.id, addDays(day0, 200), addDays(day0, 202));
+    ok('room A still busy for [200,202) before MOVE', roomAPreMove !== null);
+
+    const roomBPostMove = await segBusy(fx.roomB.id, addDays(day0, 202), addDays(day0, 205));
+    ok('room B busy for [202,205) (destination)', roomBPostMove !== null);
+
+    // Partial overlap at the boundary: [204,207) should still flag B busy (shares 204-205).
+    const roomBBoundary = await segBusy(fx.roomB.id, addDays(day0, 204), addDays(day0, 207));
+    ok('room B busy for boundary-overlap [204,207)', roomBBoundary !== null);
+
+    // Adjacent, non-overlapping: [205,208) must be FREE on B.
+    const roomBAdjacent = await segBusy(fx.roomB.id, addDays(day0, 205), addDays(day0, 208));
+    ok('room B free for adjacent [205,208)', roomBAdjacent === null);
+  }
+
   // ─── Summary ─────────────────────────────────────────────────────────────
   console.log(`\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`);
   console.log(`${BOLD}Results:${RESET}  ${GREEN}${passed} passed${RESET}   ${failed > 0 ? RED : ''}${failed} failed${RESET}`);

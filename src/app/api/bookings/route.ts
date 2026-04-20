@@ -112,19 +112,28 @@ export async function POST(request: NextRequest) {
     const room = await prisma.room.findUnique({ where: { number: data.roomNumber } });
     if (!room) return NextResponse.json({ error: `ไม่พบห้อง ${data.roomNumber}` }, { status: 404 });
 
-    // Check for overlapping bookings
-    const overlap = await prisma.booking.findFirst({
+    // Check for overlapping bookings via BookingRoomSegment (authoritative).
+    //
+    // Why segments, not Booking: after a MOVE or SPLIT, `booking.roomId`
+    // points only to the LATEST room in the stay while earlier segments
+    // may be on other rooms. A Booking-based check would (a) over-detect
+    // on the latest room (the booking looks like it spans its full
+    // checkIn→checkOut there, even on days it was in another room) and
+    // (b) under-detect on earlier rooms (the booking isn't indexed there
+    // via booking.roomId) — so guests can't book an actually-free room,
+    // and actually-occupied rooms look available.
+    const overlapSegment = await prisma.bookingRoomSegment.findFirst({
       where: {
-        roomId: room.id,
-        status: { in: ['confirmed', 'checked_in'] },
-        checkIn:  { lt: checkOutDate },
-        checkOut: { gt: checkInDate  },
+        roomId:   room.id,
+        fromDate: { lt: checkOutDate },
+        toDate:   { gt: checkInDate  },
+        booking:  { status: { in: ['confirmed', 'checked_in'] } },
       },
-      select: { bookingNumber: true },
+      select: { booking: { select: { bookingNumber: true } } },
     });
-    if (overlap) {
+    if (overlapSegment) {
       return NextResponse.json(
-        { error: `วันที่ทับซ้อนกับการจอง ${overlap.bookingNumber}` },
+        { error: `วันที่ทับซ้อนกับการจอง ${overlapSegment.booking.bookingNumber}` },
         { status: 409 }
       );
     }
@@ -190,6 +199,24 @@ export async function POST(request: NextRequest) {
           status:        true,
           roomId:        true,
           guestId:       true,
+        },
+      });
+
+      // ★ Create the initial BookingRoomSegment covering [checkIn, checkOut) ★
+      // BookingRoomSegment is the authoritative source of truth for room
+      // availability / overlap checks in `src/services/roomChange.service.ts`
+      // (SHUFFLE, MOVE, and their candidate listers). Without this row the
+      // booking is invisible to those availability queries → double-booking
+      // risk, and SHUFFLE would throw MULTI_SEGMENT_NOT_SUPPORTED.
+      await tx.bookingRoomSegment.create({
+        data: {
+          bookingId:   created.id,
+          roomId:      room.id,
+          fromDate:    checkInDate,
+          toDate:      checkOutDate,
+          rate:        data.rate,
+          bookingType: data.bookingType,
+          createdBy:   session?.user?.email ?? 'system',
         },
       });
 
