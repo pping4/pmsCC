@@ -53,9 +53,10 @@ export default function ReservationPage() {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [newBookingState, setNewBookingState] = useState<{ room: RoomItem | null; checkIn: string; checkOut?: string } | null>(null);
 
-  // ──── Ref for scroll synchronization ────
-  const leftPanelRef = useRef<HTMLDivElement>(null);
+  // ──── Refs for scroll synchronization ────
+  const leftPanelRef  = useRef<HTMLDivElement>(null);
   const rightPanelRef = useRef<HTMLDivElement>(null);
+  const dateHeaderRef = useRef<HTMLDivElement>(null);
 
   // ──── Data Fetching ────
   // Stale-while-revalidate: only show the full-screen loader on the FIRST fetch
@@ -241,29 +242,126 @@ export default function ReservationPage() {
     onTodayKey: () => setFromStr(formatDateStr(new Date())),
   });
 
-  // ──── Scroll synchronization: left panel scrolls with right panel ────
+  // ──── Scroll synchronization: horizontal only ────
+  // Vertical scrolling now happens at the page (<main>) level, so LEFT panel
+  // and RIGHT body share that single scroll automatically — no JS sync needed.
+  // We still need to mirror horizontal scroll between the DateHeader strip
+  // (sticky at top) and the body below it, via hSyncingRef to break the loop.
+  const [rightScrollLeft, setRightScrollLeft] = useState(0);
+  const [rightClientWidth, setRightClientWidth] = useState(0);
+  const hSyncingRef = useRef(false);   // horizontal sync guard (dateHeader ⇄ rightBody)
   const handleRightScroll = useCallback(() => {
-    if (leftPanelRef.current && rightPanelRef.current) {
-      leftPanelRef.current.scrollTop = rightPanelRef.current.scrollTop;
+    const body = rightPanelRef.current;
+    if (!body) return;
+    setRightScrollLeft(body.scrollLeft);
+    setRightClientWidth(body.clientWidth);
+
+    // Mirror horizontal scroll to the date-header strip.
+    if (hSyncingRef.current) {
+      hSyncingRef.current = false;
+    } else if (dateHeaderRef.current && dateHeaderRef.current.scrollLeft !== body.scrollLeft) {
+      hSyncingRef.current = true;
+      dateHeaderRef.current.scrollLeft = body.scrollLeft;
     }
   }, []);
+  const handleDateHeaderScroll = useCallback(() => {
+    const header = dateHeaderRef.current;
+    const body   = rightPanelRef.current;
+    if (!header || !body) return;
+    if (hSyncingRef.current) { hSyncingRef.current = false; return; }
+    hSyncingRef.current = true;
+    body.scrollLeft = header.scrollLeft;
+  }, []);
+  useEffect(() => {
+    if (rightPanelRef.current) {
+      setRightClientWidth(rightPanelRef.current.clientWidth);
+    }
+  }, [data]);
 
-  // ──── Escape dashboard layout padding & overflow ────
-  // The (dashboard)/layout.tsx wraps children in <main style="padding:16px; overflowY:auto">
-  // The tape chart must control its own scroll, so we patch <main> on mount.
+  // ──── "Go to today" visibility + handler ────
+  // Today may be: (a) outside the current date range entirely (user paged
+  // away) → we shift the range; or (b) in range but horizontally scrolled
+  // off-screen → we scroll the right panel. One button handles both.
+  const todayIdx = useMemo(() => {
+    if (!data) return -1;
+    return days.findIndex((d) => formatDateStr(d) === data.today);
+  }, [data, days]);
+  const todayInView = useMemo(() => {
+    if (todayIdx < 0 || rightClientWidth === 0) return false;
+    const todayLeft = todayIdx * DAY_W;
+    return todayLeft >= rightScrollLeft && todayLeft + DAY_W <= rightScrollLeft + rightClientWidth;
+  }, [todayIdx, rightScrollLeft, rightClientWidth]);
+  const goToToday = useCallback(() => {
+    if (!data) return;
+    if (todayIdx < 0) {
+      // Today outside current range → reset range to start at today
+      setFromStr(formatDateStr(new Date()));
+      // After the new data loads we'll land with today at the leftmost column;
+      // do one more scroll-left=0 on the next paint for safety.
+      requestAnimationFrame(() => rightPanelRef.current?.scrollTo({ left: 0, behavior: 'auto' }));
+      return;
+    }
+    const todayLeft = todayIdx * DAY_W;
+    const target = Math.max(0, todayLeft - rightClientWidth / 2 + DAY_W / 2);
+    rightPanelRef.current?.scrollTo({ left: target, behavior: 'smooth' });
+  }, [data, todayIdx, rightClientWidth]);
+
+  // ──── Bound the dashboard shell to viewport so <main> actually scrolls ────
+  // (dashboard)/layout.tsx uses `minHeight: 100vh` on the root, which lets the
+  // shell grow with content — meaning main.flex:1 never hits its overflow cap
+  // and main.overflowY:auto never produces a scrollbar. We pin root+parent to
+  // 100vh here so main is a true vertical scroll container. TapeHeader and
+  // filter chips then scroll inside main naturally; only DateHeader (which is
+  // `position: sticky` against main) stays pinned. Restored on unmount.
   useEffect(() => {
     const main = document.querySelector('main') as HTMLElement | null;
     if (!main) return;
-    const prevPadding  = main.style.padding;
-    const prevOverflow = main.style.overflowY;
-    const prevHeight   = main.style.height;
-    main.style.padding  = '0';
-    main.style.overflowY = 'hidden';
-    main.style.height    = '100%';
+    const parent = main.parentElement as HTMLElement | null;
+    const root   = parent?.parentElement as HTMLElement | null;
+
+    const snap = (el: HTMLElement | null) => el && {
+      el,
+      padding: el.style.padding,
+      height: el.style.height,
+      minHeight: el.style.minHeight,
+      maxHeight: el.style.maxHeight,
+      overflow: el.style.overflow,
+    };
+    const prevMain   = snap(main);
+    const prevParent = snap(parent);
+    const prevRoot   = snap(root);
+
+    if (root) {
+      root.style.height    = '100vh';
+      root.style.maxHeight = '100vh';
+      root.style.minHeight = '0';
+      root.style.overflow  = 'hidden';
+    }
+    if (parent) {
+      parent.style.height    = '100%';
+      parent.style.minHeight = '0';
+      parent.style.overflow  = 'hidden';
+    }
+    // Main: explicitly own vertical scroll and strip padding so the tape
+    // chart is edge-to-edge. (Can't rely on layout.tsx's inline overflowY:auto
+    // surviving React StrictMode's double-mount cleanup cycle.)
+    main.style.padding       = '0';
+    main.style.paddingBottom = '0';
+    main.style.overflowY     = 'auto';
+    main.style.overflowX     = 'hidden';
+
     return () => {
-      main.style.padding  = prevPadding;
-      main.style.overflowY = prevOverflow;
-      main.style.height    = prevHeight;
+      const restore = (s: ReturnType<typeof snap>) => {
+        if (!s) return;
+        s.el.style.padding   = s.padding;
+        s.el.style.height    = s.height;
+        s.el.style.minHeight = s.minHeight;
+        s.el.style.maxHeight = s.maxHeight;
+        s.el.style.overflow  = s.overflow;
+      };
+      restore(prevMain);
+      restore(prevParent);
+      restore(prevRoot);
     };
   }, []);
 
@@ -272,12 +370,17 @@ export default function ReservationPage() {
       style={{
         display: 'flex',
         flexDirection: 'column',
-        height: '100%',
         background: '#f9fafb',
         fontFamily: FONT,
-        overflow: 'hidden',
       }}
     >
+      {/* Hide webkit scrollbar on the horizontal DateHeader strip — the strip
+          mirrors the body's horizontal scroll, so its own scrollbar is
+          redundant and would cause double bars. */}
+      <style>{`
+        .tape-date-header-strip::-webkit-scrollbar { width: 0; height: 0; display: none; }
+      `}</style>
+
       {/* ──── Header ──── */}
       <TapeHeader
         fromStr={fromStr}
@@ -336,7 +439,7 @@ export default function ReservationPage() {
       {data && viewMode === 'tape' && (
         <ErrorBoundary onReset={fetchData}>
         <div
-          style={{ display: 'flex', flex: 1, overflow: 'hidden', touchAction: 'none' }}
+          style={{ display: 'flex', touchAction: 'none' }}
           onPointerMove={(e) => {
             if (!isCreating) dragPointerMove(e);
           }}
@@ -347,28 +450,29 @@ export default function ReservationPage() {
             dragPointerUp(e);
           }}
         >
-          {/* ──── LEFT PANEL: Room Names (fixed width, scrolls vertically in sync) ──── */}
+          {/* ──── LEFT PANEL: Room Names (fixed width, no own scroll — flows in
+               page scroll so sticky corner + group headers stick against <main>) ──── */}
           <div
             ref={leftPanelRef}
             style={{
               width: LEFT_W,
               minWidth: LEFT_W,
               flexShrink: 0,
-              overflowY: 'hidden',
               borderRight: '2px solid #e5e7eb',
               background: '#fff',
             }}
           >
-            {/* Corner header — matches DateHeader sticky row height */}
+            {/* Corner header — matches DateHeader sticky row height (~61px).
+                Sticks against <main> (LEFT panel has no own overflow). */}
             <div style={{
-              height: 56, minHeight: 56, flexShrink: 0,
+              height: 61, minHeight: 61, flexShrink: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-              padding: '0 10px',
+              padding: '0 6px',
               background: '#fff',
               borderBottom: '2px solid #e5e7eb',
               position: 'sticky', top: 0, zIndex: 31,
               boxShadow: '0 2px 4px rgba(0,0,0,0.04)',
-              gap: 6,
+              gap: 4,
             }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
                 ห้อง / ชั้น
@@ -395,7 +499,8 @@ export default function ReservationPage() {
             {/* Room type groups + room name rows */}
             {filteredRoomTypes.map((rt) => (
               <React.Fragment key={rt.id}>
-                {/* Group header left cell */}
+                {/* Group header left cell — sticks just below the DateHeader
+                    row (corner + strip are 61px tall). Sticks against <main>. */}
                 <div
                   style={{
                     height: GROUP_H,
@@ -403,7 +508,10 @@ export default function ReservationPage() {
                     borderBottom: '1px solid #e5e7eb',
                     display: 'flex',
                     alignItems: 'center',
-                    padding: '0 10px',
+                    padding: '0 8px',
+                    position: 'sticky',
+                    top: 61,
+                    zIndex: 20,
                   }}
                 >
                   <span style={{ fontSize: 11, fontWeight: 700, color: '#374151' }}>
@@ -441,8 +549,8 @@ export default function ReservationPage() {
                         borderBottom: '1px solid #f3f4f6',
                         display: 'flex',
                         alignItems: 'center',
-                        padding: '0 8px',
-                        gap: 6,
+                        padding: '0 4px 0 8px',
+                        gap: 5,
                         background: '#fff',
                       }}
                       title={`ห้อง ${room.number} — ${label}`}
@@ -468,35 +576,79 @@ export default function ReservationPage() {
             ))}
           </div>
 
-          {/* ──── RIGHT PANEL: Timeline (scrolls both X and Y) ──── */}
-          <div
-            ref={rightPanelRef}
-            onScroll={handleRightScroll}
-            style={{
-              flex: 1,
-              overflowX: 'auto',
-              overflowY: 'auto',
-            }}
-          >
-            {/* Date header (sticky top) */}
-            <DateHeader
-              days={days}
-              todayStr={data.today}
-              occupancyPerDay={data.occupancyPerDay}
-              totalRooms={data.totalRooms}
-            />
+          {/* ──── RIGHT PANEL: split into date-header strip + scrollable body.
+               The DateHeader was previously `position: sticky` inside the same
+               scroll container as the rooms. That pattern is brittle: Chrome
+               intermittently drops sticky positioning when scrollTop is
+               updated programmatically (cross-panel sync) or when multiple
+               stickies stack above virtualised-ish content, which is why the
+               date row disappeared on deep scrolls. Splitting the header out
+               of the scroll body guarantees it always stays visible — we
+               just mirror horizontal scroll between the two strips. ──── */}
+          <div style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            minWidth: 0,
+          }}>
+            {/* DateHeader strip — sticky to <main>'s scroll so it pins at the
+                top once the TapeHeader has scrolled away. Owns its own
+                horizontal scroll (mirrored from the body). */}
+            <div
+              ref={dateHeaderRef}
+              onScroll={handleDateHeaderScroll}
+              className="tape-date-header-strip"
+              style={{
+                position: 'sticky',
+                top: 0,
+                zIndex: 30,
+                overflowX: 'auto',
+                overflowY: 'hidden',
+                scrollbarWidth: 'none',
+                msOverflowStyle: 'none',
+                flexShrink: 0,
+                background: '#fff',
+              }}
+            >
+              <div style={{ minWidth: days.length * DAY_W }}>
+                <DateHeader
+                  days={days}
+                  todayStr={data.today}
+                  occupancyPerDay={data.occupancyPerDay}
+                  totalRooms={data.totalRooms}
+                />
+              </div>
+            </div>
+
+            {/* Body — rooms + bookings. Only horizontal scroll here; vertical
+                scroll is deferred to the page (<main>) so the TapeHeader
+                above can scroll away naturally. Group headers stick below
+                the DateHeader strip. */}
+            <div
+              ref={rightPanelRef}
+              onScroll={handleRightScroll}
+              style={{
+                overflowX: 'auto',
+                overflowY: 'visible',
+                minWidth: 0,
+              }}
+            >
 
             {/* Room timeline rows */}
             {filteredRoomTypes.map((rt) => (
               <React.Fragment key={rt.id}>
-                {/* Group header right cell — timeline strip */}
+                {/* Group header right cell — a decorative bar the full width
+                    of the date range. Can't be sticky here because it lives
+                    inside the body's horizontal-scroll container, not the
+                    page scroll. The LEFT group header (a sibling via
+                    React.Fragment in the left panel) IS sticky and provides
+                    the room-type label while scrolling. */}
                 <div
                   style={{
                     height: GROUP_H,
                     minWidth: days.length * DAY_W,
                     background: '#f8fafc',
                     borderBottom: '1px solid #e5e7eb',
-                    position: 'relative',
                   }}
                 />
 
@@ -547,11 +699,44 @@ export default function ReservationPage() {
                 })}
               </React.Fragment>
             ))}
+            </div>
           </div>
         </div>
         </ErrorBoundary>
       )}
 
+
+      {/* ──── "กลับไปวันนี้" floating button (tape view only) ──── */}
+      {data && viewMode === 'tape' && !todayInView && (
+        <button
+          type="button"
+          onClick={goToToday}
+          title="กลับไปยังคอลัมน์วันนี้"
+          style={{
+            position: 'fixed',
+            right: 24,
+            bottom: 24,
+            zIndex: 50,
+            background: '#2563eb',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 999,
+            padding: '10px 16px',
+            fontSize: 13,
+            fontWeight: 700,
+            fontFamily: FONT,
+            cursor: 'pointer',
+            boxShadow: '0 6px 16px rgba(37,99,235,0.35)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+          aria-label="กลับไปวันนี้"
+        >
+          <span style={{ fontSize: 14 }}>📅</span>
+          กลับไปวันนี้
+        </button>
+      )}
 
       {/* ──── Tooltip ──── */}
       {tooltipData && <Tooltip divRef={tooltipRef} data={tooltipData} />}

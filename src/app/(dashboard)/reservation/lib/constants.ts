@@ -6,7 +6,13 @@ import type { BookingStatus, BookingType, BookingSource, PaymentLevel, BlockStyl
 export const DAY_W    = 44;   // px per day column
 export const ROW_H    = 28;   // px per room row (compact)
 export const GROUP_H  = 26;   // px per room-type group header
-export const LEFT_W   = 190;  // px for the fixed left column (room names)
+export const LEFT_W   = 132;  // px for the fixed left column (room names) — tightened from 190
+// Weekend / today backgrounds — shared between DateHeader and RoomRow so the
+// tinting extends from the date header all the way down through every row.
+export const WEEKEND_BG_SAT = '#eef2f7';  // slate-100 — Saturday
+export const WEEKEND_BG_SUN = '#fef1f2';  // red-50 tinted — Sunday (Thai "main" day off)
+export const TODAY_BG_HEADER = '#dbeafe'; // blue-100
+export const TODAY_BG_CELL   = '#eff6ff'; // blue-50
 export const CHART_MAX_HEIGHT = 'calc(100vh - 200px)'; // max height of scrollable area
 
 export const DRAG_THRESHOLD = 6; // px before a mousedown is considered a drag

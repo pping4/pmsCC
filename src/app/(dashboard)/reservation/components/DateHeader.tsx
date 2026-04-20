@@ -1,6 +1,6 @@
 'use client';
 import React from 'react';
-import { DAY_W, FONT } from '../lib/constants';
+import { DAY_W, FONT, WEEKEND_BG_SAT, WEEKEND_BG_SUN, TODAY_BG_HEADER } from '../lib/constants';
 import { TH_DAYS, formatDateStr } from '../lib/date-utils';
 import { fmtMonthShortTH } from '@/lib/date-format';
 
@@ -17,8 +17,12 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms
     i === 0 || d.getUTCMonth() !== days[i - 1].getUTCMonth();
 
   return (
+    // DateHeader is now rendered inside a dedicated non-scrolling wrapper
+    // in page.tsx (horizontal-only scroll strip) — it no longer needs
+    // `position: sticky`. Keeping z-index so booking tooltips that use
+    // portal rendering stack predictably above it.
     <div style={{
-      position: 'sticky', top: 0, zIndex: 30,
+      zIndex: 30,
       background: '#fff',
       borderBottom: '2px solid #e5e7eb',
       display: 'flex',
@@ -30,7 +34,10 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms
           const dStr      = formatDateStr(d);
           const isToday   = dStr === todayStr;
           const dow       = d.getUTCDay();
-          const isWeekend = dow === 0 || dow === 6;
+          const isSun     = dow === 0;
+          const isSat     = dow === 6;
+          const isWeekend = isSun || isSat;
+          const weekendBg = isSun ? WEEKEND_BG_SUN : isSat ? WEEKEND_BG_SAT : null;
           const isMStart  = isMonthStart(d, i);
           const occ       = occupancyPerDay[dStr] ?? 0;
           const occPct    = totalRooms > 0 ? (occ / totalRooms) : 0;
@@ -41,7 +48,7 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms
               width: DAY_W, minWidth: DAY_W,
               textAlign: 'center',
               padding: '5px 2px 4px',
-              background: isToday ? '#dbeafe' : isWeekend ? '#fafafa' : '#fff',
+              background: isToday ? TODAY_BG_HEADER : weekendBg ?? '#fff',
               borderRight: '1px solid #f3f4f6',
               borderLeft:  isMStart ? '2px solid #d1d5db' : isToday ? '2px solid #3b82f6' : undefined,
               fontFamily: FONT,
@@ -57,13 +64,13 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms
                 </div>
               )}
 
-              {/* Day name */}
-              <div style={{ fontSize: 10, color: isToday ? '#1e40af' : '#9ca3af', fontWeight: isToday ? 700 : 400, lineHeight: 1, marginTop: isMStart ? 8 : 0 }}>
+              {/* Day name — Sunday tinted red, Saturday default weekend gray */}
+              <div style={{ fontSize: 10, color: isToday ? '#1e40af' : isSun ? '#b91c1c' : isSat ? '#64748b' : '#9ca3af', fontWeight: isToday ? 700 : isWeekend ? 600 : 400, lineHeight: 1, marginTop: isMStart ? 8 : 0 }}>
                 {TH_DAYS[dow]}
               </div>
 
               {/* Date number */}
-              <div style={{ fontSize: 14, fontWeight: isToday ? 800 : 600, color: isToday ? '#1e40af' : isWeekend ? '#6b7280' : '#374151', lineHeight: 1.2 }}>
+              <div style={{ fontSize: 14, fontWeight: isToday ? 800 : 600, color: isToday ? '#1e40af' : isSun ? '#b91c1c' : isSat ? '#475569' : '#374151', lineHeight: 1.2 }}>
                 {d.getUTCDate()}
               </div>
 

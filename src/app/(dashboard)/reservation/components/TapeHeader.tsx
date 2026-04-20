@@ -181,10 +181,10 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   // ─── Styles ───────────────────────────────────────────────────────────────────
 
+  // Not sticky: per UX decision the title + filter chips scroll away with the
+  // page so more vertical space is available for the tape chart. Only the
+  // DateHeader strip (in page.tsx) pins at the top of <main>.
   const headerContainerStyle: React.CSSProperties = {
-    position: 'sticky',
-    top: 0,
-    zIndex: 40,
     background: 'white',
     fontFamily: FONT,
   };
@@ -613,6 +613,91 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
             </option>
           ))}
         </select>
+
+        {/* Active-filter chips + clear-all — per CLAUDE.md Data Tables standard.
+            Chips only appear when something is actually active, and clicking
+            one clears that single filter. "ล้างทั้งหมด" only appears if ≥1
+            chip is visible, and resets every filter including search. */}
+        {(() => {
+          const chips: { key: string; label: string; onClear: () => void }[] = [];
+          if (filters.floorFilter !== null) {
+            chips.push({
+              key: 'floor',
+              label: `ชั้น ${filters.floorFilter}`,
+              onClear: () => onFilterChange({ floorFilter: null }),
+            });
+          }
+          if (filters.typeFilter) {
+            const rt = roomTypes.find((r) => r.id === filters.typeFilter);
+            chips.push({
+              key: 'type',
+              label: rt ? `${rt.code} — ${rt.name}` : 'ประเภทที่เลือก',
+              onClear: () => onFilterChange({ typeFilter: null }),
+            });
+          }
+          if (filters.statusFilter) {
+            const opt = ALL_STATUS_OPTIONS.find((o) => o.value === filters.statusFilter);
+            chips.push({
+              key: 'status',
+              label: opt ? `${opt.icon} ${opt.label}` : String(filters.statusFilter),
+              onClear: () => onFilterChange({ statusFilter: null }),
+            });
+          }
+          if (filters.search) {
+            chips.push({
+              key: 'search',
+              label: `🔍 "${filters.search}"`,
+              onClear: () => {
+                setSearchValue('');
+                onSearch('');
+              },
+            });
+          }
+          if (chips.length === 0) return null;
+          return (
+            <>
+              {chips.map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={c.onClear}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                    padding: '3px 8px',
+                    background: '#eff6ff',
+                    border: '1px solid #bfdbfe',
+                    borderRadius: 999,
+                    fontSize: 11, fontWeight: 600, color: '#1e40af',
+                    cursor: 'pointer', fontFamily: FONT,
+                  }}
+                  title="ลบฟิลเตอร์นี้"
+                >
+                  {c.label}
+                  <span style={{ fontSize: 12, color: '#64748b', marginLeft: 2 }}>×</span>
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchValue('');
+                  onFilterChange({ floorFilter: null, typeFilter: null, statusFilter: null });
+                  onSearch('');
+                }}
+                style={{
+                  padding: '3px 10px',
+                  background: 'transparent',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: 999,
+                  fontSize: 11, fontWeight: 600, color: '#dc2626',
+                  cursor: 'pointer', fontFamily: FONT,
+                }}
+                title="ล้างฟิลเตอร์ทั้งหมด"
+              >
+                ล้างทั้งหมด
+              </button>
+            </>
+          );
+        })()}
       </div>
 
       {/* Row 3: Search bar */}
