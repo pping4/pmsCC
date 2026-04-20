@@ -275,12 +275,14 @@ export default function ReservationPage() {
   // (sticky at top) and the body below it, via hSyncingRef to break the loop.
   const [rightScrollLeft, setRightScrollLeft] = useState(0);
   const [rightClientWidth, setRightClientWidth] = useState(0);
+  const [rightScrollWidth, setRightScrollWidth] = useState(0);  // for fade indicators (#10)
   const hSyncingRef = useRef(false);   // horizontal sync guard (dateHeader ⇄ rightBody)
   const handleRightScroll = useCallback(() => {
     const body = rightPanelRef.current;
     if (!body) return;
     setRightScrollLeft(body.scrollLeft);
     setRightClientWidth(body.clientWidth);
+    setRightScrollWidth(body.scrollWidth);
 
     // Mirror horizontal scroll to the date-header strip.
     if (hSyncingRef.current) {
@@ -301,8 +303,16 @@ export default function ReservationPage() {
   useEffect(() => {
     if (rightPanelRef.current) {
       setRightClientWidth(rightPanelRef.current.clientWidth);
+      setRightScrollWidth(rightPanelRef.current.scrollWidth);
     }
   }, [data]);
+
+  // ──── Horizontal scroll fade indicators (#10) ────
+  // Show a gradient fade at whichever edge still has off-screen content so
+  // users know the tape chart can scroll further in that direction.
+  const showLeftFade  = rightScrollLeft > 4;
+  const showRightFade = rightClientWidth > 0 &&
+    rightScrollLeft + rightClientWidth < rightScrollWidth - 4;
 
   // ──── "Go to today" visibility + handler ────
   // Today may be: (a) outside the current date range entirely (user paged
@@ -616,7 +626,26 @@ export default function ReservationPage() {
             display: 'flex',
             flexDirection: 'column',
             minWidth: 0,
+            position: 'relative',  // anchor for fade overlays (#10)
           }}>
+            {/* ─── Scroll-fade indicators (#10) — purely visual cues that
+                there is more content off-screen. Overlay width: 24px on
+                each edge. pointer-events:none so they never block clicks
+                on bookings. opacity transitions smoothly as you scroll. */}
+            <div aria-hidden style={{
+              position: 'absolute', top: 0, bottom: 0, left: 0,
+              width: 24, zIndex: 25, pointerEvents: 'none',
+              background: 'linear-gradient(to right, rgba(249,250,251,0.95), rgba(249,250,251,0))',
+              opacity: showLeftFade ? 1 : 0,
+              transition: 'opacity 0.2s',
+            }} />
+            <div aria-hidden style={{
+              position: 'absolute', top: 0, bottom: 0, right: 0,
+              width: 24, zIndex: 25, pointerEvents: 'none',
+              background: 'linear-gradient(to left, rgba(249,250,251,0.95), rgba(249,250,251,0))',
+              opacity: showRightFade ? 1 : 0,
+              transition: 'opacity 0.2s',
+            }} />
             {/* DateHeader strip — sticky to <main>'s scroll so it pins at the
                 top once the TapeHeader has scrolled away. Owns its own
                 horizontal scroll (mirrored from the body). */}
