@@ -607,6 +607,125 @@ async function main() {
       bAfter!.checkOut.getTime() === segs[1].toDate.getTime());
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  section('MOVE — sequential (A → B, stay, then B → C)');
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Real-world: guest moves, stays a day, then wants to move again. The
+  // booking must end up with three segments: A[checkIn, eff1), B[eff1, eff2),
+  // C[eff2, checkOut).
+  {
+    const b = await createBooking({
+      num: 'MV1', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 150), checkOut: addDays(day0, 156),
+      status: 'checked_in', rate: 1000,
+    });
+    // First MOVE at day+152 → A, B
+    const r1 = await prisma.$transaction(
+      (tx) => moveRoomInTx(tx, {
+        bookingId: b.id, newRoomId: fx.roomB.id,
+        effectiveDate: addDays(day0, 152),
+        reason: '1st move', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    // Second MOVE at day+154 → A, B (shortened), D
+    // (roomC is DLX, but we need a 3rd available room. roomD is DLX too.)
+    const r2 = await prisma.$transaction(
+      (tx) => moveRoomInTx(tx, {
+        bookingId: b.id, newRoomId: fx.roomD.id,
+        effectiveDate: addDays(day0, 154),
+        reason: '2nd move', expectedVersion: r1.newVersion, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    ok('2nd MOVE succeeded', r2.splitApplied === true);
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    ok('3 segments after two MOVEs', segs.length === 3);
+    ok('seg[0] = roomA', segs[0].roomId === fx.roomA.id);
+    ok('seg[1] = roomB', segs[1].roomId === fx.roomB.id);
+    ok('seg[2] = roomD', segs[2].roomId === fx.roomD.id);
+    const bAfter = await prisma.booking.findUnique({ where: { id: b.id } });
+    ok('booking.roomId tracks latest (D)', bAfter?.roomId === fx.roomD.id);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('MOVE — scheduled future (confirmed booking, eff in future)');
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Ops schedules a move that takes effect several days into the guest's
+  // stay — they stay in the old room until then, then the segment splits.
+  {
+    const b = await createBooking({
+      num: 'MV2', guestId: fx.g2.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 160), checkOut: addDays(day0, 165),
+      status: 'confirmed', rate: 1000,
+    });
+    // Future-scheduled move: effective day+163 (2 days into the stay)
+    await prisma.$transaction(
+      (tx) => moveRoomInTx(tx, {
+        bookingId: b.id, newRoomId: fx.roomB.id,
+        effectiveDate: addDays(day0, 163),
+        reason: 'scheduled future', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    ok('2 segments after scheduled MOVE', segs.length === 2);
+    ok('pre-move part stays in A', segs[0].roomId === fx.roomA.id);
+    ok('pre-move part ends at eff', segs[0].toDate.getTime() === addDays(day0, 163).getTime());
+    ok('post-move part in B', segs[1].roomId === fx.roomB.id);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  section('MOVE — composes with SPLIT (does NOT overwrite later segment)');
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // Regression: the old behaviour redirected ALL later segments to the new
+  // room. If the operator had already SPLIT a future day onto room X, a
+  // MOVE at an earlier date would silently overwrite X. The fix scopes MOVE
+  // to activeSegment only.
+  {
+    const b = await createBooking({
+      num: 'MV3', guestId: fx.g1.id, roomId: fx.roomA.id,
+      checkIn: addDays(day0, 170), checkOut: addDays(day0, 175),
+      status: 'confirmed', rate: 1000,
+    });
+    const firstSeg = await prisma.bookingRoomSegment.findFirst({ where: { bookingId: b.id } });
+    // SPLIT: put days 173-175 on roomC at a different rate
+    const r1 = await prisma.$transaction(
+      (tx) => splitSegmentInTx(tx, {
+        bookingId: b.id, segmentId: firstSeg!.id,
+        splitDate: addDays(day0, 173),
+        newRoomId: fx.roomC.id, newRate: 1500,
+        reason: 'future upgrade', expectedVersion: b.version, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    // Now MOVE at eff=171 to roomB. This should ONLY touch the A segment
+    // (days 170-173), NOT the future C segment (days 173-175).
+    await prisma.$transaction(
+      (tx) => moveRoomInTx(tx, {
+        bookingId: b.id, newRoomId: fx.roomB.id,
+        effectiveDate: addDays(day0, 171),
+        reason: 'earlier move', expectedVersion: r1.newVersion, createdBy: 'e2e',
+      }),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+    const segs = await prisma.bookingRoomSegment.findMany({
+      where: { bookingId: b.id }, orderBy: { fromDate: 'asc' },
+    });
+    ok('3 segments after SPLIT + MOVE', segs.length === 3);
+    ok('seg[0] A[170,171)', segs[0].roomId === fx.roomA.id);
+    ok('seg[1] B[171,173)', segs[1].roomId === fx.roomB.id);
+    ok('seg[2] C[173,175) preserved (NOT overwritten)', segs[2].roomId === fx.roomC.id);
+    ok('seg[2] rate still 1500 (SPLIT rate preserved)', segs[2].rate.toString() === '1500');
+  }
+
   // ─── Summary ─────────────────────────────────────────────────────────────
   console.log(`\n${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}`);
   console.log(`${BOLD}Results:${RESET}  ${GREEN}${passed} passed${RESET}   ${failed > 0 ? RED : ''}${failed} failed${RESET}`);

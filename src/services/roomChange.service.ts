@@ -415,14 +415,24 @@ export async function moveRoomInTx(
     );
   }
 
-  // The new room must be free from effClamped through checkOut — because
-  // MOVE affects the remainder of the stay (the guest stays in the new room
-  // until checkout).
+  // The new room must be free ONLY for the activeSegment's window
+  // `[effClamped, activeSegment.toDate)` — NOT for the whole remainder of
+  // the stay. Rationale: MOVE is composable. A later segment may already
+  // be on a different room (scheduled via a prior MOVE or SPLIT), and this
+  // MOVE must not overwrite it. Each MOVE only affects the segment active
+  // AT `effClamped`, leaving later segments alone.
+  //
+  // Concrete scenarios this supports:
+  //   • Multiple sequential MOVEs: A→B, stay 1 day, B→C at a later date.
+  //   • Scheduled future MOVE: plan a move at day N while still in the
+  //     old room, without disturbing an even-later planned move at day M>N.
+  //   • SPLIT-then-MOVE: if day-4 was SPLIT onto room X, a MOVE at day 2
+  //     to room Y replaces only day 2–4 with Y; day 4 onward stays on X.
   const overlap = await tx.bookingRoomSegment.findFirst({
     where: {
       roomId: input.newRoomId,
       bookingId: { not: input.bookingId },
-      fromDate: { lt: booking.checkOut },
+      fromDate: { lt: activeSegment.toDate },
       toDate:   { gt: effClamped },
       booking:  { status: { not: 'cancelled' } },
     },
@@ -434,12 +444,6 @@ export async function moveRoomInTx(
       'ROOM_UNAVAILABLE',
     );
   }
-
-  // Segments strictly AFTER the active one — those also belong to the "from
-  // effClamped onward" window and must be redirected to the new room too.
-  const laterSegments = booking.roomSegments.filter(
-    s => s.fromDate.getTime() > activeSegment.fromDate.getTime(),
-  );
 
   const splitApplied = effClamped.getTime() > activeSegment.fromDate.getTime();
 
@@ -469,21 +473,24 @@ export async function moveRoomInTx(
     });
   }
 
-  // Any later segments also move to the new room (the guest continues in the
-  // new room for the rest of the stay).
-  for (const seg of laterSegments) {
-    if (seg.roomId !== input.newRoomId) {
-      await tx.bookingRoomSegment.update({
-        where: { id: seg.id },
-        data:  { roomId: input.newRoomId },
-      });
-    }
-  }
+  // IMPORTANT: We do NOT redirect later segments. See overlap-check comment
+  // above for rationale (MOVE composability + respecting prior SPLIT/MOVE).
+
+  // `booking.roomId` must reflect the LAST segment (the room the guest ends
+  // their stay in). After this MOVE, the last segment may still be the
+  // newly-created one, OR it may be an untouched later segment from a
+  // prior operation. Re-read to find out.
+  const latestSeg = await tx.bookingRoomSegment.findFirst({
+    where:   { bookingId: booking.id },
+    orderBy: { fromDate: 'desc' },
+    take:    1,
+    select:  { roomId: true },
+  });
 
   await tx.booking.update({
     where: { id: input.bookingId },
     data: {
-      roomId: input.newRoomId,
+      roomId:  latestSeg?.roomId ?? input.newRoomId,
       version: { increment: 1 },
     },
   });
