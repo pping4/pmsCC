@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { addDays, formatDateStr, parseUTCDate, fmtThai } from '../lib/date-utils';
 import { FONT, ALL_STATUS_OPTIONS } from '../lib/constants';
 import type { FilterState, RoomTypeItem, RoomStatus } from '../lib/types';
@@ -134,8 +134,33 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   // ─── Search Debouncing ────────────────────────────────────────────────────────
   const [searchValue, setSearchValue] = useState(filters.search);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const debounceTimerRef = React.useRef<NodeJS.Timeout | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // ─── Global "/" shortcut — focuses the booking search, GitHub/Slack-style ──
+  // Does nothing if user is already typing in another input/textarea, or if a
+  // modal (Ctrl+K palette, new-booking dialog) has focus. This keeps the
+  // reservation page keyboard-first while avoiding conflict with the command
+  // palette's Cmd/Ctrl+K (which operates on menus, not bookings).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '/') return;
+      const tgt = e.target as HTMLElement | null;
+      if (!tgt) return;
+      const tag = tgt.tagName;
+      const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (tgt as HTMLElement).isContentEditable;
+      if (isEditable) return;
+      // Skip if a dialog is open (command palette, new-booking dialog, etc.)
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      e.preventDefault();
+      searchInputRef.current?.focus();
+      searchInputRef.current?.select();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   const handleSearchChange = useCallback((value: string) => {
     setSearchValue(value);
@@ -309,13 +334,14 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const searchInputStyle: React.CSSProperties = {
     width: '100%',
-    padding: '8px 12px 8px 40px',
+    padding: '8px 56px 8px 40px',  // right-padding leaves room for kbd hint
     borderRadius: 6,
     border: '1px solid #d1d5db',
     fontSize: 13,
     fontFamily: FONT,
     boxSizing: 'border-box',
     color: '#1f2937',
+    outline: 'none',
   };
 
   const searchIconStyle: React.CSSProperties = {
@@ -329,7 +355,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const clearButtonStyle: React.CSSProperties = {
     position: 'absolute',
-    right: 8,
+    right: 44,
     top: '50%',
     transform: 'translateY(-50%)',
     background: 'none',
@@ -339,6 +365,23 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     fontSize: 16,
     padding: '4px 8px',
     display: searchValue ? 'block' : 'none',
+  };
+
+  const kbdHintStyle: React.CSSProperties = {
+    position: 'absolute',
+    right: 10,
+    top: '50%',
+    transform: 'translateY(-50%)',
+    fontSize: 10,
+    fontFamily: 'ui-monospace, monospace',
+    padding: '2px 6px',
+    borderRadius: 4,
+    background: '#f3f4f6',
+    border: '1px solid #d1d5db',
+    color: '#6b7280',
+    pointerEvents: 'none',
+    fontWeight: 600,
+    lineHeight: 1.2,
   };
 
   // ─── Render ───────────────────────────────────────────────────────────────────
@@ -772,19 +815,37 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
         <div style={searchContainerStyle}>
           <div style={searchIconStyle}>🔍</div>
           <input
+            ref={searchInputRef}
             type="text"
-            placeholder="ค้นหา ชื่อผู้เข้าพัก, เลขที่จอง..."
+            placeholder='ค้นหา ชื่อผู้เข้าพัก, เลขที่จอง...  (กด "/" เพื่อโฟกัส)'
             value={searchValue}
             onChange={(e) => handleSearchChange(e.target.value)}
+            onFocus={() => setSearchFocused(true)}
+            onBlur={() => setSearchFocused(false)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                if (searchValue) {
+                  handleClearSearch();
+                } else {
+                  searchInputRef.current?.blur();
+                }
+              }
+            }}
+            aria-label="ค้นหาการจอง — กด slash เพื่อโฟกัส, Escape เพื่อล้าง"
             style={searchInputStyle}
           />
           <button
             onClick={handleClearSearch}
             style={clearButtonStyle}
-            aria-label="Clear search"
+            aria-label="ล้างการค้นหา"
           >
             ×
           </button>
+          {/* kbd hint: shows "/" when empty & not focused, "ESC" when focused */}
+          <kbd style={kbdHintStyle} aria-hidden="true">
+            {searchFocused ? 'ESC' : '/'}
+          </kbd>
         </div>
       </div>
     </div>
