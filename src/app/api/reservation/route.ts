@@ -290,6 +290,84 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // ── Backfill: bookings that have segments in visible rooms but whose
+  // canonical `booking.roomId` points OUTSIDE the visible room set. This
+  // happens when a booking was MOVEd across rooms — BookingRoomSegment
+  // records the physical occupancy, but booking.roomId still points to the
+  // original room. Without this backfill the tape chart would show that room
+  // as empty even though the overlap-check API (which queries segments)
+  // correctly blocks new bookings — the exact inconsistency the user saw.
+  const missingBookingIds: string[] = [];
+  for (const bid of segmentsByBooking.keys()) {
+    if (!bookingsById.has(bid)) missingBookingIds.push(bid);
+  }
+  if (missingBookingIds.length > 0) {
+    const missing = await prisma.booking.findMany({
+      where: { id: { in: missingBookingIds } },
+      select: {
+        id:            true,
+        bookingNumber: true,
+        status:        true,
+        bookingType:   true,
+        source:        true,
+        notes:         true,
+        version:       true,
+        rate:          true,
+        deposit:       true,
+        roomLocked:    true,
+        roomId:        true,
+        checkIn:       true,
+        checkOut:      true,
+        cityLedgerAccountId: true,
+        cityLedgerAccount: { select: { id: true, companyName: true, accountCode: true } },
+        guest: {
+          select: {
+            id: true, firstName: true, lastName: true, firstNameTH: true,
+            lastNameTH: true, nationality: true, phone: true, email: true,
+          },
+        },
+        invoices: { select: { grandTotal: true, paidAmount: true, status: true } },
+      },
+    });
+    for (const b of missing) {
+      const rate    = Number(b.rate);
+      const deposit = Number(b.deposit);
+      const invoices = b.invoices ?? [];
+      let expectedTotal = rate;
+      if (b.bookingType === 'daily') {
+        const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
+        expectedTotal = rate * Math.max(1, nights);
+      }
+      const totalPaid = invoices
+        .filter((inv) => inv.status !== 'voided' && inv.status !== 'cancelled')
+        .reduce((sum, inv) => sum + Number(inv.paidAmount ?? 0), 0);
+      let paymentLevel: 'pending' | 'deposit_paid' | 'fully_paid' = 'pending';
+      if (totalPaid >= expectedTotal && expectedTotal > 0) paymentLevel = 'fully_paid';
+      else if (totalPaid > 0)                              paymentLevel = 'deposit_paid';
+      bookingsById.set(b.id, {
+        id:            b.id,
+        bookingNumber: b.bookingNumber,
+        status:        b.status,
+        bookingType:   b.bookingType,
+        source:        b.source,
+        notes:         b.notes,
+        version:       b.version,
+        guest:         b.guest,
+        rate,
+        deposit,
+        roomLocked:    b.roomLocked ?? false,
+        paymentLevel,
+        totalPaid,
+        expectedTotal,
+        cityLedgerAccountId: b.cityLedgerAccountId ?? null,
+        cityLedgerAccount:   b.cityLedgerAccount   ?? null,
+        checkIn:  formatUTCDate(new Date(b.checkIn)),
+        checkOut: formatUTCDate(new Date(b.checkOut)),
+        _roomId:  b.roomId,
+      });
+    }
+  }
+
   // Second: bucket bookings into rooms using BookingRoomSegment as the
   // authoritative placement. For each room, collect the segments that land
   // in it and emit one entry per segment. If a booking has no segments
