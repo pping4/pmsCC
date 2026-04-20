@@ -11,8 +11,8 @@ interface UseTooltipReturn {
   updatePosition: (e: ReactMouseEvent) => void;
 }
 
-const TOOLTIP_W = 280;
-const TOOLTIP_H = 220;
+const TOOLTIP_W = 300;
+const TOOLTIP_H = 380;  // enhanced tooltip with payment/notes/source can be tall
 const OFFSET_X  = 16;
 const OFFSET_Y  = -10;
 
