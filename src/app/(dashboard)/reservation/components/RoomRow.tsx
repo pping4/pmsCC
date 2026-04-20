@@ -128,14 +128,19 @@ export default function RoomRow({
         );
       })}
 
-      {/* Vertical grid lines */}
-      {days.map((_, i) => (
-        <div key={i} style={{
-          position: 'absolute', top: 0, bottom: 0,
-          left: i * DAY_W, width: 1,
-          background: '#f3f4f6', pointerEvents: 'none',
-        }} />
-      ))}
+      {/* Vertical grid lines — Mondays get a slightly stronger line so
+          weekly boundaries are visible at a glance. */}
+      {days.map((d, i) => {
+        const isMonday = d.getUTCDay() === 1;
+        return (
+          <div key={i} style={{
+            position: 'absolute', top: 0, bottom: 0,
+            left: i * DAY_W, width: isMonday ? 2 : 1,
+            background: isMonday ? '#d1d5db' : '#f3f4f6',
+            pointerEvents: 'none',
+          }} />
+        );
+      })}
 
       {/* Booking blocks (passed as children) */}
       {children}

@@ -4,14 +4,21 @@ import { DAY_W, FONT, WEEKEND_BG_SAT, WEEKEND_BG_SUN, TODAY_BG_HEADER } from '..
 import { TH_DAYS, formatDateStr } from '../lib/date-utils';
 import { fmtMonthShortTH } from '@/lib/date-format';
 
-interface DateHeaderProps {
-  days:            Date[];
-  todayStr:        string;
-  occupancyPerDay: Record<string, number>;
-  totalRooms:      number;
+interface DateBreakdown {
+  arrivals:   number;
+  departures: number;
+  inHouse:    number;
 }
 
-export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms }: DateHeaderProps) {
+interface DateHeaderProps {
+  days:             Date[];
+  todayStr:         string;
+  occupancyPerDay:  Record<string, number>;
+  breakdownPerDay?: Record<string, DateBreakdown>;
+  totalRooms:       number;
+}
+
+export default function DateHeader({ days, todayStr, occupancyPerDay, breakdownPerDay, totalRooms }: DateHeaderProps) {
   // Detect month boundaries: day where getUTCMonth() changes from previous day
   const isMonthStart = (d: Date, i: number) =>
     i === 0 || d.getUTCMonth() !== days[i - 1].getUTCMonth();
@@ -39,20 +46,30 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, totalRooms
           const isWeekend = isSun || isSat;
           const weekendBg = isSun ? WEEKEND_BG_SUN : isSat ? WEEKEND_BG_SAT : null;
           const isMStart  = isMonthStart(d, i);
+          const isMonday  = dow === 1;
           const occ       = occupancyPerDay[dStr] ?? 0;
           const occPct    = totalRooms > 0 ? (occ / totalRooms) : 0;
           const barColor  = occPct >= 0.9 ? '#ef4444' : occPct >= 0.7 ? '#f97316' : occPct >= 0.4 ? '#22c55e' : '#94a3b8';
+          const bd        = breakdownPerDay?.[dStr];
+          // Native title tooltip — zero JS, zero re-render cost. Shows the
+          // date plus arrivals/departures/in-house breakdown so users can
+          // hover any column to see the day's load at a glance.
+          const tip = bd
+            ? `${dStr}\nเข้าพัก: ${bd.arrivals}\nออก: ${bd.departures}\nพักต่อ: ${bd.inHouse}\nใช้ห้อง: ${occ}/${totalRooms} (${Math.round(occPct * 100)}%)`
+            : `${dStr}\nใช้ห้อง: ${occ}/${totalRooms}`;
 
           return (
-            <div key={i} style={{
+            <div key={i} title={tip} style={{
               width: DAY_W, minWidth: DAY_W,
               textAlign: 'center',
               padding: '5px 2px 4px',
               background: isToday ? TODAY_BG_HEADER : weekendBg ?? '#fff',
               borderRight: '1px solid #f3f4f6',
-              borderLeft:  isMStart ? '2px solid #d1d5db' : isToday ? '2px solid #3b82f6' : undefined,
+              // Priority: month start > today > Monday week start
+              borderLeft:  isMStart ? '2px solid #d1d5db' : isToday ? '2px solid #3b82f6' : isMonday ? '2px solid #d1d5db' : undefined,
               fontFamily: FONT,
               position: 'relative',
+              cursor: 'help',
             }}>
               {/* Month label on 1st of month */}
               {isMStart && (

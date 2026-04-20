@@ -166,6 +166,32 @@ export default function ReservationPage() {
     return data.occupancyPerDay[data.today] ?? 0;
   }, [data]);
 
+  // ──── Per-day arrivals / departures / stay-overs for the DateHeader tooltip ────
+  // A booking contributes: +1 arrival on checkIn, +1 departure on checkOut,
+  // +1 stay-over for each night it occupies (checkIn inclusive, checkOut exclusive).
+  // Cancelled bookings are excluded. Runs entirely on already-loaded data —
+  // no extra fetch.
+  const breakdownPerDay = useMemo(() => {
+    if (!data) return {};
+    const map: Record<string, { arrivals: number; departures: number; inHouse: number }> = {};
+    const bump = (key: string, field: 'arrivals' | 'departures' | 'inHouse') => {
+      if (!map[key]) map[key] = { arrivals: 0, departures: 0, inHouse: 0 };
+      map[key][field] += 1;
+    };
+    data.roomTypes.forEach(rt => rt.rooms.forEach(room => room.bookings.forEach(b => {
+      if (b.status === 'cancelled') return;
+      bump(b.checkIn,  'arrivals');
+      bump(b.checkOut, 'departures');
+      // Iterate nights between checkIn and checkOut (exclusive).
+      const ci = new Date(b.checkIn  + 'T00:00:00Z');
+      const co = new Date(b.checkOut + 'T00:00:00Z');
+      for (let t = ci.getTime(); t < co.getTime(); t += 86400000) {
+        bump(new Date(t).toISOString().slice(0, 10), 'inHouse');
+      }
+    })));
+    return map;
+  }, [data]);
+
   // ──── Drag & Drop (move/resize existing bookings) ────
   const {
     dragState,
@@ -615,6 +641,7 @@ export default function ReservationPage() {
                   days={days}
                   todayStr={data.today}
                   occupancyPerDay={data.occupancyPerDay}
+                  breakdownPerDay={breakdownPerDay}
                   totalRooms={data.totalRooms}
                 />
               </div>

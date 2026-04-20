@@ -134,6 +134,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   // ─── Search Debouncing ────────────────────────────────────────────────────────
   const [searchValue, setSearchValue] = useState(filters.search);
+  const [legendOpen, setLegendOpen] = useState(false);
   const debounceTimerRef = React.useRef<NodeJS.Timeout | null>(null);
 
   const handleSearchChange = useCallback((value: string) => {
@@ -698,6 +699,72 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
             </>
           );
         })()}
+      </div>
+
+      {/* Row 3.5: Legend toggle — collapsible color key so users know what
+          booking colours / occupancy thresholds mean. Collapsed by default so
+          it doesn't crowd the header on first load. */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8,
+        padding: '4px 16px 0',
+        fontSize: 11, color: '#6b7280',
+        borderTop: '1px dashed #f3f4f6',
+      }}>
+        <button
+          type="button"
+          onClick={() => setLegendOpen(o => !o)}
+          style={{
+            background: 'transparent', border: 'none',
+            color: '#6b7280', cursor: 'pointer',
+            fontSize: 11, fontWeight: 600, padding: '2px 0',
+            display: 'flex', alignItems: 'center', gap: 4,
+          }}
+          aria-expanded={legendOpen}
+          aria-controls="tape-chart-legend"
+        >
+          <span style={{ fontSize: 9 }}>{legendOpen ? '▼' : '▶'}</span>
+          คำอธิบายสัญลักษณ์
+        </button>
+        {legendOpen && (
+          <div
+            id="tape-chart-legend"
+            style={{
+              display: 'flex', flexWrap: 'wrap', gap: 12,
+              alignItems: 'center', flex: 1,
+              padding: '2px 0 4px',
+            }}
+          >
+            {/* Booking status swatches */}
+            {[
+              { color: '#f59e0b', label: 'รอชำระ' },
+              { color: '#3b82f6', label: 'มัดจำแล้ว' },
+              { color: '#10b981', label: 'ชำระครบ' },
+              { color: '#6366f1', label: 'เช็คอินแล้ว' },
+              { color: '#6b7280', label: 'เช็คเอาท์' },
+              { color: '#ef4444', label: 'ยกเลิก' },
+            ].map(s => (
+              <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: s.color, flexShrink: 0 }} />
+                {s.label}
+              </span>
+            ))}
+            {/* Separator */}
+            <span style={{ width: 1, height: 14, background: '#e5e7eb' }} />
+            {/* Occupancy thresholds */}
+            <span style={{ fontWeight: 600, color: '#9ca3af' }}>Occupancy:</span>
+            {[
+              { color: '#94a3b8', label: '<40%' },
+              { color: '#22c55e', label: '40–70%' },
+              { color: '#f97316', label: '70–90%' },
+              { color: '#ef4444', label: '≥90%' },
+            ].map(s => (
+              <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 2, background: s.color, flexShrink: 0 }} />
+                {s.label}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Row 3: Search bar */}
