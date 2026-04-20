@@ -9,10 +9,11 @@ export const GROUP_H  = 26;   // px per room-type group header
 export const LEFT_W   = 132;  // px for the fixed left column (room names) — tightened from 190
 // Weekend / today backgrounds — shared between DateHeader and RoomRow so the
 // tinting extends from the date header all the way down through every row.
-export const WEEKEND_BG_SAT = '#eef2f7';  // slate-100 — Saturday
-export const WEEKEND_BG_SUN = '#fef1f2';  // red-50 tinted — Sunday (Thai "main" day off)
-export const TODAY_BG_HEADER = '#dbeafe'; // blue-100
-export const TODAY_BG_CELL   = '#eff6ff'; // blue-50
+// Values are CSS var() references so dark mode auto-adjusts via globals.css.
+export const WEEKEND_BG_SAT  = 'var(--tape-weekend-sat-bg)';   // slate-100 (light) / slate-800 (dark)
+export const WEEKEND_BG_SUN  = 'var(--tape-weekend-sun-bg)';   // red-50 tinted
+export const TODAY_BG_HEADER = 'var(--tape-today-header-bg)';  // blue-100 / blue-900
+export const TODAY_BG_CELL   = 'var(--tape-today-cell-bg)';    // blue-50  / blue-950
 export const CHART_MAX_HEIGHT = 'calc(100vh - 200px)'; // max height of scrollable area
 
 export const DRAG_THRESHOLD = 6; // px before a mousedown is considered a drag
@@ -105,20 +106,20 @@ export const FONT = "'Sarabun', 'IBM Plex Sans Thai', system-ui, sans-serif";
 export const INPUT_STYLE: CSSProperties = {
   width: '100%',
   padding: '9px 12px',
-  border: '1px solid #d1d5db',
+  border: '1px solid var(--border-strong)',
   borderRadius: 8,
   fontSize: 13,
   fontFamily: FONT,
   boxSizing: 'border-box',
-  color: '#1f2937',
-  background: '#fff',
+  color: 'var(--text-primary)',
+  background: 'var(--surface-card)',
   outline: 'none',
 };
 
 export const LABEL_STYLE: CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
-  color: '#374151',
+  color: 'var(--text-secondary)',
   marginBottom: 4,
   display: 'block',
 };

@@ -38,6 +38,16 @@
   --scrollbar-track: #f1f5f9;
   --scrollbar-thumb: #cbd5e1;
 
+  /* Tape chart specific (reservation page) */
+  --tape-weekend-sat-bg:   #eef2f7;
+  --tape-weekend-sun-bg:   #fef1f2;
+  --tape-today-header-bg:  #dbeafe;
+  --tape-today-cell-bg:    #eff6ff;
+  --tape-grid-line:        #f3f4f6;
+  --tape-grid-line-week:   #d1d5db;
+  --tape-row-alt-bg:       #fafafa;
+  --tape-group-header-bg:  #f9fafb;
+
   /* Semantic colours (kept for reference, pages use these directly) */
   --primary:       #1e40af;
   --primary-light: #3b82f6;
@@ -77,6 +87,16 @@ html.dark {
 
   --scrollbar-track: #1e293b;
   --scrollbar-thumb: #475569;
+
+  /* Tape chart specific — dark mode */
+  --tape-weekend-sat-bg:   #1f2937;
+  --tape-weekend-sun-bg:   #2a1f24;
+  --tape-today-header-bg:  #1e3a8a;
+  --tape-today-cell-bg:    #172554;
+  --tape-grid-line:        #334155;
+  --tape-grid-line-week:   #475569;
+  --tape-row-alt-bg:       #263040;
+  --tape-group-header-bg:  #1e293b;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

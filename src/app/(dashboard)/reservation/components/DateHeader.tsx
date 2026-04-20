@@ -30,8 +30,8 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, breakdownP
     // portal rendering stack predictably above it.
     <div style={{
       zIndex: 30,
-      background: '#fff',
-      borderBottom: '2px solid #e5e7eb',
+      background: 'var(--surface-card)',
+      borderBottom: '2px solid var(--border-default)',
       display: 'flex',
       boxShadow: '0 2px 4px rgba(0,0,0,0.04)',
     }}>
@@ -63,10 +63,10 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, breakdownP
               width: DAY_W, minWidth: DAY_W,
               textAlign: 'center',
               padding: '5px 2px 4px',
-              background: isToday ? TODAY_BG_HEADER : weekendBg ?? '#fff',
-              borderRight: '1px solid #f3f4f6',
+              background: isToday ? TODAY_BG_HEADER : weekendBg ?? 'var(--surface-card)',
+              borderRight: '1px solid var(--tape-grid-line)',
               // Priority: month start > today > Monday week start
-              borderLeft:  isMStart ? '2px solid #d1d5db' : isToday ? '2px solid #3b82f6' : isMonday ? '2px solid #d1d5db' : undefined,
+              borderLeft:  isMStart ? '2px solid var(--tape-grid-line-week)' : isToday ? '2px solid var(--primary-light)' : isMonday ? '2px solid var(--tape-grid-line-week)' : undefined,
               fontFamily: FONT,
               position: 'relative',
               cursor: 'help',
@@ -75,24 +75,26 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, breakdownP
               {isMStart && (
                 <div style={{
                   position: 'absolute', top: 0, left: 2,
-                  fontSize: 8, color: '#9ca3af', fontWeight: 600, lineHeight: 1,
+                  fontSize: 8, color: 'var(--text-faint)', fontWeight: 600, lineHeight: 1,
                 }}>
                   {fmtMonthShortTH(d)}
                 </div>
               )}
 
-              {/* Day name — Sunday tinted red, Saturday default weekend gray */}
-              <div style={{ fontSize: 10, color: isToday ? '#1e40af' : isSun ? '#b91c1c' : isSat ? '#64748b' : '#9ca3af', fontWeight: isToday ? 700 : isWeekend ? 600 : 400, lineHeight: 1, marginTop: isMStart ? 8 : 0 }}>
+              {/* Day name — Sunday tinted red, Saturday default weekend gray.
+                  Sunday/today colors stay semantic (fixed hex) so they read the
+                  same in both themes. */}
+              <div style={{ fontSize: 10, color: isToday ? 'var(--primary)' : isSun ? '#ef4444' : isSat ? 'var(--text-muted)' : 'var(--text-faint)', fontWeight: isToday ? 700 : isWeekend ? 600 : 400, lineHeight: 1, marginTop: isMStart ? 8 : 0 }}>
                 {TH_DAYS[dow]}
               </div>
 
               {/* Date number */}
-              <div style={{ fontSize: 14, fontWeight: isToday ? 800 : 600, color: isToday ? '#1e40af' : isSun ? '#b91c1c' : isSat ? '#475569' : '#374151', lineHeight: 1.2 }}>
+              <div style={{ fontSize: 14, fontWeight: isToday ? 800 : 600, color: isToday ? 'var(--primary)' : isSun ? '#ef4444' : isSat ? 'var(--text-tertiary)' : 'var(--text-secondary)', lineHeight: 1.2 }}>
                 {d.getUTCDate()}
               </div>
 
               {/* Occupancy mini bar */}
-              <div style={{ height: 3, background: '#f3f4f6', borderRadius: 2, margin: '3px 4px 0' }}>
+              <div style={{ height: 3, background: 'var(--tape-grid-line)', borderRadius: 2, margin: '3px 4px 0' }}>
                 <div style={{
                   height: '100%', width: `${Math.round(occPct * 100)}%`,
                   background: barColor, borderRadius: 2,
@@ -101,7 +103,7 @@ export default function DateHeader({ days, todayStr, occupancyPerDay, breakdownP
               </div>
 
               {/* Occupancy number */}
-              <div style={{ fontSize: 8, color: '#9ca3af', lineHeight: 1, marginTop: 1 }}>
+              <div style={{ fontSize: 8, color: 'var(--text-faint)', lineHeight: 1, marginTop: 1 }}>
                 {occ}/{totalRooms}
               </div>
             </div>

@@ -215,7 +215,8 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
   // page so more vertical space is available for the tape chart. Only the
   // DateHeader strip (in page.tsx) pins at the top of <main>.
   const headerContainerStyle: React.CSSProperties = {
-    background: 'white',
+    background: 'var(--surface-card)',
+    color: 'var(--text-primary)',
     fontFamily: FONT,
   };
 
@@ -224,13 +225,13 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     alignItems: 'center',
     gap: 8,
     padding: isMobile ? '8px 10px' : '12px 16px',
-    borderBottom: '1px solid #e5e7eb',
+    borderBottom: '1px solid var(--border-default)',
     flexWrap: isMobile ? 'wrap' : 'nowrap',  // wrap on mobile
   };
 
   const rowLastStyle: React.CSSProperties = {
     ...rowStyle,
-    borderBottom: '2px solid #e5e7eb',
+    borderBottom: '2px solid var(--border-default)',
   };
 
   const buttonBaseStyle: React.CSSProperties = {
@@ -257,8 +258,8 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const buttonSecondaryStyle: React.CSSProperties = {
     ...buttonBaseStyle,
-    background: '#f3f4f6',
-    color: '#1f2937',
+    background: 'var(--surface-muted)',
+    color: 'var(--text-primary)',
     padding: '4px 8px',
     fontSize: 12,
     height: 26,
@@ -267,13 +268,13 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const buttonSecondaryHoverStyle: React.CSSProperties = {
     ...buttonSecondaryStyle,
-    background: '#e5e7eb',
+    background: 'var(--surface-hover)',
   };
 
   const buttonIconStyle: React.CSSProperties = {
     ...buttonBaseStyle,
-    background: '#f3f4f6',
-    color: '#1f2937',
+    background: 'var(--surface-muted)',
+    color: 'var(--text-primary)',
     width: 26,
     height: 26,
     padding: 0,
@@ -286,17 +287,17 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const buttonIconHoverStyle: React.CSSProperties = {
     ...buttonIconStyle,
-    background: '#e5e7eb',
+    background: 'var(--surface-hover)',
   };
 
   const selectStyle: React.CSSProperties = {
     padding: '8px 12px',
     borderRadius: 6,
-    border: '1px solid #d1d5db',
-    backgroundColor: '#fff',
+    border: '1px solid var(--border-strong)',
+    backgroundColor: 'var(--surface-card)',
     fontSize: 13,
     fontFamily: FONT,
-    color: '#1f2937',
+    color: 'var(--text-primary)',
     cursor: 'pointer',
     outline: 'none',
   };
@@ -317,7 +318,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
   const titleStyle: React.CSSProperties = {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#1f2937',
+    color: 'var(--text-primary)',
     fontFamily: FONT,
     display: 'flex',
     alignItems: 'center',
@@ -326,7 +327,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
 
   const rangeLabelStyle: React.CSSProperties = {
     fontSize: 13,
-    color: '#6b7280',
+    color: 'var(--text-muted)',
     fontFamily: FONT,
     fontWeight: 500,
     minWidth: 'max-content',
@@ -341,11 +342,12 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     width: '100%',
     padding: '8px 56px 8px 40px',  // right-padding leaves room for kbd hint
     borderRadius: 6,
-    border: '1px solid #d1d5db',
+    border: '1px solid var(--border-strong)',
     fontSize: 13,
     fontFamily: FONT,
     boxSizing: 'border-box',
-    color: '#1f2937',
+    color: 'var(--text-primary)',
+    background: 'var(--surface-card)',
     outline: 'none',
   };
 
@@ -354,7 +356,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     left: 12,
     top: '50%',
     transform: 'translateY(-50%)',
-    color: '#9ca3af',
+    color: 'var(--text-faint)',
     fontSize: 13,
   };
 
@@ -366,7 +368,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     background: 'none',
     border: 'none',
     cursor: 'pointer',
-    color: '#9ca3af',
+    color: 'var(--text-faint)',
     fontSize: 16,
     padding: '4px 8px',
     display: searchValue ? 'block' : 'none',
@@ -381,9 +383,9 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     fontFamily: 'ui-monospace, monospace',
     padding: '2px 6px',
     borderRadius: 4,
-    background: '#f3f4f6',
-    border: '1px solid #d1d5db',
-    color: '#6b7280',
+    background: 'var(--surface-muted)',
+    border: '1px solid var(--border-strong)',
+    color: 'var(--text-muted)',
     pointerEvents: 'none',
     fontWeight: 600,
     lineHeight: 1.2,
@@ -761,15 +763,15 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
       <div style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '4px 16px 0',
-        fontSize: 11, color: '#6b7280',
-        borderTop: '1px dashed #f3f4f6',
+        fontSize: 11, color: 'var(--text-muted)',
+        borderTop: '1px dashed var(--border-light)',
       }}>
         <button
           type="button"
           onClick={() => setLegendOpen(o => !o)}
           style={{
             background: 'transparent', border: 'none',
-            color: '#6b7280', cursor: 'pointer',
+            color: 'var(--text-muted)', cursor: 'pointer',
             fontSize: 11, fontWeight: 600, padding: '2px 0',
             display: 'flex', alignItems: 'center', gap: 4,
           }}

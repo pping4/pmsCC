@@ -78,7 +78,7 @@ export default function RoomRow({
       data-room-row={room.id}
       style={{
         height: ROW_H,
-        borderBottom: '1px solid #f3f4f6',
+        borderBottom: '1px solid var(--tape-grid-line)',
         position: 'relative',
         minWidth: days.length * DAY_W,
         cursor: 'crosshair',
@@ -122,7 +122,7 @@ export default function RoomRow({
             position: 'absolute', top: 0, bottom: 0,
             left: i * DAY_W, width: DAY_W,
             background: bg,
-            borderLeft: isToday ? '2px solid #bfdbfe' : isSun ? '1px solid #fecaca' : undefined,
+            borderLeft: isToday ? '2px solid var(--primary-light)' : undefined,
             pointerEvents: 'none',
           }} />
         );
@@ -136,7 +136,7 @@ export default function RoomRow({
           <div key={i} style={{
             position: 'absolute', top: 0, bottom: 0,
             left: i * DAY_W, width: isMonday ? 2 : 1,
-            background: isMonday ? '#d1d5db' : '#f3f4f6',
+            background: isMonday ? 'var(--tape-grid-line-week)' : 'var(--tape-grid-line)',
             pointerEvents: 'none',
           }} />
         );

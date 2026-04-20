@@ -425,7 +425,7 @@ export default function ReservationPage() {
       style={{
         display: 'flex',
         flexDirection: 'column',
-        background: '#f9fafb',
+        background: 'var(--surface-page)',
         fontFamily: FONT,
       }}
     >
@@ -458,7 +458,7 @@ export default function ReservationPage() {
       {/* ──── Loading / Error ────
           Only show the full-screen loader on the FIRST load (no data yet).
           Background refreshes keep the current view visible — no flicker. */}
-      {loading && !data && <div style={{ padding: 24, textAlign: 'center', color: '#6b7280' }}>กำลังโหลด...</div>}
+      {loading && !data && <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>กำลังโหลด...</div>}
       {error && (
         <div style={{ padding: 16, background: '#fef2f2', color: '#991b1b', margin: 16, borderRadius: 8 }}>
           {error}
@@ -514,8 +514,8 @@ export default function ReservationPage() {
               width: LEFT_W,
               minWidth: LEFT_W,
               flexShrink: 0,
-              borderRight: '2px solid #e5e7eb',
-              background: '#fff',
+              borderRight: '2px solid var(--border-default)',
+              background: 'var(--surface-card)',
             }}
           >
             {/* Corner header — matches DateHeader sticky row height (~61px).
@@ -524,13 +524,13 @@ export default function ReservationPage() {
               height: 61, minHeight: 61, flexShrink: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'space-between',
               padding: '0 6px',
-              background: '#fff',
-              borderBottom: '2px solid #e5e7eb',
+              background: 'var(--surface-card)',
+              borderBottom: '2px solid var(--border-default)',
               position: 'sticky', top: 0, zIndex: 31,
               boxShadow: '0 2px 4px rgba(0,0,0,0.04)',
               gap: 4,
             }}>
-              <span style={{ fontSize: 10, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5, whiteSpace: 'nowrap' }}>
                 ห้อง / ชั้น
               </span>
               {/* Sort dropdown */}
@@ -538,8 +538,8 @@ export default function ReservationPage() {
                 value={roomSort}
                 onChange={e => setRoomSort(e.target.value as RoomSort)}
                 style={{
-                  fontSize: 10, border: '1px solid #e5e7eb', borderRadius: 6,
-                  padding: '2px 4px', color: '#6b7280', background: '#f9fafb',
+                  fontSize: 10, border: '1px solid var(--border-default)', borderRadius: 6,
+                  padding: '2px 4px', color: 'var(--text-muted)', background: 'var(--surface-subtle)',
                   cursor: 'pointer', flexShrink: 0,
                 }}
                 title="เรียงลำดับห้อง"
@@ -560,8 +560,8 @@ export default function ReservationPage() {
                 <div
                   style={{
                     height: GROUP_H,
-                    background: '#f8fafc',
-                    borderBottom: '1px solid #e5e7eb',
+                    background: 'var(--tape-group-header-bg)',
+                    borderBottom: '1px solid var(--border-default)',
                     display: 'flex',
                     alignItems: 'center',
                     padding: '0 8px',
@@ -570,7 +570,7 @@ export default function ReservationPage() {
                     zIndex: 20,
                   }}
                 >
-                  <span style={{ fontSize: 11, fontWeight: 700, color: '#374151' }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-secondary)' }}>
                     {rt.icon} {rt.code} — {rt.name}
                   </span>
                 </div>
@@ -602,12 +602,12 @@ export default function ReservationPage() {
                       key={room.id}
                       style={{
                         height: ROW_H,
-                        borderBottom: '1px solid #f3f4f6',
+                        borderBottom: '1px solid var(--tape-grid-line)',
                         display: 'flex',
                         alignItems: 'center',
                         padding: '0 4px 0 8px',
                         gap: 5,
-                        background: '#fff',
+                        background: 'var(--surface-card)',
                       }}
                       title={`ห้อง ${room.number} — ${label}`}
                     >
@@ -618,10 +618,10 @@ export default function ReservationPage() {
                         flexShrink: 0,
                       }} title={label} />
                       <div style={{ minWidth: 0, display: 'flex', alignItems: 'baseline', gap: 4 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: '#111827', lineHeight: 1 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1 }}>
                           #{room.number}
                         </div>
-                        <div style={{ fontSize: 9, color: '#9ca3af', lineHeight: 1 }}>
+                        <div style={{ fontSize: 9, color: 'var(--text-faint)', lineHeight: 1 }}>
                           ชั้น {room.floor}
                         </div>
                       </div>
@@ -682,7 +682,7 @@ export default function ReservationPage() {
                 scrollbarWidth: 'none',
                 msOverflowStyle: 'none',
                 flexShrink: 0,
-                background: '#fff',
+                background: 'var(--surface-card)',
               }}
             >
               <div style={{ minWidth: days.length * DAY_W }}>
@@ -723,8 +723,8 @@ export default function ReservationPage() {
                   style={{
                     height: GROUP_H,
                     minWidth: days.length * DAY_W,
-                    background: '#f8fafc',
-                    borderBottom: '1px solid #e5e7eb',
+                    background: 'var(--tape-group-header-bg)',
+                    borderBottom: '1px solid var(--border-default)',
                   }}
                 />
 
