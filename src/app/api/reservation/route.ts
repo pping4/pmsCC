@@ -89,13 +89,17 @@ export async function GET(request: NextRequest) {
   // only one segment is visible in the window, we still need to know the TRUE
   // total segment count so continuation markers (dashed edges, "✂ ช่วงที่ 2/3")
   // render correctly on the visible segment.
+  // IMPORTANT: filter by SEGMENT's own dates, not booking.checkIn/checkOut.
+  // The overlap-check API does the same — using booking dates here creates
+  // inconsistency where check-overlap blocks a room (segment overlaps window)
+  // but render misses it (booking dates fall outside window). Could happen
+  // from orphan segments left after MOVE/SPLIT + date change, which should
+  // still be visible so the user understands why a room is blocked.
   const segmentRows = await prisma.bookingRoomSegment.findMany({
     where: {
-      booking: {
-        status:   { not: 'cancelled' },
-        checkIn:  { lt: toDate   },
-        checkOut: { gt: fromDate },
-      },
+      fromDate: { lt: toDate   },
+      toDate:   { gt: fromDate },
+      booking: { status: { not: 'cancelled' } },
     },
     select: {
       bookingId: true,
