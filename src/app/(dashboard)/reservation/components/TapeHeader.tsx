@@ -111,6 +111,9 @@ interface TapeHeaderProps {
   // Actions
   onNewBooking: () => void;  // open new booking dialog (no room pre-selected)
   onRefresh: () => void;
+
+  // Responsive
+  isMobile?: boolean;  // < 768px — stacks rows, shrinks padding, compacts toolbar
 }
 
 const TapeHeader: React.FC<TapeHeaderProps> = ({
@@ -128,6 +131,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
   onViewChange,
   onNewBooking,
   onRefresh,
+  isMobile = false,
 }) => {
   // ─── Mini Calendar State ──────────────────────────────────────────────────────
   const [isMiniCalendarOpen, setIsMiniCalendarOpen] = useState(false);
@@ -219,8 +223,9 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     display: 'flex',
     alignItems: 'center',
     gap: 8,
-    padding: '12px 16px',
+    padding: isMobile ? '8px 10px' : '12px 16px',
     borderBottom: '1px solid #e5e7eb',
+    flexWrap: isMobile ? 'wrap' : 'nowrap',  // wrap on mobile
   };
 
   const rowLastStyle: React.CSSProperties = {
@@ -393,10 +398,10 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
     <div style={headerContainerStyle}>
       {/* Row 1: Main header bar */}
       <div style={rowStyle}>
-        {/* Left: Title */}
+        {/* Left: Title — icon-only on mobile */}
         <div style={titleStyle}>
           📅
-          <span>ตารางการจอง</span>
+          {!isMobile && <span>ตารางการจอง</span>}
         </div>
 
         {/* Center: Date navigation */}
@@ -503,13 +508,17 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
           {/* Separator */}
           <div style={{ width: 1, height: 18, background: '#e5e7eb', margin: '0 4px' }} />
 
-          {/* Range label */}
-          <div style={rangeLabelStyle}>
-            {fmtThai(fromStr)} — {fmtThai(toStr)}
-          </div>
+          {/* Range label — hidden on mobile (date navigation buttons are enough) */}
+          {!isMobile && (
+            <div style={rangeLabelStyle}>
+              {fmtThai(fromStr)} — {fmtThai(toStr)}
+            </div>
+          )}
 
-          {/* Room status icon badges */}
-          {(() => {
+          {/* Room status icon badges — hidden on mobile (no hover, and they
+              eat precious horizontal space). Users can still see room status
+              via the individual room cells. */}
+          {!isMobile && (() => {
             const counts = countRoomStatuses(roomTypes);
             return (
               <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 8 }}>
@@ -556,7 +565,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
                     }}
                   >
                     <span>{v.icon}</span>
-                    <span style={{ fontSize: 11 }}>{v.label}</span>
+                    {!isMobile && <span style={{ fontSize: 11 }}>{v.label}</span>}
                   </button>
                 ))}
               </div>
@@ -566,13 +575,13 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
           {/* Separator */}
           <div style={{ width: 1, height: 20, background: '#e5e7eb' }} />
 
-          {/* Occupancy badge */}
-          <div style={badgeStyle}>
+          {/* Occupancy badge — shorter label on mobile */}
+          <div style={badgeStyle} title={`จองอยู่ ${occupancyToday}/${totalRooms} ห้อง`}>
             <span>🟢</span>
-            <span>จองอยู่ {occupancyToday}/{totalRooms} ห้อง</span>
+            <span>{isMobile ? `${occupancyToday}/${totalRooms}` : `จองอยู่ ${occupancyToday}/${totalRooms} ห้อง`}</span>
           </div>
 
-          {/* New Booking button */}
+          {/* New Booking button — icon-only on mobile to save width */}
           <button
             onClick={onNewBooking}
             onMouseEnter={() => setHoveredButton('new-booking')}
@@ -582,8 +591,10 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
                 ? buttonPrimaryHoverStyle
                 : buttonPrimaryStyle
             }
+            title="จองห้องใหม่"
+            aria-label="จองห้องใหม่"
           >
-            + จองห้อง
+            {isMobile ? '+' : '+ จองห้อง'}
           </button>
 
           {/* Refresh button */}

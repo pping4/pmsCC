@@ -46,7 +46,26 @@ export default function ReservationPage() {
   const [roomSort, setRoomSort] = useState<RoomSort>('number_asc');
 
   // ──── View Mode ────
-  const [viewMode, setViewMode] = useState<ViewMode>('tape');
+  // Default to 'tape' on desktop, 'list' on mobile (tape chart needs ≥1024px
+  // to be usable — on narrow screens the horizontal scroll + tiny cells make
+  // the chart nearly unreadable, so list view is a better first-paint).
+  // We initialize from `matchMedia` synchronously to avoid a flash of tape.
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window === 'undefined') return 'tape'; // SSR fallback
+    return window.matchMedia('(max-width: 767px)').matches ? 'list' : 'tape';
+  });
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return window.matchMedia('(max-width: 767px)').matches;
+  });
+
+  // Keep isMobile in sync with viewport changes (rotation, resize)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const onChange = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   // ──── UI Overlay State ────
   const [detailBooking, setDetailBooking] = useState<{ booking: BookingItem; room: RoomItem } | null>(null);
@@ -433,6 +452,7 @@ export default function ReservationPage() {
         onViewChange={setViewMode}
         onNewBooking={() => setNewBookingState({ room: null, checkIn: data?.today ?? fromStr })}
         onRefresh={fetchData}
+        isMobile={isMobile}
       />
 
       {/* ──── Loading / Error ────
