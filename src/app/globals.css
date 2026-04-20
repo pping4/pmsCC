@@ -413,3 +413,13 @@ html.dark [style*="box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04)"] {
 .theme-toggle-icon:active {
   animation: spin-once 0.4s ease;
 }
+
+/* ── Tape-chart booking block focus ring (a11y / #14) ───────────────────────
+   Visible only on keyboard focus (not mouse-click) so hover UX is unchanged.
+   Outer ring uses blue to stand out against all status colors. */
+[data-booking-block]:focus { outline: none; }
+[data-booking-block]:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+  z-index: 10;
+}

@@ -1,8 +1,8 @@
 'use client';
 import React from 'react';
 import type { BookingItem, RoomItem, DragState, BlockStyle } from '../lib/types';
-import { STATUS_STYLE, PAYMENT_STYLE, DAY_W, ROW_H } from '../lib/constants';
-import { dayIndex, diffDays, parseUTCDate, guestDisplayName, addDays, addUTCMonths } from '../lib/date-utils';
+import { STATUS_STYLE, PAYMENT_STYLE, BOOKING_TYPE_LABEL, DAY_W, ROW_H } from '../lib/constants';
+import { dayIndex, diffDays, parseUTCDate, guestDisplayName, addDays, addUTCMonths, fmtThai } from '../lib/date-utils';
 
 /**
  * Resolve the visual style for a booking block based on:
@@ -165,6 +165,19 @@ const BookingBlock = React.memo(function BookingBlock({
   const radiusLeft  = continuesFromLeft ? 0 : 5;
   const radiusRight = continuesToRight  ? 0 : 5;
 
+  // ── a11y: descriptive label for screen readers ──────────────────────────────
+  // Reads: "[Status] — [Guest], ห้อง 101, 3 เม.ย. 2569 → 6 เม.ย. 2569 (3 คืน)"
+  const ariaLabel = [
+    s.label,
+    guestName,
+    `ห้อง ${room.number}`,
+    `${fmtThai(booking.checkIn)} ถึง ${fmtThai(booking.checkOut)}`,
+    `${nights} ${booking.bookingType === 'daily' ? 'คืน' : 'เดือน'}`,
+    BOOKING_TYPE_LABEL[booking.bookingType],
+    isLocked ? 'ล็อกห้อง' : null,
+    isPartial ? `ช่วงที่ ${(booking.segmentIndex ?? 0) + 1}/${booking.segmentCount}` : null,
+  ].filter(Boolean).join(', ');
+
   // Disable drag for partial segments — dragging a segment that represents
   // only part of the stay is semantically ambiguous (move the whole booking?
   // just this segment? reshape the split?). Force the user through the
@@ -174,6 +187,10 @@ const BookingBlock = React.memo(function BookingBlock({
   return (
     <div
       data-booking-block
+      role="button"
+      tabIndex={0}
+      aria-label={ariaLabel}
+      aria-pressed={isHighlighted || undefined}
       style={{
         position:    'absolute',
         top:         1,
@@ -222,6 +239,26 @@ const BookingBlock = React.memo(function BookingBlock({
         e.stopPropagation();
         if (!dragState?.hasMoved) onClick(booking, room);
       }}
+      onKeyDown={e => {
+        // Enter / Space → open detail panel (same as click)
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          e.preventDefault();  // prevent page scroll on Space
+          e.stopPropagation();
+          onClick(booking, room);
+        } else if (e.key === 'Escape') {
+          // Blur focus to release from this block
+          (e.currentTarget as HTMLDivElement).blur();
+        }
+      }}
+      onFocus={e => {
+        // Mirror hover tooltip on keyboard focus — synthetic MouseEvent shim
+        const rect = e.currentTarget.getBoundingClientRect();
+        onMouseEnter(
+          { clientX: rect.left + 20, clientY: rect.top + rect.height / 2 } as unknown as React.MouseEvent,
+          booking, room,
+        );
+      }}
+      onBlur={onMouseLeave}
     >
       {/* ✂️ Split indicator — shown when this block is only part of a split booking */}
       {isPartial && blockWidth > 24 && (
