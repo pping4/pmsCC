@@ -36,18 +36,25 @@ export const NAV_CATEGORIES: NavCategory[] = [
   {
     key: 'finance',
     title: 'การเงิน / บัญชี',
+    // Order: daily-operations first, then reports, then management.
+    // Sub-step 1.5 — /billing removed; Collection Hub at /finance is the
+    // canonical invoice queue. Direct URL still works for ad-hoc CRUD.
     items: [
-      { href: '/finance/money-overview', label: 'ภาพรวมเงิน',       icon: '💰', keywords: 'money overview balance cash bank ภาพรวม ยอดคงเหลือ', permission: 'finance.view_reports' },
-      { href: '/finance/statements',     label: 'งบการเงิน',        icon: '📈', keywords: 'statement pl bs balance sheet profit loss งบดุล กำไรขาดทุน', permission: 'finance.view_reports' },
-      { href: '/cashier',       label: 'แคชเชียร์ / กะ + EDC',   icon: '🏧', keywords: 'cashier session shift edc batch close card terminal ส่งยอด ปิดบัตร', canAny: ['cashier.open_shift', 'cashier.record_payment', 'cashier.view_other_shifts', 'cashier.close_shift'] },
-      { href: '/billing',       label: 'Billing',                icon: '💰', keywords: 'invoice ใบแจ้งหนี้', canAny: ['finance.view_reports', 'finance.post_invoice'] },
-      { href: '/accounting/tax-invoices', label: 'ใบกำกับภาษี',    icon: '🧾', keywords: 'tax invoice vat ใบกำกับภาษี ภาษีมูลค่าเพิ่ม', permission: 'finance.post_invoice' },
-      { href: '/billing/folio', label: 'Guest Folio',            icon: '📒', keywords: 'folio', canAny: ['reservation.view', 'finance.view_reports'] },
-      { href: '/billing-cycle', label: 'รอบบิล / ค่าปรับ',        icon: '📅', keywords: 'cycle penalty renewal', canAny: ['contracts.view', 'finance.view_reports'] },
-      { href: '/finance',       label: 'การเงิน / บัญชี',         icon: '📈', keywords: 'accounting finance ledger', permission: 'finance.view_reports' },
-      { href: '/city-ledger',   label: 'City Ledger / AR',       icon: '🏢', keywords: 'ar account receivable', permission: 'finance.view_reports' },
-      { href: '/bad-debt',      label: 'หนี้เสีย / Bad Debt',     icon: '⚠️', keywords: 'bad debt', permission: 'finance.view_reports' },
-      { href: '/refunds',       label: 'คืนเงิน / Refunds',        icon: '💸', keywords: 'refund pending คืนเงิน', canAny: ['cashier.refund', 'finance.approve_refund'] },
+      // Daily operations
+      { href: '/finance',                 label: 'ศูนย์การเงิน',        icon: '💰', keywords: 'finance collection center hub overdue ค้างเก็บ ศูนย์รับเงิน', permission: 'finance.view_reports' },
+      { href: '/cashier',                 label: 'แคชเชียร์ / กะ + EDC', icon: '🏧', keywords: 'cashier session shift edc batch close card terminal ส่งยอด ปิดบัตร', canAny: ['cashier.open_shift', 'cashier.record_payment', 'cashier.view_other_shifts', 'cashier.close_shift'] },
+      { href: '/billing/folio',           label: 'Guest Folio',         icon: '📒', keywords: 'folio guest billing', canAny: ['reservation.view', 'finance.view_reports'] },
+      { href: '/accounting/tax-invoices', label: 'ใบกำกับภาษี',          icon: '🧾', keywords: 'tax invoice vat ใบกำกับภาษี ภาษีมูลค่าเพิ่ม', permission: 'finance.post_invoice' },
+      { href: '/billing-cycle',           label: 'รอบบิล / ค่าปรับ',     icon: '📅', keywords: 'cycle penalty renewal monthly รอบบิล', canAny: ['contracts.view', 'finance.view_reports'] },
+
+      // Reports + position
+      { href: '/finance/money-overview',  label: 'ภาพรวมเงิน',           icon: '💵', keywords: 'money overview balance cash bank ภาพรวม ยอดคงเหลือ', permission: 'finance.view_reports' },
+      { href: '/finance/statements',      label: 'งบการเงิน / รายงาน',   icon: '📈', keywords: 'statement pl bs balance sheet profit loss งบดุล กำไรขาดทุน vat report', permission: 'finance.view_reports' },
+
+      // Management
+      { href: '/city-ledger',             label: 'City Ledger / AR',    icon: '🏢', keywords: 'ar account receivable corporate organization บัญชีองค์กร', permission: 'finance.view_reports' },
+      { href: '/bad-debt',                label: 'หนี้เสีย / Bad Debt', icon: '⚠️', keywords: 'bad debt collection หนี้เสีย', permission: 'finance.view_reports' },
+      { href: '/refunds',                 label: 'คืนเงิน / Refunds',    icon: '💸', keywords: 'refund pending คืนเงิน', canAny: ['cashier.refund', 'finance.approve_refund'] },
     ],
   },
   {
