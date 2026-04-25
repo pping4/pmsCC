@@ -174,7 +174,7 @@ export default function NightAuditPage() {
                         รวม {formatCurrency(data.overdueInvoices.reduce((s, i) => s + i.grandTotal, 0))}
                       </div>
                     </div>
-                    <a href="/billing" style={{ padding: '6px 12px', background: '#ea580c', color: '#fff', borderRadius: 6, fontSize: 11, fontWeight: 700, textDecoration: 'none' }}>ดู Billing</a>
+                    <a href="/finance" style={{ padding: '6px 12px', background: '#ea580c', color: '#fff', borderRadius: 6, fontSize: 11, fontWeight: 700, textDecoration: 'none' }}>ดูรายการต้องตามเก็บ</a>
                   </div>
                 )}
                 {data.cleaningPending > 0 && (
