@@ -11,11 +11,12 @@
 
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { useToast } from '@/components/ui';
-import { fmtBaht, fmtDateTime } from '@/lib/date-format';
+import { fmtBaht, fmtDateTime, fmtDate } from '@/lib/date-format';
 
 type SubKind = 'CASH' | 'BANK' | 'CARD_CLEARING' | 'UNDEPOSITED_FUNDS';
 
@@ -32,6 +33,28 @@ interface Balance {
   creditTotal:    number;
   balance:        number;
   asOf:           string;
+}
+
+interface OpenShift {
+  id:             string;
+  openedBy:       string;
+  openedByName:   string | null;
+  openedAt:       string;
+  openingBalance: number;
+  cashBox:        { code: string; name: string } | null;
+  _count:         { payments: number };
+}
+
+interface RecentBatch {
+  id:             string;
+  batchNo:        string;
+  closeDate:      string;
+  totalAmount:    number;
+  txCount:        number;
+  varianceAmount: number;
+  closedAt:       string;
+  terminalCode:   string;
+  terminalName:   string;
 }
 
 const GROUP_META: Record<SubKind, { label: string; icon: string; color: string; bg: string }> = {
@@ -53,6 +76,10 @@ export default function MoneyOverviewPage() {
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
 
+  // Sub-step 1.4 — operational signals from the cashier + EDC pipeline
+  const [openShifts,    setOpenShifts]    = useState<OpenShift[]>([]);
+  const [recentBatches, setRecentBatches] = useState<RecentBatch[]>([]);
+
   // Transfer modal state
   const [showTransfer, setShowTransfer] = useState(false);
   const [tForm, setTForm] = useState({ fromAccountId: '', toAccountId: '', amount: '', notes: '' });
@@ -62,11 +89,31 @@ export default function MoneyOverviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch('/api/account-balances');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
+      const [balRes, shiftRes, batchRes] = await Promise.all([
+        fetch('/api/account-balances'),
+        fetch('/api/cash-sessions?status=OPEN&limit=10'),
+        fetch('/api/card-batches?limit=5'),
+      ]);
+      if (!balRes.ok) throw new Error(`HTTP ${balRes.status}`);
+      const json = await balRes.json();
       setBalances(json.balances ?? []);
       setAsOf(json.asOf);
+      // Side panels degrade gracefully if their endpoint fails
+      if (shiftRes.ok) {
+        const j = await shiftRes.json();
+        setOpenShifts((j.sessions ?? []).map((s: { openingBalance: string | number } & Omit<OpenShift, 'openingBalance'>) => ({
+          ...s,
+          openingBalance: Number(s.openingBalance),
+        })));
+      } else {
+        setOpenShifts([]);
+      }
+      if (batchRes.ok) {
+        const j = await batchRes.json();
+        setRecentBatches((j.batches ?? []).slice(0, 5));
+      } else {
+        setRecentBatches([]);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ');
     } finally {
@@ -160,6 +207,85 @@ export default function MoneyOverviewPage() {
         <div style={{ fontSize: 12, opacity: 0.85, marginTop: 6 }}>
           จาก {balances.length} บัญชี
         </div>
+      </div>
+
+      {/* ── Operational signals: open shifts + recent EDC batches ─────────────
+          These two strips connect "money sitting in accounts" with "who is
+          collecting it now" + "what hasn't reconciled yet" — answering the
+          companion question to the grand total: where is fresh cash flowing
+          in and out of right now? */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 12, marginBottom: 20 }}>
+        {/* Open shifts */}
+        <section className="pms-card pms-transition" style={{ padding: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600 }}>🏧 กะที่เปิดอยู่</h2>
+            <Link href="/cashier" style={{ fontSize: 12, color: 'var(--primary-light)', textDecoration: 'underline' }}>
+              จัดการกะ →
+            </Link>
+          </div>
+          {openShifts.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>— ไม่มีกะเปิดอยู่ —</p>
+          ) : (
+            <ul style={{ display: 'grid', gap: 6 }}>
+              {openShifts.map((s) => (
+                <li key={s.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: 'var(--surface-subtle)', borderRadius: 4 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>
+                      {s.cashBox ? `${s.cashBox.code} — ${s.cashBox.name}` : '—'}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {s.openedByName ?? s.openedBy} · เปิด {fmtDateTime(s.openedAt)}
+                    </div>
+                  </div>
+                  <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                    <div style={{ fontSize: 13, fontFamily: 'monospace' }}>฿{fmtBaht(s.openingBalance)}</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{s._count.payments} รายการ</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Recent card batches */}
+        <section className="pms-card pms-transition" style={{ padding: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600 }}>💳 EDC Batch ล่าสุด</h2>
+            <Link href="/cashier?tab=batch" style={{ fontSize: 12, color: 'var(--primary-light)', textDecoration: 'underline' }}>
+              ปิด batch →
+            </Link>
+          </div>
+          {recentBatches.length === 0 ? (
+            <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>— ยังไม่มี batch ที่บันทึก —</p>
+          ) : (
+            <ul style={{ display: 'grid', gap: 6 }}>
+              {recentBatches.map((b) => {
+                const ok = Math.abs(b.varianceAmount) < 0.01;
+                return (
+                  <li key={b.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, padding: '6px 8px', background: 'var(--surface-subtle)', borderRadius: 4 }}>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>
+                        {b.terminalCode} <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>· {b.batchNo}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {fmtDate(new Date(b.closeDate))} · {b.txCount} รายการ
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                      <div style={{ fontSize: 13, fontFamily: 'monospace' }}>฿{fmtBaht(b.totalAmount)}</div>
+                      <div style={{
+                        fontSize: 11, fontFamily: 'monospace',
+                        color: ok ? '#16a34a' : (b.varianceAmount < 0 ? '#dc2626' : '#b45309'),
+                      }}>
+                        {ok ? '✓ ตรง' : `${b.varianceAmount >= 0 ? '+' : ''}${fmtBaht(b.varianceAmount)} ${b.varianceAmount < 0 ? '❌' : '⚠️'}`}
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </section>
       </div>
 
       {/* Groups */}
