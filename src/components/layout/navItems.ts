@@ -39,8 +39,7 @@ export const NAV_CATEGORIES: NavCategory[] = [
     items: [
       { href: '/finance/money-overview', label: 'ภาพรวมเงิน',       icon: '💰', keywords: 'money overview balance cash bank ภาพรวม ยอดคงเหลือ', permission: 'finance.view_reports' },
       { href: '/finance/statements',     label: 'งบการเงิน',        icon: '📈', keywords: 'statement pl bs balance sheet profit loss งบดุล กำไรขาดทุน', permission: 'finance.view_reports' },
-      { href: '/cashier',       label: 'แคชเชียร์ / กะ',         icon: '🏧', keywords: 'cashier session shift', canAny: ['cashier.open_shift', 'cashier.record_payment', 'cashier.view_other_shifts'] },
-      { href: '/cashier/batch-close', label: 'ส่งยอด EDC / ปิด batch', icon: '💳', keywords: 'edc batch close card terminal ส่งยอด ปิดบัตร', permission: 'cashier.close_shift' },
+      { href: '/cashier',       label: 'แคชเชียร์ / กะ + EDC',   icon: '🏧', keywords: 'cashier session shift edc batch close card terminal ส่งยอด ปิดบัตร', canAny: ['cashier.open_shift', 'cashier.record_payment', 'cashier.view_other_shifts', 'cashier.close_shift'] },
       { href: '/billing',       label: 'Billing',                icon: '💰', keywords: 'invoice ใบแจ้งหนี้', canAny: ['finance.view_reports', 'finance.post_invoice'] },
       { href: '/accounting/tax-invoices', label: 'ใบกำกับภาษี',    icon: '🧾', keywords: 'tax invoice vat ใบกำกับภาษี ภาษีมูลค่าเพิ่ม', permission: 'finance.post_invoice' },
       { href: '/billing/folio', label: 'Guest Folio',            icon: '📒', keywords: 'folio', canAny: ['reservation.view', 'finance.view_reports'] },

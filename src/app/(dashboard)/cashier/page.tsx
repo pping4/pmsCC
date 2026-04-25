@@ -13,6 +13,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import { fmtDateTime, fmtBaht, toDateStr } from '@/lib/date-format';
 import { useToast } from '@/components/ui';
@@ -20,6 +21,9 @@ import { DataTable, type ColDef } from '@/components/data-table';
 import { useEffectivePermissions, can } from '@/lib/rbac/client';
 import { HandoverDialog } from './components/HandoverDialog';
 import { CloseShiftDialog } from './components/CloseShiftDialog';
+import { BatchCloseTab } from './components/BatchCloseTab';
+
+type TabKey = 'shift' | 'batch';
 
 // Build the /finance deep-link for a single cash session.
 // `to` is clamped to now when the session is still OPEN.
@@ -99,10 +103,31 @@ function baht(n: number | null | undefined): string {
 
 export default function CashierPage() {
   const toast = useToast();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { data: authSession } = useSession();
   // Session user identity is used by the server — we don't send it from the
   // client anymore (Sprint 4B: server-resolved). Kept here only for display.
   void authSession;
+
+  // ── Tab state — synced to ?tab=batch in the URL so the legacy
+  //    /cashier/batch-close route can redirect here without losing intent.
+  const initialTab: TabKey = searchParams.get('tab') === 'batch' ? 'batch' : 'shift';
+  const [tab, setTab] = useState<TabKey>(initialTab);
+  const switchTab = useCallback((next: TabKey) => {
+    setTab(next);
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === 'shift') params.delete('tab');
+    else                  params.set('tab', next);
+    const qs = params.toString();
+    router.replace(`/cashier${qs ? `?${qs}` : ''}`, { scroll: false });
+  }, [router, searchParams]);
+
+  // Permission gate for the batch-close tab. The /cashier route itself is
+  // gated by `cashier.open_shift | record_payment | view_other_shifts`, so
+  // a user who arrived here may not have batch-close rights — hide the tab.
+  const { data: tabPerms } = useEffectivePermissions();
+  const canBatchClose = can(tabPerms, 'cashier.close_shift');
 
   const [currentSession, setCurrentSession]       = useState<CashSession | null>(null);
   const [sessionDetail,  setSessionDetail]        = useState<SessionSummary | null>(null);
@@ -354,6 +379,41 @@ export default function CashierPage() {
   return (
     <div className="max-w-5xl mx-auto p-6 space-y-6">
       <h1 className="text-2xl font-bold text-gray-800">🏦 กะแคชเชียร์</h1>
+
+      {/* ── Tabs: เปิด/ปิดกะ vs ส่งยอด EDC ────────────────────────────────── */}
+      <nav role="tablist" className="flex gap-2 border-b" style={{ borderColor: 'var(--border-light)' }}>
+        <button
+          role="tab"
+          aria-selected={tab === 'shift'}
+          onClick={() => switchTab('shift')}
+          className={`px-4 py-2 -mb-px text-sm font-medium border-b-2 transition ${
+            tab === 'shift'
+              ? 'border-blue-600 text-blue-700'
+              : 'border-transparent text-gray-500 hover:text-gray-800'
+          }`}
+        >
+          🏧 กะแคชเชียร์
+        </button>
+        {canBatchClose && (
+          <button
+            role="tab"
+            aria-selected={tab === 'batch'}
+            onClick={() => switchTab('batch')}
+            className={`px-4 py-2 -mb-px text-sm font-medium border-b-2 transition ${
+              tab === 'batch'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-800'
+            }`}
+          >
+            💳 ส่งยอด EDC / ปิด batch
+          </button>
+        )}
+      </nav>
+
+      {tab === 'batch' ? (
+        <BatchCloseTab />
+      ) : (
+      <>
 
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
@@ -624,8 +684,11 @@ export default function CashierPage() {
         />
       </div>
 
+      </>
+      )}
+
       {/* ── Dialogs ──────────────────────────────────────────────────────── */}
-      {currentSession && sessionDetail && (
+      {currentSession && sessionDetail && tab === 'shift' && (
         <>
           <CloseShiftDialog
             open={showClose}
