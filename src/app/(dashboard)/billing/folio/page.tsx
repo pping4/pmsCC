@@ -14,6 +14,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import FolioLedger from '@/components/folio/FolioLedger';
 import { fmtDate } from '@/lib/date-format';
 import { useToast, Dialog, Button } from '@/components/ui';
@@ -54,9 +55,14 @@ const CHARGE_TYPES = [
 
 export default function FolioPage() {
   const toast = useToast();
+  const searchParams = useSearchParams();
+  // Sub-step 5.2/5.3 cross-link target — if /billing/folio?bookingId=xxx,
+  // auto-select the booking on first load. The deep-link comes from the
+  // tx-ledger and tax-invoice detail pages.
+  const initialBookingId = searchParams.get('bookingId');
   const [search, setSearch] = useState('');
   const [bookings, setBookings] = useState<BookingSummary[]>([]);
-  const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
+  const [selectedBookingId, setSelectedBookingId] = useState<string | null>(initialBookingId);
   const [loading, setLoading] = useState(false);
   const [folioKey, setFolioKey] = useState(0); // force FolioLedger to re-mount on refresh
 
@@ -102,6 +108,25 @@ export default function FolioPage() {
       return () => clearTimeout(t);
     }
   }, [search, fetchBookings]);
+
+  // Sub-step 5.2/5.3 — when arriving via ?bookingId=xxx, fetch that single
+  // booking so `selectedBooking` resolves on first render without forcing
+  // the user to type anything in the search box.
+  useEffect(() => {
+    if (!initialBookingId) return;
+    if (bookings.some((b) => b.id === initialBookingId)) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/bookings/${initialBookingId}`);
+        if (!res.ok) return;
+        const b = await res.json();
+        if (cancelled || !b?.id) return;
+        setBookings((prev) => prev.some((x) => x.id === b.id) ? prev : [b, ...prev]);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [initialBookingId, bookings]);
 
   // ── Add extra charge ────────────────────────────────────────────────────────
   async function handleAddCharge(e: React.FormEvent) {

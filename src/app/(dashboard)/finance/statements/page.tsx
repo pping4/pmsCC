@@ -61,6 +61,8 @@ interface FinanceTx {
   paidAt: string;
   guestName: string;
   roomNumber: string | null;
+  bookingId: string | null;       // 5.2: drill to folio
+  folioId: string | null;
   subtotal: number;
   taxTotal: number;
   grandTotal: number;
@@ -508,7 +510,18 @@ function TransactionsTab({ initialPeriod }: { initialPeriod: Period }) {
                     >
                       <td style={tdSx}>{open ? '▼' : '▸'}</td>
                       <td style={tdSx}>{fmtDateTime(t.paidAt)}</td>
-                      <td style={{ ...tdSx, fontFamily: 'monospace' }}>{t.invoiceNumber}</td>
+                      <td style={{ ...tdSx, fontFamily: 'monospace' }}>
+                        {t.bookingId ? (
+                          <a
+                            href={`/billing/folio?bookingId=${t.bookingId}`}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{ color: '#2563eb', textDecoration: 'underline' }}
+                            title="ดู folio"
+                          >{t.invoiceNumber}</a>
+                        ) : (
+                          t.invoiceNumber
+                        )}
+                      </td>
                       <td style={tdSx}>
                         {t.guestName}
                         {t.badDebt && <span style={{ marginLeft: 6, fontSize: 10, padding: '1px 6px', background: '#fee2e2', color: '#991b1b', borderRadius: 999 }}>หนี้เสีย</span>}

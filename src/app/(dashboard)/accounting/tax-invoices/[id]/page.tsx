@@ -17,6 +17,7 @@ interface CoveredInvoice {
   id: string;
   invoiceNumber: string;
   issueDate: string;
+  bookingId: string | null;       // 5.3 cross-link to source folio
   subtotal: number;
   vatAmount: number;
   serviceCharge: number;
@@ -224,7 +225,15 @@ export default function TaxInvoiceDetailPage() {
             <tbody>
               {ti.invoices.map((inv, i) => (
                 <tr key={inv.id} style={{ background: i % 2 === 0 ? 'var(--surface-card)' : 'var(--surface-subtle)' }}>
-                  <td className="px-3 py-2 font-mono">{inv.invoiceNumber}</td>
+                  <td className="px-3 py-2 font-mono">
+                    {inv.bookingId ? (
+                      <Link href={`/billing/folio?bookingId=${inv.bookingId}`} className="text-blue-600 hover:underline print:no-underline print:text-black">
+                        {inv.invoiceNumber}
+                      </Link>
+                    ) : (
+                      inv.invoiceNumber
+                    )}
+                  </td>
                   <td className="px-3 py-2 font-mono">{fmtDate(new Date(inv.issueDate))}</td>
                   <td className="px-3 py-2 text-right font-mono">{fmtBaht(inv.subtotal)}</td>
                   <td className="px-3 py-2 text-right font-mono">{fmtBaht(inv.vatAmount)}</td>

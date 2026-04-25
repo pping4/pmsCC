@@ -141,6 +141,17 @@ export async function GET(
       voidReason: true,
       voidedAt: true,
       createdAt: true,
+      // Sub-step 5.1 — surface the cashier shift that took this payment so
+      // the folio UI can deep-link back to the right place in /cashier.
+      cashSessionId: true,
+      cashSession: {
+        select: {
+          id: true,
+          openedAt: true,
+          closedAt: true,
+          cashBox: { select: { code: true } },
+        },
+      },
     },
     orderBy: { createdAt: 'desc' },
   });

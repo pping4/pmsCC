@@ -128,6 +128,7 @@ export async function GET(request: NextRequest) {
     roomNumber: inv.booking?.room?.number || null,
     floor: inv.booking?.room?.floor || null,
     bookingId: inv.bookingId,
+    folioId: inv.folioId,             // 5.2: surface for "go to folio" cross-link
     subtotal: Number(inv.subtotal),
     vatAmount: Number(inv.vatAmount),
     grandTotal: Number(inv.grandTotal),

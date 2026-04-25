@@ -62,6 +62,15 @@ interface FolioPayment {
   voidReason: string | null;
   voidedAt: string | null;
   createdAt: string;
+  // Sub-step 5.1 cross-links — surface the cashier shift that took this
+  // payment so each row can link back to /finance ledger view.
+  cashSessionId: string | null;
+  cashSession: {
+    id: string;
+    openedAt: string;
+    closedAt: string | null;
+    cashBox: { code: string } | null;
+  } | null;
 }
 
 interface FolioData {
@@ -428,6 +437,15 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
                       <p className="text-xs text-gray-400">{pmt.paymentNumber}</p>
                       {pmt.referenceNo && (
                         <p className="text-xs text-gray-400">Ref: {pmt.referenceNo}</p>
+                      )}
+                      {pmt.cashSession && (
+                        <a
+                          href={`/finance?period=custom&from=${pmt.cashSession.openedAt.slice(0,10)}&to=${(pmt.cashSession.closedAt ?? new Date().toISOString()).slice(0,10)}&sessionId=${pmt.cashSession.id}`}
+                          className="text-[10px] text-blue-600 hover:underline mt-0.5 inline-flex items-center gap-0.5"
+                          title="ดูในรายการเดินบัญชีของกะ"
+                        >
+                          🏧 {pmt.cashSession.cashBox?.code ?? 'shift'} →
+                        </a>
                       )}
                     </td>
                     <td className="px-3 py-2 text-xs text-gray-600">

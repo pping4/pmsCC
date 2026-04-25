@@ -49,6 +49,9 @@ export interface TaxInvoiceCoveredInvoice {
   vatAmount: number;
   serviceCharge: number;
   grandTotal: number;
+  // 5.3 cross-link — surface so the tax invoice detail page can link to
+  // the source folio for each covered invoice.
+  bookingId: string | null;
 }
 
 export interface TaxInvoiceDetail {
@@ -95,7 +98,7 @@ export async function createTaxInvoice(
   const invoices = await tx.invoice.findMany({
     where: { id: { in: input.coveredInvoiceIds } },
     select: {
-      id: true, invoiceNumber: true, issueDate: true, guestId: true, status: true,
+      id: true, invoiceNumber: true, issueDate: true, guestId: true, bookingId: true, status: true,
       subtotal: true, vatAmount: true, serviceCharge: true, grandTotal: true,
     },
   });
@@ -191,6 +194,7 @@ export async function createTaxInvoice(
     grandTotal: Number(created.grandTotal),
     invoices: invoices.map((i) => ({
       id: i.id, invoiceNumber: i.invoiceNumber, issueDate: i.issueDate,
+      bookingId: i.bookingId,
       subtotal:      Number(i.subtotal),
       vatAmount:     Number(i.vatAmount),
       serviceCharge: Number(i.serviceCharge),
@@ -286,7 +290,7 @@ export async function getTaxInvoiceDetail(
   const invoices = await tx.invoice.findMany({
     where: { id: { in: ti.coveredInvoiceIds } },
     select: {
-      id: true, invoiceNumber: true, issueDate: true,
+      id: true, invoiceNumber: true, issueDate: true, bookingId: true,
       subtotal: true, vatAmount: true, serviceCharge: true, grandTotal: true,
     },
     orderBy: { issueDate: 'asc' },
@@ -299,6 +303,7 @@ export async function getTaxInvoiceDetail(
     grandTotal: Number(ti.grandTotal),
     invoices: invoices.map((i) => ({
       id: i.id, invoiceNumber: i.invoiceNumber, issueDate: i.issueDate,
+      bookingId: i.bookingId,
       subtotal:      Number(i.subtotal),
       vatAmount:     Number(i.vatAmount),
       serviceCharge: Number(i.serviceCharge),
