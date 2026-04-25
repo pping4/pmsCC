@@ -8,17 +8,18 @@ export async function GET(request: NextRequest) {
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
-  const bookingId = searchParams.get('bookingId') ?? undefined;
-  const roomId    = searchParams.get('roomId')    ?? undefined;
-  const guestId   = searchParams.get('guestId')   ?? undefined;
-  const category  = searchParams.get('category')  ?? undefined;
-  const limitStr  = searchParams.get('limit');
-  const limit     = limitStr ? Math.min(parseInt(limitStr, 10), 200) : 50;
+  const bookingId           = searchParams.get('bookingId') ?? undefined;
+  const roomId              = searchParams.get('roomId')    ?? undefined;
+  const guestId             = searchParams.get('guestId')   ?? undefined;
+  const category            = searchParams.get('category')  ?? undefined;
+  const cityLedgerAccountId = searchParams.get('cityLedgerAccountId') ?? undefined;
+  const limitStr            = searchParams.get('limit');
+  const limit               = limitStr ? Math.min(parseInt(limitStr, 10), 200) : 50;
 
   // At least one filter must be provided to prevent full-table scans
-  if (!bookingId && !roomId && !guestId && !category) {
+  if (!bookingId && !roomId && !guestId && !category && !cityLedgerAccountId) {
     return NextResponse.json(
-      { error: 'กรุณาระบุ bookingId, roomId, guestId หรือ category' },
+      { error: 'กรุณาระบุ bookingId, roomId, guestId, cityLedgerAccountId หรือ category' },
       { status: 400 }
     );
   }
@@ -26,10 +27,11 @@ export async function GET(request: NextRequest) {
   try {
     const logs = await prisma.activityLog.findMany({
       where: {
-        ...(bookingId ? { bookingId } : {}),
-        ...(roomId    ? { roomId    } : {}),
-        ...(guestId   ? { guestId   } : {}),
-        ...(category  ? { category  } : {}),
+        ...(bookingId           ? { bookingId           } : {}),
+        ...(roomId              ? { roomId              } : {}),
+        ...(guestId             ? { guestId             } : {}),
+        ...(category            ? { category            } : {}),
+        ...(cityLedgerAccountId ? { cityLedgerAccountId } : {}),
       },
       orderBy: { createdAt: 'desc' },
       take: limit,
