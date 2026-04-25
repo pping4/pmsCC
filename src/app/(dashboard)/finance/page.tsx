@@ -1,12 +1,26 @@
 'use client';
 
-import { Fragment, useState, useEffect } from 'react';
-import { fmtDate } from '@/lib/date-format';
-import { useToast } from '@/components/ui';
+/**
+ * /finance — Collection Hub (consolidation Sub-step 1.2)
+ *
+ * Single operational page for finance/cashier staff at the start of each day:
+ *  - "ยอดที่ต้องตามเก็บ" — overdue + due-today + this-week invoice queue with
+ *    inline quick-pay (cash / transfer / credit_card)
+ *  - Side panels summarising: pending refunds, city-ledger AR overdue, bad
+ *    debt outstanding, bookings not yet invoiced
+ *  - Top KPI strip with 4 metrics + 1 today's revenue
+ *
+ * The previous "รายการเคลื่อนไหว" / "สรุปรายได้" tabs moved to /finance/statements
+ * in Sub-step 1.3 — replaced here with deep links so staff can drill in.
+ */
 
-// ============================================================================
-// TYPES
-// ============================================================================
+import { useState, useEffect, useCallback } from 'react';
+import Link from 'next/link';
+import { fmtDate, fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
+import { DataTable, type ColDef } from '@/components/data-table';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface CollectionInvoice {
   id: string;
@@ -31,207 +45,72 @@ interface CollectionData {
     upcomingAmount: number;
     notYetInvoicedCount: number;
   };
-  overdue: CollectionInvoice[];
-  dueToday: CollectionInvoice[];
-  dueThisWeek: CollectionInvoice[];
-  upcoming: CollectionInvoice[];
-  notYetInvoiced: {
-    bookingId: string;
-    guestName: string;
-    roomNumber: string;
-    rate: number;
-    nextBillingDate: string;
-    billingDay: number;
-  }[];
+  overdue:        CollectionInvoice[];
+  dueToday:       CollectionInvoice[];
+  dueThisWeek:    CollectionInvoice[];
+  upcoming:       CollectionInvoice[];
+  notYetInvoiced: { bookingId: string; guestName: string; roomNumber: string; rate: number; nextBillingDate: string; billingDay: number }[];
 }
 
-interface Transaction {
-  id: string;
-  invoiceNumber: string;
-  paidAt: string;
-  guestName: string;
-  roomNumber: string | null;
-  subtotal: number;
-  taxTotal: number;
-  grandTotal: number;
-  paymentMethod: string | null;
-  notes: string | null;
-  badDebt?: boolean;
-  badDebtNote?: string | null;
-  runningBalance: number;
-  items: { description: string; amount: number; taxType: string }[];
-}
-
-interface FinanceData {
-  summary: {
-    totalRevenue: number;
-    totalNet: number;
-    totalTax: number;
-    transactionCount: number;
-    avgPerTransaction: number;
-    outstanding: number;
-    overdueAmt: number;
-    badDebtAmt?: number;
-    todayRevenue: number;
-    todayCount: number;
-  };
-  byPaymentMethod: Record<string, number>;
-  byDay: { date: string; revenue: number; count: number; tax: number }[];
-  transactions: Transaction[];
-}
-
-// ============================================================================
-// CONSTANTS
-// ============================================================================
+interface RefundsSummary { pendingCount: number; pendingTotal: number }
+interface BadDebtSummary { unpaidCount: number; totalOutstanding: number }
+interface CitySummary { totalOutstanding: number; overdueOver30: number; suspendedAccounts: number }
 
 const BOOKING_TYPE_LABELS: Record<string, string> = {
-  daily: 'รายวัน',
+  daily:         'รายวัน',
   monthly_short: 'รายเดือนระยะสั้น',
-  monthly_long: 'รายเดือนระยะยาว',
-  walkin: 'Walk-in',
+  monthly_long:  'รายเดือนระยะยาว',
+  walkin:        'Walk-in',
 };
 
-const PAYMENT_LABELS: Record<
-  string,
-  { label: string; icon: string; color: string }
-> = {
-  cash: { label: 'เงินสด', icon: '💵', color: '#16a34a' },
-  transfer: { label: 'โอนเงิน', icon: '🏦', color: '#2563eb' },
-  credit_card: { label: 'บัตรเครดิต', icon: '💳', color: '#7c3aed' },
+const PAYMENT_LABELS: Record<string, { label: string; icon: string }> = {
+  cash:        { label: 'เงินสด',     icon: '💵' },
+  transfer:    { label: 'โอนเงิน',     icon: '🏦' },
+  credit_card: { label: 'บัตรเครดิต',  icon: '💳' },
 };
 
-const THAI_MONTHS = [
-  'มกราคม',
-  'กุมภาพันธ์',
-  'มีนาคม',
-  'เมษายน',
-  'พฤษภาคม',
-  'มิถุนายน',
-  'กรกฎาคม',
-  'สิงหาคม',
-  'กันยายน',
-  'ตุลาคม',
-  'พฤศจิกายน',
-  'ธันวาคม',
-];
+// ─── KPI Card ────────────────────────────────────────────────────────────────
 
-// ============================================================================
-// UTILITIES
-// ============================================================================
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat('th-TH', {
-    style: 'currency',
-    currency: 'THB',
-    minimumFractionDigits: 0,
-  }).format(value);
-}
-
-function formatDate(dateStr: string): string {
-  return fmtDate(dateStr);
-}
-
-function formatDateTime(dateStr: string): string {
-  return fmtDate(dateStr);
-}
-
-// ============================================================================
-// COMPONENTS
-// ============================================================================
-
-// KPI Card Component
-function KPICard({
-  title,
-  amount,
-  count,
-  accentColor,
-  icon,
-}: {
-  title: string;
-  amount?: number;
-  count?: number;
-  accentColor: string;
-  icon?: string;
+function KPICard({ title, primary, secondary, icon, accent, href }: {
+  title:     string;
+  primary:   string;
+  secondary?: string;
+  icon:      string;
+  accent:    string;       // any CSS color (var() or hex)
+  href?:     string;       // when provided, the whole card is a link
 }) {
-  return (
+  const inner = (
     <div
+      className="pms-card pms-transition p-4 flex items-start gap-3"
       style={{
-        flex: '1 1 200px',
-        minWidth: '160px',
-        backgroundColor: '#fff',
-        border: `2px solid ${accentColor}`,
-        borderRadius: '8px',
-        padding: '16px',
-        textAlign: 'center',
+        background: 'var(--surface-card)',
+        border: `1px solid ${accent}33`,
+        borderLeft: `4px solid ${accent}`,
+        cursor: href ? 'pointer' : 'default',
       }}
     >
-      {icon && (
-        <div style={{ fontSize: '24px', marginBottom: '8px' }}>{icon}</div>
-      )}
-      <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-        {title}
+      <div className="text-2xl leading-none">{icon}</div>
+      <div className="min-w-0">
+        <div className="text-xs" style={{ color: 'var(--text-muted)' }}>{title}</div>
+        <div className="text-xl font-semibold font-mono mt-0.5" style={{ color: accent }}>{primary}</div>
+        {secondary && <div className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>{secondary}</div>}
       </div>
-      {amount !== undefined && (
-        <div style={{ fontSize: '20px', fontWeight: 'bold', color: accentColor }}>
-          {formatCurrency(amount)}
-        </div>
-      )}
-      {count !== undefined && (
-        <div style={{ fontSize: '14px', color: '#999', marginTop: '4px' }}>
-          {count} รายการ
-        </div>
-      )}
     </div>
   );
+  return href ? <Link href={href}>{inner}</Link> : inner;
 }
 
-// Toast Notification
-function Toast({
-  message,
-  onClose,
-}: {
-  message: string;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const timer = setTimeout(onClose, 3000);
-    return () => clearTimeout(timer);
-  }, [onClose]);
+// ─── Quick-Pay Modal ─────────────────────────────────────────────────────────
 
-  return (
-    <div
-      style={{
-        position: 'fixed',
-        bottom: '20px',
-        right: '20px',
-        backgroundColor: '#10b981',
-        color: '#fff',
-        padding: '12px 20px',
-        borderRadius: '6px',
-        fontSize: '14px',
-        zIndex: 1000,
-        boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-      }}
-    >
-      {message}
-    </div>
-  );
-}
-
-// Quick Pay Modal
-function QuickPayModal({
-  invoice,
-  onClose,
-  onPaymentSuccess,
-}: {
+function QuickPayModal({ invoice, onClose, onSuccess }: {
   invoice: CollectionInvoice;
   onClose: () => void;
-  onPaymentSuccess: () => void;
+  onSuccess: () => void;
 }) {
-  const uiToast = useToast();
+  const toast = useToast();
   const [loading, setLoading] = useState(false);
 
-  const handlePayment = async (method: string) => {
+  const handlePay = async (method: string) => {
     if (loading) return;
     setLoading(true);
     try {
@@ -244,12 +123,11 @@ function QuickPayModal({
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.message || `HTTP ${res.status}`);
       }
-      uiToast.success(`บันทึกการชำระเงินสำเร็จ`, invoice.invoiceNumber);
-      onPaymentSuccess();
+      toast.success('บันทึกการชำระเงินสำเร็จ', invoice.invoiceNumber);
+      onSuccess();
       onClose();
-    } catch (error) {
-      console.error('Payment error:', error);
-      uiToast.error('บันทึกการชำระเงินไม่สำเร็จ', error instanceof Error ? error.message : undefined);
+    } catch (e) {
+      toast.error('บันทึกการชำระไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -257,1037 +135,500 @@ function QuickPayModal({
 
   return (
     <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        backgroundColor: 'rgba(0,0,0,0.5)',
-        display: 'flex',
-        alignItems: 'flex-end',
-        zIndex: 50,
-      }}
+      className="fixed inset-0 z-50 bg-black/50 flex items-end md:items-center justify-center p-0 md:p-4"
       onClick={onClose}
     >
       <div
-        style={{
-          width: '100%',
-          maxWidth: '500px',
-          backgroundColor: '#fff',
-          borderRadius: '12px 12px 0 0',
-          padding: '24px',
-          marginLeft: 'auto',
-          marginRight: 'auto',
-        }}
+        className="pms-card w-full max-w-md p-5 space-y-3 rounded-t-xl md:rounded-xl"
+        style={{ background: 'var(--surface-card)', border: '1px solid var(--border-default)' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 style={{ fontSize: '18px', fontWeight: 'bold', marginBottom: '16px' }}>
-          {invoice.invoiceNumber}
-        </h3>
-        <div style={{ marginBottom: '12px', fontSize: '14px', color: '#666' }}>
-          <div>
-            {invoice.guest.firstName} {invoice.guest.lastName}
-          </div>
-          {invoice.room && <div>ห้อง {invoice.room.number}</div>}
-          <div style={{ fontWeight: 'bold', marginTop: '8px' }}>
-            {formatCurrency(invoice.grandTotal)}
-          </div>
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold" style={{ color: 'var(--text-primary)' }}>
+            {invoice.invoiceNumber}
+          </h3>
+          <button onClick={onClose} className="text-xl leading-none" style={{ color: 'var(--text-muted)' }}>×</button>
         </div>
-
-        <div
-          style={{
-            display: 'flex',
-            gap: '12px',
-            flexDirection: 'column',
-            marginTop: '20px',
-          }}
-        >
+        <div className="text-sm" style={{ color: 'var(--text-muted)' }}>
+          <div>{invoice.guest.firstName} {invoice.guest.lastName}</div>
+          {invoice.room && <div>ห้อง {invoice.room.number}</div>}
+        </div>
+        <div className="text-2xl font-bold font-mono" style={{ color: 'var(--text-primary)' }}>
+          ฿{fmtBaht(invoice.grandTotal)}
+        </div>
+        <div className="grid grid-cols-1 gap-2 pt-2">
           {Object.entries(PAYMENT_LABELS).map(([key, { label, icon }]) => (
             <button
               key={key}
-              onClick={() => handlePayment(key)}
+              onClick={() => handlePay(key)}
               disabled={loading}
-              style={{
-                padding: '12px 16px',
-                backgroundColor: '#f3f4f6',
-                border: '1px solid #e5e7eb',
-                borderRadius: '6px',
-                cursor: loading ? 'not-allowed' : 'pointer',
-                fontSize: '14px',
-                opacity: loading ? 0.6 : 1,
-              }}
+              className="px-4 py-3 rounded-lg border text-sm text-left disabled:opacity-50 hover:bg-gray-50 transition"
+              style={{ borderColor: 'var(--border-default)', color: 'var(--text-primary)', background: 'var(--surface-card)' }}
             >
-              {icon} {label}
+              <span className="text-lg mr-2">{icon}</span>{label}
             </button>
           ))}
         </div>
-
         <button
           onClick={onClose}
-          style={{
-            width: '100%',
-            padding: '12px',
-            marginTop: '12px',
-            backgroundColor: '#f3f4f6',
-            border: 'none',
-            borderRadius: '6px',
-            cursor: 'pointer',
-            fontSize: '14px',
-          }}
-        >
-          ยกเลิก
-        </button>
+          disabled={loading}
+          className="w-full px-3 py-2 rounded-lg border text-sm disabled:opacity-50"
+          style={{ borderColor: 'var(--border-default)', color: 'var(--text-muted)' }}
+        >ยกเลิก</button>
       </div>
     </div>
   );
 }
 
-// ============================================================================
-// TAB 1: Collection Center
-// ============================================================================
+// ─── Side panels ─────────────────────────────────────────────────────────────
 
-function CollectionCenter() {
-  const uiToast = useToast();
-  const [data, setData] = useState<CollectionData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [selectedInvoice, setSelectedInvoice] = useState<CollectionInvoice | null>(
-    null
+function SidePanel({ title, icon, children, footer }: {
+  title: string;
+  icon:  string;
+  children: React.ReactNode;
+  footer?:  React.ReactNode;
+}) {
+  return (
+    <section
+      className="pms-card pms-transition p-4 space-y-2"
+      style={{ background: 'var(--surface-card)', border: '1px solid var(--border-light)' }}
+    >
+      <h3 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+        <span className="mr-1">{icon}</span>{title}
+      </h3>
+      <div className="text-sm">{children}</div>
+      {footer && <div className="pt-1 text-xs">{footer}</div>}
+    </section>
   );
-  const [toast, setToast] = useState('');
+}
 
-  const fetchCollection = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const res = await fetch('/api/billing/collection');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      setData(json);
-    } catch (err) {
-      const msg = (err as Error).message;
-      setError(msg);
-      uiToast.error('โหลดข้อมูลเก็บเงินไม่สำเร็จ', msg);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+function RefundsPanel() {
+  const [data, setData] = useState<RefundsSummary | null>(null);
   useEffect(() => {
-    fetchCollection();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    (async () => {
+      try {
+        const res = await fetch('/api/refunds?status=pending');
+        const j   = await res.json();
+        const rows: { amount: number }[] = j?.records ?? [];
+        setData({
+          pendingCount: rows.length,
+          pendingTotal: rows.reduce((s, r) => s + Number(r.amount), 0),
+        });
+      } catch { /* ignore */ }
+    })();
   }, []);
+  return (
+    <SidePanel title="คำขอคืนเงิน (Refunds)" icon="🔄"
+      footer={<Link href="/refunds" className="text-blue-600 hover:underline">จัดการ →</Link>}>
+      {!data ? (
+        <p style={{ color: 'var(--text-muted)' }}>กำลังโหลด…</p>
+      ) : data.pendingCount === 0 ? (
+        <p style={{ color: 'var(--text-muted)' }}>— ไม่มีคำขอรอดำเนินการ —</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono" style={{ color: '#dc2626' }}>{data.pendingCount}</span>
+            <span style={{ color: 'var(--text-muted)' }}>คำขอ</span>
+          </div>
+          <div className="font-mono text-sm" style={{ color: 'var(--text-secondary)' }}>
+            ยอดรวม ฿{fmtBaht(data.pendingTotal)}
+          </div>
+        </div>
+      )}
+    </SidePanel>
+  );
+}
 
-  const handleGenerateInvoices = async () => {
+function BadDebtPanel() {
+  const [data, setData] = useState<BadDebtSummary | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/bad-debt');
+        const j   = await res.json();
+        setData({
+          unpaidCount:      j?.summary?.unpaidCount ?? 0,
+          totalOutstanding: j?.summary?.totalOutstanding ?? 0,
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
+  return (
+    <SidePanel title="หนี้เสีย (Bad Debt)" icon="⚠️"
+      footer={<Link href="/bad-debt" className="text-blue-600 hover:underline">รายการทั้งหมด →</Link>}>
+      {!data ? (
+        <p style={{ color: 'var(--text-muted)' }}>กำลังโหลด…</p>
+      ) : data.unpaidCount === 0 ? (
+        <p style={{ color: 'var(--text-muted)' }}>— ไม่มีหนี้เสียค้าง —</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono" style={{ color: '#b45309' }}>{data.unpaidCount}</span>
+            <span style={{ color: 'var(--text-muted)' }}>รายการค้าง</span>
+          </div>
+          <div className="font-mono text-sm" style={{ color: 'var(--text-secondary)' }}>
+            ยอดรวม ฿{fmtBaht(data.totalOutstanding)}
+          </div>
+        </div>
+      )}
+    </SidePanel>
+  );
+}
+
+function CityLedgerPanel() {
+  const [data, setData] = useState<CitySummary | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/city-ledger/summary');
+        const j   = await res.json();
+        setData({
+          totalOutstanding:  Number(j?.totalOutstanding  ?? 0),
+          overdueOver30:     Number(j?.overdueOver30     ?? 0),
+          suspendedAccounts: Number(j?.suspendedAccounts ?? 0),
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
+  return (
+    <SidePanel title="City Ledger / AR องค์กร" icon="🏢"
+      footer={<Link href="/city-ledger" className="text-blue-600 hover:underline">บัญชีทั้งหมด →</Link>}>
+      {!data ? (
+        <p style={{ color: 'var(--text-muted)' }}>กำลังโหลด…</p>
+      ) : data.totalOutstanding === 0 ? (
+        <p style={{ color: 'var(--text-muted)' }}>— ไม่มียอดค้าง —</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-xl font-bold font-mono" style={{ color: 'var(--text-primary)' }}>
+              ฿{fmtBaht(data.totalOutstanding)}
+            </span>
+            <span style={{ color: 'var(--text-muted)' }}>คงค้างรวม</span>
+          </div>
+          {data.overdueOver30 > 0 && (
+            <div className="text-sm font-mono" style={{ color: '#dc2626' }}>
+              เกิน 30 วัน: ฿{fmtBaht(data.overdueOver30)}
+            </div>
+          )}
+          {data.suspendedAccounts > 0 && (
+            <div className="text-xs" style={{ color: '#b45309' }}>
+              ⚠️ {data.suspendedAccounts} บัญชีถูกระงับ
+            </div>
+          )}
+        </div>
+      )}
+    </SidePanel>
+  );
+}
+
+function NotYetInvoicedPanel({ data }: { data: CollectionData['notYetInvoiced'] }) {
+  const [generating, setGenerating] = useState(false);
+  const toast = useToast();
+  const handleGenerate = async () => {
+    if (generating) return;
+    setGenerating(true);
     try {
-      const res = await fetch('/api/billing/generate-monthly', {
-        method: 'POST',
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err?.message || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setToast(`✅ สร้าง ${json.created} รายการ / ข้าม ${json.skipped} รายการ`);
-      uiToast.success('ออกใบแจ้งหนี้สำเร็จ', `สร้าง ${json.created} / ข้าม ${json.skipped}`);
-      fetchCollection();
-    } catch (err) {
-      const msg = (err as Error).message;
-      setToast(`❌ ${msg}`);
-      uiToast.error('ออกใบแจ้งหนี้ไม่สำเร็จ', msg);
+      const res = await fetch('/api/billing/generate-monthly', { method: 'POST' });
+      const j   = await res.json();
+      if (!res.ok) throw new Error(j?.error || `HTTP ${res.status}`);
+      toast.success('สร้าง Invoice สำเร็จ', `${j?.created ?? 0} รายการ`);
+      window.location.reload();
+    } catch (e) {
+      toast.error('สร้าง Invoice ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setGenerating(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div style={{ padding: '24px', textAlign: 'center' }}>กำลังโหลด...</div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: '24px' }}>
-        <div style={{ color: '#dc2626', marginBottom: '12px' }}>
-          เกิดข้อผิดพลาด: {error}
+  return (
+    <SidePanel title="ยังไม่ออก Invoice" icon="📅"
+      footer={data.length > 0
+        ? <button onClick={handleGenerate} disabled={generating}
+            className="text-blue-600 hover:underline disabled:opacity-50">
+            {generating ? 'กำลังสร้าง…' : 'สร้าง Invoice รายเดือน →'}
+          </button>
+        : null}>
+      {data.length === 0 ? (
+        <p style={{ color: 'var(--text-muted)' }}>— ทุก booking ออก invoice แล้ว —</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono" style={{ color: '#2563eb' }}>{data.length}</span>
+            <span style={{ color: 'var(--text-muted)' }}>booking รอออกบิล</span>
+          </div>
+          <div className="font-mono text-sm" style={{ color: 'var(--text-secondary)' }}>
+            ยอดรวม ฿{fmtBaht(data.reduce((s, r) => s + r.rate, 0))}/เดือน
+          </div>
         </div>
+      )}
+    </SidePanel>
+  );
+}
+
+// ─── Collection Queue (main panel) ───────────────────────────────────────────
+
+type Tier = 'overdue' | 'dueToday' | 'dueThisWeek' | 'upcoming';
+
+function CollectionQueue({ data, onPaid }: {
+  data:   CollectionData;
+  onPaid: () => void;
+}) {
+  const [tier,   setTier]   = useState<Tier>('overdue');
+  const [active, setActive] = useState<CollectionInvoice | null>(null);
+
+  const rows: CollectionInvoice[] = (
+    tier === 'overdue'     ? data.overdue :
+    tier === 'dueToday'    ? data.dueToday :
+    tier === 'dueThisWeek' ? data.dueThisWeek :
+                             data.upcoming
+  );
+
+  type ColKey = 'invoiceNumber' | 'guest' | 'room' | 'bookingType' | 'amount' | 'dueDate' | 'overdue' | 'actions';
+  const cols: ColDef<CollectionInvoice, ColKey>[] = [
+    {
+      key: 'invoiceNumber', label: 'เลขที่', minW: 130,
+      getValue: r => r.invoiceNumber,
+      render:   r => <span className="font-mono text-blue-600">{r.invoiceNumber}</span>,
+    },
+    {
+      key: 'guest', label: 'ลูกค้า', minW: 150,
+      getValue: r => `${r.guest.firstName} ${r.guest.lastName}`,
+      render:   r => <span style={{ color: 'var(--text-primary)' }}>{r.guest.firstName} {r.guest.lastName}</span>,
+    },
+    {
+      key: 'room', label: 'ห้อง', minW: 80,
+      getValue: r => r.room?.number ?? '',
+      render:   r => <span className="font-mono" style={{ color: 'var(--text-secondary)' }}>{r.room?.number ?? '—'}</span>,
+    },
+    {
+      key: 'bookingType', label: 'ประเภท', minW: 110,
+      getValue: r => r.bookingType ?? '',
+      getLabel: r => r.bookingType ? (BOOKING_TYPE_LABELS[r.bookingType] ?? r.bookingType) : '—',
+      render:   r => r.bookingType ? <span className="text-xs">{BOOKING_TYPE_LABELS[r.bookingType] ?? r.bookingType}</span> : <span className="text-xs" style={{ color: 'var(--text-muted)' }}>—</span>,
+    },
+    {
+      key: 'amount', label: 'ยอด', align: 'right', minW: 110,
+      getValue:  r => String(Math.round(r.grandTotal * 100)).padStart(12, '0'),
+      getLabel:  r => `฿${fmtBaht(r.grandTotal)}`,
+      aggregate: 'sum',
+      aggValue:  r => r.grandTotal,
+      render:    r => <span className="font-mono" style={{ color: 'var(--text-primary)' }}>฿{fmtBaht(r.grandTotal)}</span>,
+    },
+    {
+      key: 'dueDate', label: 'ครบกำหนด', minW: 110,
+      getValue: r => r.dueDate.slice(0, 10),
+      getLabel: r => fmtDate(r.dueDate),
+      render:   r => <span className="font-mono text-xs">{fmtDate(r.dueDate)}</span>,
+    },
+    {
+      key: 'overdue', label: 'ค้าง (วัน)', align: 'right', minW: 90,
+      getValue: r => String(Math.max(0, r.daysOverdue)).padStart(4, '0'),
+      getLabel: r => r.daysOverdue > 0 ? `${r.daysOverdue} วัน` : '—',
+      render:   r => r.daysOverdue > 0
+        ? <span className="font-mono" style={{ color: r.daysOverdue >= 7 ? '#dc2626' : '#b45309' }}>{r.daysOverdue} วัน</span>
+        : <span className="text-xs" style={{ color: 'var(--text-muted)' }}>—</span>,
+    },
+    {
+      key: 'actions', label: '', align: 'center', minW: 100,
+      getValue: () => '',
+      render: r => (
         <button
-          onClick={fetchCollection}
-          style={{
-            padding: '8px 16px',
-            backgroundColor: '#3b82f6',
-            color: '#fff',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-          }}
-        >
-          ลองอีกครั้ง
-        </button>
-      </div>
-    );
-  }
-
-  if (!data) return null;
-
-  return (
-    <div>
-      {/* Top Bar */}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          marginBottom: '24px',
-          gap: '12px',
-          flexWrap: 'wrap',
-        }}
-      >
-        <h2 style={{ fontSize: '24px', fontWeight: 'bold' }}>
-          ศูนย์รับเงิน
-        </h2>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-          <button
-            onClick={handleGenerateInvoices}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#3b82f6',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '14px',
-            }}
-          >
-            📋 ออก Invoice เดือนนี้
-          </button>
-          <button
-            onClick={fetchCollection}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: '#6b7280',
-              color: '#fff',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '14px',
-            }}
-          >
-            🔄 รีเฟรช
-          </button>
-        </div>
-      </div>
-
-      {/* KPI Cards */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '16px',
-          marginBottom: '24px',
-          flexWrap: 'wrap',
-        }}
-      >
-        <KPICard
-          title="🔴 เกินกำหนด"
-          amount={data.summary.overdueAmount}
-          count={data.summary.overdueCount}
-          accentColor="#ef4444"
-        />
-        <KPICard
-          title="🟡 ครบกำหนดวันนี้"
-          amount={data.summary.dueTodayAmount}
-          count={data.summary.dueTodayCount}
-          accentColor="#f59e0b"
-        />
-        <KPICard
-          title="🔵 สัปดาห์นี้"
-          amount={data.summary.weekAmount}
-          count={data.summary.weekCount}
-          accentColor="#3b82f6"
-        />
-        <KPICard
-          title="🟢 ยังไม่ออก Invoice"
-          count={data.summary.notYetInvoicedCount}
-          accentColor="#8b5cf6"
-        />
-      </div>
-
-      {/* Invoice Sections */}
-      {[
-        { title: '🔴 เกินกำหนด', invoices: data.overdue },
-        { title: '🟡 ครบกำหนดวันนี้', invoices: data.dueToday },
-        { title: '🔵 สัปดาห์นี้', invoices: data.dueThisWeek },
-        { title: '🟢 ยังไม่ครบกำหนด', invoices: data.upcoming },
-      ].map((section) =>
-        section.invoices.length > 0 ? (
-          <div key={section.title} style={{ marginBottom: '24px' }}>
-            <h3
-              style={{
-                fontSize: '16px',
-                fontWeight: 'bold',
-                marginBottom: '12px',
-                paddingBottom: '8px',
-                borderBottom: '2px solid #e5e7eb',
-              }}
-            >
-              {section.title}
-            </h3>
-            {section.invoices.map((inv) => (
-              <div
-                key={inv.id}
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  padding: '12px',
-                  borderBottom: '1px solid #f3f4f6',
-                  flexWrap: 'wrap',
-                  gap: '12px',
-                  minHeight: '60px',
-                }}
-              >
-                <div style={{ flex: '1', minWidth: '250px' }}>
-                  <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                    🏠 ห้อง {inv.room?.number || '-'} | {inv.guest.firstName}{' '}
-                    {inv.guest.lastName}
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                    {inv.invoiceNumber} | {BOOKING_TYPE_LABELS[inv.bookingType || 'daily']} | โทร{' '}
-                    {inv.guest.phone || '-'}
-                  </div>
-                </div>
-
-                <div style={{ minWidth: '100px', textAlign: 'right' }}>
-                  <div style={{ fontSize: '12px', color: '#666' }}>
-                    {formatDate(inv.dueDate)}
-                  </div>
-                  {inv.daysOverdue > 0 && (
-                    <div
-                      style={{
-                        display: 'inline-block',
-                        fontSize: '11px',
-                        backgroundColor: '#ef4444',
-                        color: '#fff',
-                        padding: '2px 8px',
-                        borderRadius: '4px',
-                        marginTop: '4px',
-                      }}
-                    >
-                      เกิน {inv.daysOverdue} วัน
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ minWidth: '100px', textAlign: 'right' }}>
-                  <div style={{ fontSize: '16px', fontWeight: 'bold' }}>
-                    {formatCurrency(inv.grandTotal)}
-                  </div>
-                </div>
-
-                <button
-                  onClick={() => setSelectedInvoice(inv)}
-                  style={{
-                    padding: '6px 12px',
-                    backgroundColor: '#16a34a',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                  }}
-                >
-                  รับเงิน
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null
-      )}
-
-      {/* Not Yet Invoiced */}
-      {data.notYetInvoiced.length > 0 && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3
-            style={{
-              fontSize: '16px',
-              fontWeight: 'bold',
-              marginBottom: '12px',
-              paddingBottom: '8px',
-              borderBottom: '2px solid #e5e7eb',
-            }}
-          >
-            ⚪ ยังไม่ออก Invoice
-          </h3>
-          {data.notYetInvoiced.map((item) => (
-            <div
-              key={item.bookingId}
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                padding: '12px',
-                borderBottom: '1px solid #f3f4f6',
-                flexWrap: 'wrap',
-                gap: '12px',
-                minHeight: '60px',
-              }}
-            >
-              <div style={{ flex: '1', minWidth: '250px' }}>
-                <div style={{ fontSize: '14px', fontWeight: 'bold' }}>
-                  🏠 ห้อง {item.roomNumber} | {item.guestName}
-                </div>
-                <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
-                  วันเก็บเงิน: {item.billingDay} ของทุกเดือน | {formatCurrency(item.rate)}/เดือน
-                </div>
-              </div>
-
-              <button
-                style={{
-                  padding: '6px 12px',
-                  backgroundColor: '#2563eb',
-                  color: '#fff',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                }}
-              >
-                ออก Invoice
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {selectedInvoice && (
-        <QuickPayModal
-          invoice={selectedInvoice}
-          onClose={() => setSelectedInvoice(null)}
-          onPaymentSuccess={() => {
-            setToast(`✅ รับเงิน ${formatCurrency(selectedInvoice.grandTotal)} เรียบร้อย`);
-            fetchCollection();
-          }}
-        />
-      )}
-
-      {toast && <Toast message={toast} onClose={() => setToast('')} />}
-    </div>
-  );
-}
-
-// ============================================================================
-// TAB 2: Transaction Ledger
-// ============================================================================
-
-function TransactionLedger() {
-  const uiToast = useToast();
-  const [period, setPeriod] = useState('month');
-  const [data, setData] = useState<FinanceData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const fetchFinance = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        const res = await fetch(`/api/finance?period=${period}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
-        setData(json);
-      } catch (err) {
-        const msg = (err as Error).message;
-        setError(msg);
-        uiToast.error('โหลดข้อมูลธุรกรรมไม่สำเร็จ', msg);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchFinance();
-  }, [period]);
-
-  if (loading) {
-    return (
-      <div style={{ padding: '24px', textAlign: 'center' }}>กำลังโหลด...</div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: '24px', color: '#dc2626' }}>
-        เกิดข้อผิดพลาด: {error}
-      </div>
-    );
-  }
-
-  if (!data) return null;
-
-  // Defensive null coalescing for data properties
-  const summary = data?.summary ?? { totalRevenue: 0, totalNet: 0, totalTax: 0, transactionCount: 0, avgPerTransaction: 0, outstanding: 0, overdueAmt: 0, todayRevenue: 0, todayCount: 0 };
-  const transactions = data?.transactions ?? [];
-
-  return (
-    <div>
-      {/* Period Selector */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '8px',
-          marginBottom: '24px',
-          flexWrap: 'wrap',
-        }}
-      >
-        {[
-          { value: 'today', label: 'วันนี้' },
-          { value: 'week', label: 'สัปดาห์นี้' },
-          { value: 'month', label: 'เดือนนี้' },
-          { value: '30days', label: '30 วันล่าสุด' },
-        ].map((p) => (
-          <button
-            key={p.value}
-            onClick={() => setPeriod(p.value)}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: period === p.value ? '#3b82f6' : '#f3f4f6',
-              color: period === p.value ? '#fff' : '#000',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '14px',
-            }}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Summary Stats */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '16px',
-          marginBottom: '24px',
-          flexWrap: 'wrap',
-        }}
-      >
-        <KPICard
-          title="รายรับรวม"
-          amount={summary.totalRevenue}
-          accentColor="#3b82f6"
-        />
-        <KPICard
-          title="วันนี้"
-          amount={summary.todayRevenue}
-          accentColor="#10b981"
-        />
-        <KPICard
-          title="ค้างชำระ"
-          amount={summary.outstanding}
-          accentColor="#ef4444"
-        />
-        <KPICard
-          title="เฉลี่ย/รายการ"
-          amount={summary.avgPerTransaction}
-          accentColor="#f59e0b"
-        />
-      </div>
-
-      {/* Transaction Table */}
-      <div style={{ overflowX: 'auto', marginBottom: '24px' }}>
-        <table
-          style={{
-            width: '100%',
-            borderCollapse: 'collapse',
-            fontSize: '14px',
-            minWidth: '600px',
-          }}
-        >
-          <thead>
-            <tr style={{ backgroundColor: '#f9fafb', borderBottom: '2px solid #e5e7eb' }}>
-              <th style={{ padding: '12px', textAlign: 'left' }}>วันที่/เวลา</th>
-              <th style={{ padding: '12px', textAlign: 'left' }}>เลขที่</th>
-              <th style={{ padding: '12px', textAlign: 'left' }}>ลูกค้า/ห้อง</th>
-              <th style={{ padding: '12px', textAlign: 'right' }}>จำนวนเงิน</th>
-              <th style={{ padding: '12px', textAlign: 'left' }}>ช่องทาง</th>
-              <th style={{ padding: '12px', textAlign: 'right' }}>ยอดสะสม</th>
-            </tr>
-          </thead>
-          <tbody>
-            {transactions.map((tx) => (
-              // Use React.Fragment (not <tbody>) so we can have two sibling <tr>s
-              // without creating invalid nested-<tbody> that breaks column alignment.
-              <Fragment key={tx.id}>
-                {/* ── main row ── */}
-                <tr
-                  onClick={() => setExpandedRowId(expandedRowId === tx.id ? null : tx.id)}
-                  style={{
-                    borderBottom: '1px solid #f3f4f6',
-                    cursor: 'pointer',
-                    backgroundColor: expandedRowId === tx.id ? '#f9fafb' : '#fff',
-                  }}
-                >
-                  <td style={{ padding: '12px' }}>{formatDateTime(tx.paidAt)}</td>
-                  <td style={{ padding: '12px' }}>{tx.invoiceNumber}</td>
-                  <td style={{ padding: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span>
-                        {tx.guestName} {tx.roomNumber ? `/ ห้อง ${tx.roomNumber}` : ''}
-                      </span>
-                      {tx.badDebt && (
-                        <span style={{ display: 'inline-block', fontSize: '11px', backgroundColor: '#dc2626', color: '#fff', padding: '2px 8px', borderRadius: '4px', fontWeight: 'bold' }}>
-                          หนี้เสีย
-                        </span>
-                      )}
-                    </div>
-                  </td>
-                  <td style={{ padding: '12px', textAlign: 'right', fontWeight: 'bold', color: tx.badDebt ? '#dc2626' : '#000' }}>
-                    {formatCurrency(tx.grandTotal)}
-                  </td>
-                  <td style={{ padding: '12px' }}>
-                    {tx.badDebt ? '—' : tx.paymentMethod
-                      ? PAYMENT_LABELS[tx.paymentMethod]?.label || tx.paymentMethod
-                      : '-'}
-                  </td>
-                  <td style={{ padding: '12px', textAlign: 'right' }}>
-                    {formatCurrency(tx.runningBalance)}
-                  </td>
-                </tr>
-                {/* ── expandable detail row ── */}
-                {expandedRowId === tx.id && (
-                  <tr style={{ backgroundColor: '#f9fafb', borderBottom: '1px solid #f3f4f6' }}>
-                    <td colSpan={6} style={{ padding: '12px' }}>
-                      <div style={{ fontSize: '13px' }}>
-                        <div style={{ marginBottom: '8px', fontWeight: 'bold' }}>รายการ:</div>
-                        {tx.items.map((item, idx) => (
-                          <div key={idx} style={{ marginBottom: '4px', color: '#666' }}>
-                            {item.description}: {formatCurrency(item.amount)} ({item.taxType})
-                          </div>
-                        ))}
-                        {tx.badDebt && tx.badDebtNote && (
-                          <div style={{ marginTop: '8px', color: '#dc2626', fontWeight: 'bold' }}>
-                            [หนี้เสีย] {tx.badDebtNote}
-                          </div>
-                        )}
-                        {tx.notes && (
-                          <div style={{ marginTop: '8px', color: '#999' }}>
-                            หมายเหตุ: {tx.notes}
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Footer Summary */}
-      <div
-        style={{
-          backgroundColor: '#f9fafb',
-          padding: '16px',
-          borderRadius: '6px',
-          display: 'flex',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: '16px',
-          fontSize: '14px',
-        }}
-      >
-        <div>
-          <span style={{ color: '#666' }}>รวมรายได้: </span>
-          <span style={{ fontWeight: 'bold', fontSize: '16px' }}>
-            {formatCurrency(summary.totalRevenue)}
-          </span>
-        </div>
-        <div>
-          <span style={{ color: '#666' }}>รวมภาษี: </span>
-          <span style={{ fontWeight: 'bold', fontSize: '16px' }}>
-            {formatCurrency(summary.totalTax)}
-          </span>
-        </div>
-        <div>
-          <span style={{ color: '#666' }}>สุทธิ: </span>
-          <span style={{ fontWeight: 'bold', fontSize: '16px' }}>
-            {formatCurrency(summary.totalNet)}
-          </span>
-        </div>
-        <div>
-          <span style={{ color: '#666' }}>จำนวนรายการ: </span>
-          <span style={{ fontWeight: 'bold' }}>{summary.transactionCount}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// TAB 3: Revenue Summary
-// ============================================================================
-
-function RevenueSummary() {
-  const uiToast = useToast();
-  const [period, setPeriod] = useState('month');
-  const [data, setData] = useState<FinanceData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    const fetchFinance = async () => {
-      setLoading(true);
-      setError('');
-      try {
-        const res = await fetch(`/api/finance?period=${period}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = await res.json();
-        setData(json);
-      } catch (err) {
-        const msg = (err as Error).message;
-        setError(msg);
-        uiToast.error('โหลดสรุปรายรับไม่สำเร็จ', msg);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchFinance();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [period]);
-
-  if (loading) {
-    return (
-      <div style={{ padding: '24px', textAlign: 'center' }}>กำลังโหลด...</div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div style={{ padding: '24px', color: '#dc2626' }}>
-        เกิดข้อผิดพลาด: {error}
-      </div>
-    );
-  }
-
-  if (!data) return null;
-
-  // Defensive null coalescing for data properties
-  const summary = data?.summary ?? { totalRevenue: 0, totalNet: 0, totalTax: 0, transactionCount: 0, avgPerTransaction: 0, outstanding: 0, overdueAmt: 0, badDebtAmt: 0, todayRevenue: 0, todayCount: 0 };
-  const byDay = data?.byDay ?? [];
-  const transactionsForSummary = data?.transactions ?? [];
-
-  // Find max revenue for bar chart scaling
-  const maxRevenue = Math.max(
-    1,
-    ...byDay.map((d) => d.revenue)
-  );
-
-  // Group transactions by booking type
-  const byBookingType: Record<string, number> = {};
-  transactionsForSummary.forEach((tx) => {
-    const type = tx.items[0]?.description || 'อื่น ๆ';
-    byBookingType[type] = (byBookingType[type] || 0) + tx.grandTotal;
-  });
-
-  return (
-    <div>
-      {/* Period Selector */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '8px',
-          marginBottom: '24px',
-          flexWrap: 'wrap',
-        }}
-      >
-        {[
-          { value: 'today', label: 'วันนี้' },
-          { value: 'week', label: 'สัปดาห์นี้' },
-          { value: 'month', label: 'เดือนนี้' },
-          { value: '30days', label: '30 วันล่าสุด' },
-        ].map((p) => (
-          <button
-            key={p.value}
-            onClick={() => setPeriod(p.value)}
-            style={{
-              padding: '8px 16px',
-              backgroundColor: period === p.value ? '#3b82f6' : '#f3f4f6',
-              color: period === p.value ? '#fff' : '#000',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              fontSize: '14px',
-            }}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      {/* KPI Cards */}
-      <div
-        style={{
-          display: 'flex',
-          gap: '16px',
-          marginBottom: '24px',
-          flexWrap: 'wrap',
-        }}
-      >
-        <KPICard
-          title="รายรับในช่วง"
-          amount={summary.totalRevenue}
-          accentColor="#3b82f6"
-        />
-        <KPICard
-          title="รายรับวันนี้"
-          amount={summary.todayRevenue}
-          accentColor="#10b981"
-        />
-        <KPICard
-          title="ค้างชำระ"
-          amount={summary.outstanding}
-          accentColor="#ef4444"
-        />
-        <KPICard
-          title="เฉลี่ย/รายการ"
-          amount={summary.avgPerTransaction}
-          accentColor="#f59e0b"
-        />
-      </div>
-
-      {/* Bar Chart: Revenue by Day */}
-      {byDay.length > 0 && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '16px' }}>
-            รายรับรายวัน
-          </h3>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'flex-end',
-              gap: '8px',
-              padding: '16px',
-              backgroundColor: '#f9fafb',
-              borderRadius: '6px',
-              minHeight: '250px',
-              overflowX: 'auto',
-            }}
-          >
-            {byDay.map((day) => {
-              const date = new Date(day.date);
-              const dayNum = date.getDate();
-              const height = (day.revenue / maxRevenue) * 200 + 20;
-              return (
-                <div
-                  key={day.date}
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    gap: '8px',
-                    flex: '0 0 auto',
-                    minWidth: '50px',
-                  }}
-                >
-                  <div
-                    style={{
-                      width: '40px',
-                      height: `${height}px`,
-                      backgroundColor: '#3b82f6',
-                      borderRadius: '4px 4px 0 0',
-                    }}
-                    title={`${day.date}: ${formatCurrency(day.revenue)}`}
-                  />
-                  <div
-                    style={{
-                      fontSize: '12px',
-                      color: '#666',
-                      textAlign: 'center',
-                      minWidth: '40px',
-                    }}
-                  >
-                    {dayNum}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Payment Method Breakdown */}
-      {Object.keys(data.byPaymentMethod ?? {}).length > 0 && (
-        <div style={{ marginBottom: '24px' }}>
-          <h3 style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '16px' }}>
-            รายรับตามช่องทาง
-          </h3>
-          {Object.entries(data.byPaymentMethod ?? {}).map(([method, amount]) => {
-            const percentage = data.summary.totalRevenue > 0
-              ? ((amount / data.summary.totalRevenue) * 100).toFixed(1)
-              : '0';
-            const label = PAYMENT_LABELS[method]?.label || method;
-            const color = PAYMENT_LABELS[method]?.color || '#6b7280';
-            return (
-              <div key={method} style={{ marginBottom: '12px' }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    marginBottom: '4px',
-                    fontSize: '14px',
-                  }}
-                >
-                  <span>{label}</span>
-                  <span style={{ fontWeight: 'bold' }}>
-                    {percentage}% ({formatCurrency(amount)})
-                  </span>
-                </div>
-                <div
-                  style={{
-                    width: '100%',
-                    height: '8px',
-                    backgroundColor: '#e5e7eb',
-                    borderRadius: '4px',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div
-                    style={{
-                      height: '100%',
-                      width: `${percentage}%`,
-                      backgroundColor: color,
-                    }}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Booking Type Breakdown */}
-      {Object.keys(byBookingType).length > 0 && (
-        <div>
-          <h3 style={{ fontSize: '16px', fontWeight: 'bold', marginBottom: '16px' }}>
-            รายรับตามประเภท
-          </h3>
-          {Object.entries(byBookingType).map(([type, amount]) => {
-            const percentage = data.summary.totalRevenue > 0
-              ? ((amount / data.summary.totalRevenue) * 100).toFixed(1)
-              : '0';
-            return (
-              <div key={type} style={{ marginBottom: '12px' }}>
-                <div
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    marginBottom: '4px',
-                    fontSize: '14px',
-                  }}
-                >
-                  <span>{type}</span>
-                  <span style={{ fontWeight: 'bold' }}>
-                    {percentage}% ({formatCurrency(amount)})
-                  </span>
-                </div>
-                <div
-                  style={{
-                    width: '100%',
-                    height: '8px',
-                    backgroundColor: '#e5e7eb',
-                    borderRadius: '4px',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div
-                    style={{
-                      height: '100%',
-                      width: `${percentage}%`,
-                      backgroundColor: '#8b5cf6',
-                    }}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Bad Debt Summary */}
-      {(summary.badDebtAmt ?? 0) > 0 && (
-        <div style={{ marginTop: '24px', backgroundColor: '#fef2f2', border: '2px solid #dc2626', borderRadius: '8px', padding: '16px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
-            <div style={{ fontSize: '20px' }}>⚠️</div>
-            <h3 style={{ fontSize: '16px', fontWeight: 'bold', color: '#dc2626', margin: 0 }}>หนี้เสีย (Bad Debt)</h3>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span style={{ fontSize: '14px', color: '#6b7280' }}>ยอดหนี้เสียรวม</span>
-            <span style={{ fontSize: '20px', fontWeight: 'bold', color: '#dc2626' }}>
-              {formatCurrency(summary.badDebtAmt ?? 0)}
-            </span>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ============================================================================
-// MAIN PAGE COMPONENT
-// ============================================================================
-
-export default function FinancePage() {
-  const [activeTab, setActiveTab] = useState(0);
-
-  const tabs = [
-    { label: 'ศูนย์รับเงิน', component: <CollectionCenter /> },
-    { label: 'รายการเคลื่อนไหว', component: <TransactionLedger /> },
-    { label: 'สรุปรายได้', component: <RevenueSummary /> },
+          onClick={() => setActive(r)}
+          className="px-3 py-1 rounded text-xs font-medium bg-blue-600 hover:bg-blue-700 text-white"
+        >รับชำระ</button>
+      ),
+    },
   ];
 
   return (
-    <div
-      style={{
-        fontFamily: 'Sarabun, system-ui, sans-serif',
-        backgroundColor: '#fff',
-        minHeight: '100vh',
-        padding: '24px',
-      }}
+    <section
+      className="pms-card pms-transition p-4 space-y-3"
+      style={{ background: 'var(--surface-card)', border: '1px solid var(--border-light)' }}
     >
-      <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
-        {/* Tab Navigation */}
-        <div
-          style={{
-            display: 'flex',
-            gap: '12px',
-            borderBottom: '2px solid #e5e7eb',
-            marginBottom: '24px',
-            flexWrap: 'wrap',
-          }}
-        >
-          {tabs.map((tab, idx) => (
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h2 className="text-base font-semibold" style={{ color: 'var(--text-primary)' }}>
+          📋 รายการต้องตามเก็บ
+        </h2>
+        <div className="flex gap-1 flex-wrap">
+          {([
+            ['overdue',     `เกินกำหนด (${data.summary.overdueCount})`],
+            ['dueToday',    `วันนี้ (${data.summary.dueTodayCount})`],
+            ['dueThisWeek', `สัปดาห์นี้ (${data.summary.weekCount})`],
+            ['upcoming',    `ที่จะมาถึง (${data.upcoming.length})`],
+          ] as [Tier, string][]).map(([key, label]) => (
             <button
-              key={idx}
-              onClick={() => setActiveTab(idx)}
-              style={{
-                padding: '12px 20px',
-                backgroundColor: 'transparent',
-                border: 'none',
-                borderBottom: activeTab === idx ? '3px solid #3b82f6' : 'none',
-                cursor: 'pointer',
-                fontSize: '16px',
-                fontWeight: activeTab === idx ? 'bold' : 'normal',
-                color: activeTab === idx ? '#3b82f6' : '#666',
-              }}
-            >
-              {tab.label}
-            </button>
+              key={key}
+              onClick={() => setTier(key)}
+              className={`px-3 py-1 rounded text-xs font-medium border ${
+                tier === key ? 'bg-blue-600 text-white border-blue-600' : ''
+              }`}
+              style={tier === key ? {} : { borderColor: 'var(--border-default)', color: 'var(--text-secondary)' }}
+            >{label}</button>
           ))}
         </div>
-
-        {/* Tab Content */}
-        <div>{tabs[activeTab].component}</div>
       </div>
+
+      {rows.length === 0 ? (
+        <p className="text-sm py-8 text-center" style={{ color: 'var(--text-muted)' }}>
+          — ไม่มีรายการในกลุ่มนี้ —
+        </p>
+      ) : (
+        <DataTable
+          rows={rows}
+          columns={cols}
+          rowKey={r => r.id}
+          defaultSort={{ col: 'overdue', dir: 'desc' }}
+        />
+      )}
+
+      {active && (
+        <QuickPayModal
+          invoice={active}
+          onClose={() => setActive(null)}
+          onSuccess={onPaid}
+        />
+      )}
+    </section>
+  );
+}
+
+// ─── Today's Cash-In summary (small KPI panel) ───────────────────────────────
+
+interface TodaySnapshot { todayRevenue: number; todayCount: number }
+
+function useTodaySnapshot(): TodaySnapshot | null {
+  const [data, setData] = useState<TodaySnapshot | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/finance?period=today');
+        const j   = await res.json();
+        setData({
+          todayRevenue: Number(j?.summary?.todayRevenue ?? j?.summary?.totalRevenue ?? 0),
+          todayCount:   Number(j?.summary?.todayCount ?? j?.summary?.transactionCount ?? 0),
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
+  return data;
+}
+
+// ─── Page ────────────────────────────────────────────────────────────────────
+
+export default function FinancePage() {
+  const [data,    setData]    = useState<CollectionData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error,   setError]   = useState<string | null>(null);
+  const today = useTodaySnapshot();
+
+  const reload = useCallback(async () => {
+    try {
+      const res = await fetch('/api/billing/collection');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setData(await res.json());
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  if (loading) {
+    return (
+      <div className="p-6 max-w-7xl mx-auto">
+        <p className="text-sm" style={{ color: 'var(--text-muted)' }}>กำลังโหลด…</p>
+      </div>
+    );
+  }
+  if (error || !data) {
+    return (
+      <div className="p-6 max-w-7xl mx-auto">
+        <p className="text-sm text-red-600">{error ?? 'ไม่พบข้อมูล'}</p>
+      </div>
+    );
+  }
+
+  const collectableTotal = data.summary.overdueAmount + data.summary.dueTodayAmount;
+  const collectableCount = data.summary.overdueCount + data.summary.dueTodayCount;
+
+  return (
+    <div className="p-6 max-w-7xl mx-auto space-y-5">
+      {/* Header */}
+      <header className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--text-primary)' }}>
+            💰 ศูนย์การเงิน
+          </h1>
+          <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+            รายการที่ต้องตามเก็บ + คำขอคืนเงิน + บัญชีองค์กร — ภาพรวมประจำวันสำหรับการเงิน/แคชเชียร์
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Link href="/finance/statements" className="px-3 py-1.5 rounded-lg border text-sm"
+            style={{ borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}>
+            📊 งบการเงิน / รายงาน
+          </Link>
+          <Link href="/finance/money-overview" className="px-3 py-1.5 rounded-lg border text-sm"
+            style={{ borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}>
+            💵 ภาพรวมเงิน
+          </Link>
+        </div>
+      </header>
+
+      {/* KPI strip */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <KPICard
+          icon="🔴"
+          title="ค้างเก็บรวม (เกินกำหนด + วันนี้)"
+          primary={`฿${fmtBaht(collectableTotal)}`}
+          secondary={`${collectableCount} รายการ`}
+          accent="#dc2626"
+        />
+        <KPICard
+          icon="📅"
+          title="สัปดาห์นี้"
+          primary={`฿${fmtBaht(data.summary.weekAmount)}`}
+          secondary={`${data.summary.weekCount} รายการ`}
+          accent="#b45309"
+        />
+        <KPICard
+          icon="✅"
+          title="รับเงินวันนี้"
+          primary={`฿${fmtBaht(today?.todayRevenue ?? 0)}`}
+          secondary={`${today?.todayCount ?? 0} รายการ`}
+          accent="#16a34a"
+          href="/finance/statements?period=today"
+        />
+        <KPICard
+          icon="📋"
+          title="ที่จะมาถึง + รอออกบิล"
+          primary={`${data.upcoming.length + data.summary.notYetInvoicedCount}`}
+          secondary={`฿${fmtBaht(data.summary.upcomingAmount)} กำลังจะถึง`}
+          accent="#2563eb"
+        />
+      </div>
+
+      {/* Main + side */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2">
+          <CollectionQueue data={data} onPaid={reload} />
+        </div>
+        <aside className="space-y-3">
+          <RefundsPanel />
+          <CityLedgerPanel />
+          <BadDebtPanel />
+          <NotYetInvoicedPanel data={data.notYetInvoiced} />
+        </aside>
+      </div>
+
+      {/* Cross-link to month picker for monthly automations */}
+      <footer className="pt-3 text-xs flex flex-wrap gap-3" style={{ color: 'var(--text-muted)' }}>
+        <Link href="/billing-cycle" className="text-blue-600 hover:underline">📆 รอบบิล / ค่าปรับ →</Link>
+        <Link href="/billing/folio" className="text-blue-600 hover:underline">📒 Guest Folio →</Link>
+        <Link href="/accounting/tax-invoices" className="text-blue-600 hover:underline">🧾 ใบกำกับภาษี →</Link>
+      </footer>
     </div>
   );
 }
