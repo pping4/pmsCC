@@ -38,14 +38,8 @@ import {
   addCharge,
   createInvoiceFromFolio,
   getFolioByBookingId,
-  markLineItemsPaid,
 } from '@/services/folio.service';
-import {
-  generatePaymentNumber,
-  generateReceiptNumber,
-} from '@/services/invoice-number.service';
-import { postPaymentReceived } from '@/services/ledger.service';
-import { getActiveSessionForUser } from '@/services/cashSession.service';
+import { createPayment } from '@/services/payment.service';
 import { logActivity }  from '@/services/activityLog.service';
 import { fmtDate }      from '@/lib/date-format';
 import type { ReceiptData } from '@/components/receipt/types';
@@ -281,111 +275,38 @@ export async function POST(
       );
     }
 
-    // ── 8. Create Payment + PaymentAllocation ─────────────────────────────
-    // Sprint 4B: for cash, auto-resolve the caller's open shift (cashSessionId
-    // + cashBoxId). Other methods leave both null.
-    let resolvedCashSessionId: string | null = null;
-    let resolvedCashBoxId:     string | null = null;
-    if (paymentMethod === 'cash') {
-      const active = await getActiveSessionForUser(tx, userId);
-      if (!active) {
-        throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
-      }
-      resolvedCashSessionId = active.id;
-      resolvedCashBoxId     = active.cashBoxId;
-    }
-
-    // Sprint 5 — slip uniqueness pre-check
-    if (slipRefNo) {
-      const dup = await tx.payment.findUnique({
-        where: { slipRefNo },
-        select: { paymentNumber: true },
-      });
-      if (dup) {
-        throw new Error(`เลขอ้างอิง slip นี้ถูกใช้แล้วในใบรับเงิน ${dup.paymentNumber}`);
-      }
-    }
-
-    // Sprint 5 — terminal active + brand acceptance
-    if (paymentMethod === 'credit_card' && terminalId) {
-      const term = await tx.edcTerminal.findUnique({
-        where: { id: terminalId },
-        select: { isActive: true, allowedBrands: true, code: true },
-      });
-      if (!term) throw new Error('ไม่พบเครื่อง EDC ที่เลือก');
-      if (!term.isActive) throw new Error(`เครื่อง EDC ${term.code} ถูกปิดการใช้งาน`);
-      if (cardBrand && term.allowedBrands.length > 0 && !term.allowedBrands.includes(cardBrand as never)) {
-        throw new Error(`เครื่อง EDC ${term.code} ไม่รองรับบัตร ${cardBrand}`);
-      }
-    }
-
-    const [paymentNumber, receiptNumber] = await Promise.all([
-      generatePaymentNumber(tx),
-      generateReceiptNumber(tx),
-    ]);
-
-    // Sprint 5 — 2-state recon lifecycle
-    const reconStatus = paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED';
-    const clearedAt   = paymentMethod === 'cash' ? now         : null;
-    const clearedBy   = paymentMethod === 'cash' ? userId      : null;
-
-    const payment = await tx.payment.create({
-      data: {
-        paymentNumber,
-        receiptNumber,
-        bookingId,
-        guestId:        booking.guestId,
-        amount:         new Prisma.Decimal(invResult.grandTotal),
-        paymentMethod:  paymentMethod as never,
-        paymentDate:    now,
-        cashSessionId:  resolvedCashSessionId,
-        cashBoxId:      resolvedCashBoxId,
-        status:         'ACTIVE' as never,
-        reconStatus:    reconStatus as never,
-        clearedAt,
-        clearedBy,
-        idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
-        receivedBy:     userId,
-        notes:          notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
-        createdBy:      userId,
-        // Sprint 5 — transfer/QR
-        receivingAccountId: receivingAccountId ?? null,
-        slipImageUrl:       slipImageUrl       ?? null,
-        slipRefNo:          slipRefNo          ?? null,
-        // Sprint 5 — card
-        cardBrand:  (cardBrand ?? null) as never,
-        cardType:   (cardType  ?? null) as never,
-        cardLast4:  cardLast4  ?? null,
-        authCode:   authCode   ?? null,
-        terminalId: terminalId ?? null,
-        feeAmount:    feeAmount != null ? new Prisma.Decimal(feeAmount) : null,
-        feeAccountId: feeAccountId ?? null,
-      },
-      select: { id: true },
+    // ── 8. Delegate to payment.service (single ledger chokepoint) ─────────
+    // payment.service handles: cash-session resolution, slip-refNo dedup,
+    // EDC terminal validation, payment-number generation, recon lifecycle,
+    // allocation, invoice paid-status, line-item paid flag, ledger pair
+    // (DR Cash / CR AR), folio recalc, audit log.
+    const paymentResult = await createPayment(tx, {
+      idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
+      guestId:        booking.guestId,
+      bookingId,
+      amount:         invResult.grandTotal,
+      paymentMethod,
+      paymentDate:    now,
+      receivedBy:     userId,
+      notes:          notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
+      allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+      createdBy:      userId,
+      createdByName:  userName ?? undefined,
+      // Sprint 5 — transfer/QR
+      receivingAccountId,
+      slipImageUrl,
+      slipRefNo,
+      // Sprint 5 — card
+      cardBrand,
+      cardType,
+      cardLast4,
+      authCode,
+      terminalId,
+      feeAmount:    feeAmount    ?? undefined,
+      feeAccountId: feeAccountId ?? undefined,
     });
-
-    await tx.paymentAllocation.create({
-      data: {
-        paymentId: payment.id,
-        invoiceId: invResult.invoiceId,
-        amount:    new Prisma.Decimal(invResult.grandTotal),
-      },
-    });
-
-    // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
-    await postPaymentReceived(tx, {
-      paymentMethod: paymentMethod,
-      amount:        invResult.grandTotal,
-      paymentId:     payment.id,
-      createdBy:     userId,
-    });
-
-    // ── 9. Mark invoice + line items PAID ─────────────────────────────────
-    await tx.invoice.update({
-      where: { id: invResult.invoiceId },
-      data:  { paidAmount: new Prisma.Decimal(invResult.grandTotal), status: 'paid' },
-    });
-    await markLineItemsPaid(tx, invResult.invoiceId);
+    const paymentNumber = paymentResult.paymentNumber;
+    const receiptNumber = paymentResult.receiptNumber;
 
     // ── 10. Activity log ──────────────────────────────────────────────────
     await logActivity(tx, {
@@ -404,7 +325,7 @@ export async function POST(
         amount:        invResult.grandTotal,
         paymentMethod,
         invoiceNumber: invResult.invoiceNumber,
-        paymentId:     payment.id,
+        paymentId:     paymentResult.id,
       },
     });
 

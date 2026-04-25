@@ -158,18 +158,36 @@ async function resolveAccountSafe(
 // ─── Named accounting scenarios ───────────────────────────────────────────────
 
 /**
- * Receive payment for room/service revenue
+ * Receive payment — credits the side that ECONOMICALLY makes sense.
+ *
+ * The `creditSide` parameter is REQUIRED to prevent silent double-counting:
+ *
+ *   'AR'                — typical case: invoice was already accrued
+ *                         (DR AR / CR Revenue at invoice time), so the
+ *                         payment must REDUCE AR, not credit Revenue again.
+ *                         Use this whenever the payment has invoice
+ *                         allocations.
+ *
+ *   'DEPOSIT_LIABILITY' — true advance payment with NO invoice yet
+ *                         (rare in this codebase — most "deposits" go
+ *                         through securityDeposit.service which uses
+ *                         postDepositReceived directly).
+ *
+ *   'REVENUE'           — payment that bypasses AR entirely (cash sale at
+ *                         counter with no invoice, e.g. a tip or walk-in
+ *                         purchase). USE WITH CAUTION — most flows should
+ *                         create an invoice and use 'AR' instead.
  *
  * Without fee (feeAmount is 0/undefined):
- *   DEBIT Cash/Bank/CardClearing  |  CREDIT Revenue
+ *   DEBIT Cash/Bank/CardClearing  |  CREDIT <creditSide>
  *
  * Phase D — with processor fee (feeAmount > 0):
  *   Gross = Net + Fee. Booked as two balanced pairs so the ledger stays
  *   in double-entry discipline:
- *     DEBIT Money  (net)   | CREDIT Revenue (net)
- *     DEBIT CardFee (fee)  | CREDIT Revenue (fee)
- *   Net effect: Revenue is credited for gross; money lands as net; fee
- *   is recognized as expense. No manual JE needed at settlement.
+ *     DEBIT Money  (net)   | CREDIT <creditSide> (net)
+ *     DEBIT CardFee (fee)  | CREDIT <creditSide> (fee)
+ *   Net effect: <creditSide> is credited for gross; money lands as net;
+ *   fee is recognized as expense.
  */
 export async function postPaymentReceived(
   tx: TxClient,
@@ -178,23 +196,30 @@ export async function postPaymentReceived(
     amount: number;             // GROSS
     paymentId: string;
     createdBy: string;
+    creditSide: 'AR' | 'DEPOSIT_LIABILITY' | 'REVENUE';
     feeAmount?: number | null;
     feeAccountId?: string | null;   // explicit override
     moneyAccountId?: string | null; // explicit override for debit side
   }
 ) {
-  const money = await resolveMoneyAccount(tx, opts.paymentMethod, opts.moneyAccountId);
-  const gross = new Prisma.Decimal(String(opts.amount));
-  const fee   = new Prisma.Decimal(String(opts.feeAmount ?? 0));
+  const money  = await resolveMoneyAccount(tx, opts.paymentMethod, opts.moneyAccountId);
+  const credit = creditAccountFor(opts.creditSide);
+  const gross  = new Prisma.Decimal(String(opts.amount));
+  const fee    = new Prisma.Decimal(String(opts.feeAmount ?? 0));
+
+  const descSuffix =
+    opts.creditSide === 'AR'                ? '' :
+    opts.creditSide === 'DEPOSIT_LIABILITY' ? ' (advance)' :
+                                              ' (direct revenue)';
 
   if (fee.lte(0)) {
     await postLedgerPair(tx, {
       debitAccount: money.legacy, debitAccountId: money.accountId,
-      creditAccount: LedgerAccount.REVENUE,
+      creditAccount: credit,
       amount: gross,
       referenceType: 'Payment',
       referenceId: opts.paymentId,
-      description: `Payment received via ${opts.paymentMethod}`,
+      description: `Payment received via ${opts.paymentMethod}${descSuffix}`,
       createdBy: opts.createdBy,
     });
     return;
@@ -205,18 +230,18 @@ export async function postPaymentReceived(
   }
   const net = gross.sub(fee);
 
-  // Leg 1: money (net) vs revenue (net)
+  // Leg 1: money (net) vs <creditSide> (net)
   await postLedgerPair(tx, {
     debitAccount: money.legacy, debitAccountId: money.accountId,
-    creditAccount: LedgerAccount.REVENUE,
+    creditAccount: credit,
     amount: net,
     referenceType: 'Payment',
     referenceId: opts.paymentId,
-    description: `Payment received via ${opts.paymentMethod} (net)`,
+    description: `Payment received via ${opts.paymentMethod} (net)${descSuffix}`,
     createdBy: opts.createdBy,
   });
 
-  // Leg 2: fee expense vs revenue — default CARD_FEE for cards, BANK_FEE otherwise
+  // Leg 2: fee expense vs <creditSide> — default CARD_FEE for cards, BANK_FEE otherwise
   const feeSubKind: AccountSubKind =
     money.subKind === 'CARD_CLEARING' ? 'CARD_FEE' : 'BANK_FEE';
   const feeAcc = await resolveAccount(tx, {
@@ -225,21 +250,32 @@ export async function postPaymentReceived(
   });
   await postLedgerPair(tx, {
     debitAccount: LedgerAccount.EXPENSE, debitAccountId: feeAcc.id,
-    creditAccount: LedgerAccount.REVENUE,
+    creditAccount: credit,
     amount: fee,
     referenceType: 'Payment',
     referenceId: opts.paymentId,
-    description: `Processor fee on ${opts.paymentMethod}`,
+    description: `Processor fee on ${opts.paymentMethod}${descSuffix}`,
     createdBy: opts.createdBy,
   });
+}
+
+/** Map creditSide string → LedgerAccount enum. */
+function creditAccountFor(side: 'AR' | 'DEPOSIT_LIABILITY' | 'REVENUE'): LedgerAccount {
+  switch (side) {
+    case 'AR':                return LedgerAccount.AR;
+    case 'DEPOSIT_LIABILITY': return LedgerAccount.DEPOSIT_LIABILITY;
+    case 'REVENUE':           return LedgerAccount.REVENUE;
+  }
 }
 
 /**
  * Record discount given (contra-revenue)
  * DEBIT Discount Given  |  CREDIT Revenue  (reduces net revenue on P&L)
- * Note: Called IN ADDITION to postPaymentReceived when a discount exists.
- * The Revenue credit in postPaymentReceived is for the FULL subtotal.
- * This pair records the discount reduction.
+ *
+ * Called when an invoice has a discount line. The invoice accrual already
+ * credited Revenue at face value; this pair offsets it via DISCOUNT_GIVEN.
+ * Net P&L effect: Revenue stays inflated by face, DISCOUNT_GIVEN is shown
+ * as a contra-revenue line — Thai GL convention for transparency.
  */
 export async function postDiscountGiven(
   tx: TxClient,
@@ -338,8 +374,12 @@ export async function postDepositForfeited(
 }
 
 /**
- * Void / reverse a payment
- * Creates opposite entries of the original payment ledger entries
+ * Void / reverse a payment — must mirror the original `creditSide` choice.
+ *
+ * If the original payment was posted with `creditSide: 'AR'`, the void
+ * reverses with DR AR / CR Money. If 'REVENUE', then DR REVENUE / CR Money.
+ * Caller MUST pass the same value that was used when the payment was
+ * received, or the ledger will not reconcile.
  */
 export async function postPaymentVoided(
   tx: TxClient,
@@ -348,18 +388,20 @@ export async function postPaymentVoided(
     amount: number;                 // GROSS (must match original)
     paymentId: string;
     createdBy: string;
+    creditSide: 'AR' | 'DEPOSIT_LIABILITY' | 'REVENUE';
     feeAmount?: number | null;
     feeAccountId?: string | null;
     moneyAccountId?: string | null;
   }
 ) {
-  const money = await resolveMoneyAccount(tx, opts.paymentMethod, opts.moneyAccountId);
-  const gross = new Prisma.Decimal(String(opts.amount));
-  const fee   = new Prisma.Decimal(String(opts.feeAmount ?? 0));
+  const money  = await resolveMoneyAccount(tx, opts.paymentMethod, opts.moneyAccountId);
+  const reverseDebit = creditAccountFor(opts.creditSide);
+  const gross  = new Prisma.Decimal(String(opts.amount));
+  const fee    = new Prisma.Decimal(String(opts.feeAmount ?? 0));
 
   if (fee.lte(0)) {
     await postLedgerPair(tx, {
-      debitAccount: LedgerAccount.REVENUE,
+      debitAccount: reverseDebit,
       creditAccount: money.legacy, creditAccountId: money.accountId,
       amount: gross,
       referenceType: 'Void',
@@ -373,7 +415,7 @@ export async function postPaymentVoided(
   // Reverse both legs of the Phase-D fee split
   const net = gross.sub(fee);
   await postLedgerPair(tx, {
-    debitAccount: LedgerAccount.REVENUE,
+    debitAccount: reverseDebit,
     creditAccount: money.legacy, creditAccountId: money.accountId,
     amount: net,
     referenceType: 'Void',
@@ -389,7 +431,7 @@ export async function postPaymentVoided(
     explicitAccountId: opts.feeAccountId ?? null,
   });
   await postLedgerPair(tx, {
-    debitAccount: LedgerAccount.REVENUE,
+    debitAccount: reverseDebit,
     creditAccount: LedgerAccount.EXPENSE, creditAccountId: feeAcc.id,
     amount: fee,
     referenceType: 'Void',

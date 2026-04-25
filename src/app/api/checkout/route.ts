@@ -23,17 +23,15 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
-import { postBadDebt, postPaymentReceived } from '@/services/ledger.service';
-import { getActiveSessionForUser } from '@/services/cashSession.service';
+import { postBadDebt } from '@/services/ledger.service';
 import { postInvoiceToCityLedger } from '@/services/cityLedger.service';
 import { z } from 'zod';
 import {
   getFolioByBookingId, addCharge, createInvoiceFromFolio,
-  closeFolio, markLineItemsPaid, recalculateFolioBalance,
+  closeFolio,
 } from '@/services/folio.service';
-import {
-  generateInvoiceNumber, generatePaymentNumber, generateReceiptNumber,
-} from '@/services/invoice-number.service';
+import { generateInvoiceNumber } from '@/services/invoice-number.service';
+import { createPayment } from '@/services/payment.service';
 import { logActivity } from '@/services/activityLog.service';
 import { transitionRoom, RoomTransitionError } from '@/services/roomStatus.service';
 import { createCheckoutCleaningTask } from '@/services/housekeeping.service';
@@ -384,75 +382,26 @@ export async function POST(request: Request) {
 
         // D: If caller provided a payment method, collect the outstanding now.
         //    grandTotal may be 0 (fully cancelled via credits) — skip payment.
+        let coPayNum: string | null = null;
+        let coRcpNum: string | null = null;
         if (paymentMethod && coResult.grandTotal > 0) {
-          const [payNum, rcpNum] = await Promise.all([
-            generatePaymentNumber(tx),
-            generateReceiptNumber(tx),
-          ]);
-
-          // Sprint 4B: auto-resolve cashSession + cashBox from the cashier's
-          // open shift. Cash REQUIRES a shift; non-cash attributes to shift
-          // when one exists (for per-counter reporting).
-          let coCashSessionId: string | null = null;
-          let coCashBoxId:     string | null = null;
-          const coActive = await getActiveSessionForUser(tx, userId);
-          if (paymentMethod === 'cash') {
-            if (!coActive) {
-              throw new Error('ต้องเปิดกะแคชเชียร์ก่อนรับชำระด้วยเงินสด');
-            }
-            coCashSessionId = coActive.id;
-            coCashBoxId     = coActive.cashBoxId;
-          } else if (coActive) {
-            coCashSessionId = coActive.id;
-            coCashBoxId     = coActive.cashBoxId;
-          }
-
-          const coPayment = await tx.payment.create({
-            data: {
-              paymentNumber:  payNum,
-              receiptNumber:  rcpNum,
-              bookingId,
-              guestId:        booking.guestId,
-              amount:         new Prisma.Decimal(coResult.grandTotal),
-              paymentMethod:  paymentMethod as never,
-              paymentDate:    now,
-              status:         'ACTIVE',
-              idempotencyKey: `co-${bookingId}`,
-              cashSessionId:  coCashSessionId,
-              cashBoxId:      coCashBoxId,
-              createdBy: userId,
-            },
-            select: { id: true },
-          });
-
-          await tx.paymentAllocation.create({
-            data: {
-              paymentId:  coPayment.id,
-              invoiceId:  coResult.invoiceId,
-              amount:     new Prisma.Decimal(coResult.grandTotal),
-            },
-          });
-
-          // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
-          await postPaymentReceived(tx, {
+          // Single chokepoint: payment.service handles cash-session resolution,
+          // payment-number generation, allocation, invoice paid-status update,
+          // line-item paid flag, ledger pair (DR Cash / CR AR), folio recalc,
+          // and audit log.
+          const coPaymentResult = await createPayment(tx, {
+            idempotencyKey: `co-${bookingId}`,
+            guestId:        booking.guestId,
+            bookingId,
+            amount:         coResult.grandTotal,
             paymentMethod,
-            amount:    coResult.grandTotal,
-            paymentId: coPayment.id,
-            createdBy: userId,
+            paymentDate:    now,
+            receivedBy:     userId,
+            allocations:    [{ invoiceId: coResult.invoiceId, amount: coResult.grandTotal }],
+            createdBy:      userId,
           });
-
-          // Mark line items PAID + update invoice status
-          await markLineItemsPaid(tx, coResult.invoiceId);
-
-          await tx.invoice.update({
-            where: { id: coResult.invoiceId },
-            data:  {
-              status:    'paid',
-              paidAmount: new Prisma.Decimal(coResult.grandTotal),
-            },
-          });
-
-          await recalculateFolioBalance(tx, folio.folioId);
+          coPayNum = coPaymentResult.paymentNumber;
+          coRcpNum = coPaymentResult.receiptNumber;
 
           // ── LOG: Payment collected at checkout ────────────────────────
           await logActivity(tx, {
@@ -487,8 +436,8 @@ export async function POST(request: Request) {
           });
           checkoutReceipt = {
             receiptType:   'checkout',
-            receiptNumber: rcpNum,
-            paymentNumber: payNum,
+            receiptNumber: coRcpNum ?? '',
+            paymentNumber: coPayNum ?? '',
             invoiceNumber: coResult.invoiceNumber,
             bookingNumber: booking.bookingNumber,
             guestName,

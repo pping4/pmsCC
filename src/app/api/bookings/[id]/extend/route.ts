@@ -32,9 +32,7 @@ import {
   createInvoiceFromFolio,
 } from '@/services/folio.service';
 import { recalculateFolioBalance } from '@/services/folio.service';
-import { generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
-import { postPaymentReceived } from '@/services/ledger.service';
-import { getActiveSessionForUser } from '@/services/cashSession.service';
+import { createPayment } from '@/services/payment.service';
 import { logActivity }       from '@/services/activityLog.service';
 
 const ExtendSchema = z.object({
@@ -233,71 +231,23 @@ export async function POST(
         if (invResult) {
           invoiceId = invResult.invoiceId;
 
-          // Mark invoice paid immediately
-          await tx.invoice.update({
-            where: { id: invResult.invoiceId },
-            data: {
-              paidAmount: new Prisma.Decimal(invResult.grandTotal),
-              status: 'paid',
-            },
-          });
-
-          // Sprint 4B: auto-resolve cash session from the caller's open shift
-          let resolvedCashSessionId: string | null = null;
-          let resolvedCashBoxId:     string | null = null;
-          if (paymentMethod === 'cash') {
-            const active = await getActiveSessionForUser(tx, userId);
-            if (!active) {
-              throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
-            }
-            resolvedCashSessionId = active.id;
-            resolvedCashBoxId     = active.cashBoxId;
-          }
-
-          // Create Payment record
-          const [paymentNumber, receiptNumber] = await Promise.all([
-            generatePaymentNumber(tx),
-            generateReceiptNumber(tx),
-          ]);
-
-          const payment = await tx.payment.create({
-            data: {
-              paymentNumber,
-              receiptNumber,
-              bookingId:      params.id,
-              guestId:        booking.guestId,
-              amount:         new Prisma.Decimal(invResult.grandTotal),
-              paymentMethod:  paymentMethod as never,
-              paymentDate:    new Date(),
-              cashSessionId:  resolvedCashSessionId,
-              cashBoxId:      resolvedCashBoxId,
-              status:         'ACTIVE' as never,
-              receivedBy:     userId,
-              notes:          notes ?? `ต่ออายุการจอง +${extraDays} วัน`,
-              createdBy:      userId,
-              idempotencyKey: `extend-${params.id}-${newCheckOutStr}`,
-            },
-            select: { id: true },
-          });
-
-          paymentId = payment.id;
-
-          // Link payment → invoice
-          await tx.paymentAllocation.create({
-            data: {
-              paymentId: payment.id,
-              invoiceId: invResult.invoiceId,
-              amount:    new Prisma.Decimal(invResult.grandTotal),
-            },
-          });
-
-          // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
-          await postPaymentReceived(tx, {
+          // Single chokepoint: payment.service handles cash-session
+          // resolution, invoice paid-status update, line-item paid flag,
+          // ledger pair (DR Cash / CR AR), and audit log.
+          const result = await createPayment(tx, {
+            idempotencyKey: `extend-${params.id}-${newCheckOutStr}`,
+            guestId:        booking.guestId,
+            bookingId:      params.id,
+            amount:         invResult.grandTotal,
             paymentMethod,
-            amount:    invResult.grandTotal,
-            paymentId: payment.id,
-            createdBy: userId,
+            paymentDate:    new Date(),
+            receivedBy:     userId,
+            notes:          notes ?? `ต่ออายุการจอง +${extraDays} วัน`,
+            allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+            createdBy:      userId,
+            createdByName:  userName ?? undefined,
           });
+          paymentId = result.id;
         }
       }
 

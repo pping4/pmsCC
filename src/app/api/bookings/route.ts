@@ -4,9 +4,9 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { logActivity } from '@/services/activityLog.service';
-import { createFolio, addCharge, createInvoiceFromFolio, markLineItemsPaid, recalculateFolioBalance } from '@/services/folio.service';
-import { generateBookingNumber, generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
-import { postPaymentReceived } from '@/services/ledger.service';
+import { createFolio, addCharge, createInvoiceFromFolio } from '@/services/folio.service';
+import { generateBookingNumber } from '@/services/invoice-number.service';
+import { createPayment } from '@/services/payment.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { fmtDate } from '@/lib/date-format';
@@ -298,53 +298,26 @@ export async function POST(request: NextRequest) {
 
           // Mark as paid immediately since payment is collected at booking
           if (invResult) {
-            await tx.invoice.update({
-              where: { id: invResult.invoiceId },
-              data: { status: 'paid', paidAmount: invResult.grandTotal },
+            // Single chokepoint: payment.service.createPayment handles
+            // payment-number generation, allocation, invoice paid-status,
+            // line-item paid flag, ledger pair (DR Cash / CR AR), folio
+            // recalc, and audit log.
+            const bkResult = await createPayment(tx, {
+              idempotencyKey: `bk-full-${created.id}`,
+              guestId:        data.guestId,
+              bookingId:      created.id,
+              amount:         invResult.grandTotal,
+              paymentMethod:  paymentMethod!,
+              paymentDate:    now,
+              cashSessionId:  bkCashSessionId ?? undefined,
+              receivedBy:     userId,
+              notes:          `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
+              allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+              createdBy:      session?.user?.email ?? 'system',
+              createdByName:  session?.user?.name ?? undefined,
             });
-            // Mark folio line items PAID + create Payment record for folio balance tracking
-            await markLineItemsPaid(tx, invResult.invoiceId);
-            const [payNum, rcpNum] = await Promise.all([
-              generatePaymentNumber(tx),
-              generateReceiptNumber(tx),
-            ]);
-            const bkPayment = await tx.payment.create({
-              data: {
-                paymentNumber:  payNum,
-                receiptNumber:  rcpNum,
-                bookingId:      created.id,
-                guestId:        data.guestId,
-                amount:         new Prisma.Decimal(invResult.grandTotal),
-                paymentMethod:  paymentMethod as never,
-                paymentDate:    now,
-                status:         'ACTIVE' as never,
-                // Sprint 5 — cash clears immediately; others await reconciliation
-                reconStatus:    (paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED') as never,
-                clearedAt:      paymentMethod === 'cash' ? now    : null,
-                clearedBy:      paymentMethod === 'cash' ? userId : null,
-                idempotencyKey: `bk-full-${created.id}`,
-                notes:          `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
-                createdBy:      userId,
-                // Sprint 4B: link to open cash session (null for non-cash)
-                cashSessionId:  bkCashSessionId,
-                cashBoxId:      bkCashBoxId,
-              },
-              select: { id: true },
-            });
-            await tx.paymentAllocation.create({
-              data: {
-                paymentId: bkPayment.id,
-                invoiceId: invResult.invoiceId,
-                amount: new Prisma.Decimal(invResult.grandTotal),
-              },
-            });
-            await postPaymentReceived(tx, {
-              paymentMethod: paymentMethod!,
-              amount:        invResult.grandTotal,
-              paymentId:     bkPayment.id,
-              createdBy:     session?.user?.email ?? 'system',
-            });
-            await recalculateFolioBalance(tx, folioId);
+            const payNum = bkResult.paymentNumber;
+            const rcpNum = bkResult.receiptNumber;
 
             // ── LOG: Full payment at booking ─────────────────────────────
             await logActivity(tx, {
@@ -416,53 +389,23 @@ export async function POST(request: NextRequest) {
           });
 
           if (invResult) {
-            await tx.invoice.update({
-              where: { id: invResult.invoiceId },
-              data: { status: 'paid', paidAmount: invResult.grandTotal },
+            // Single chokepoint: payment.service.createPayment
+            const depResult = await createPayment(tx, {
+              idempotencyKey: `bk-deposit-${created.id}`,
+              guestId:        data.guestId,
+              bookingId:      created.id,
+              amount:         depositAmount,
+              paymentMethod:  paymentMethod!,
+              paymentDate:    now,
+              cashSessionId:  bkCashSessionId ?? undefined,
+              receivedBy:     userId,
+              notes:          `เงินมัดจำ ห้อง ${data.roomNumber}`,
+              allocations:    [{ invoiceId: invResult.invoiceId, amount: depositAmount }],
+              createdBy:      session?.user?.email ?? 'system',
+              createdByName:  session?.user?.name ?? undefined,
             });
-            // Mark line items PAID + create Payment record for folio balance tracking
-            await markLineItemsPaid(tx, invResult.invoiceId);
-            const [payNum, rcpNum] = await Promise.all([
-              generatePaymentNumber(tx),
-              generateReceiptNumber(tx),
-            ]);
-            const depPayment = await tx.payment.create({
-              data: {
-                paymentNumber:  payNum,
-                receiptNumber:  rcpNum,
-                bookingId:      created.id,
-                guestId:        data.guestId,
-                amount:         new Prisma.Decimal(depositAmount),
-                paymentMethod:  paymentMethod as never,
-                paymentDate:    now,
-                status:         'ACTIVE' as never,
-                // Sprint 5 — cash clears immediately; others await reconciliation
-                reconStatus:    (paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED') as never,
-                clearedAt:      paymentMethod === 'cash' ? now    : null,
-                clearedBy:      paymentMethod === 'cash' ? userId : null,
-                idempotencyKey: `bk-deposit-${created.id}`,
-                notes:          `เงินมัดจำ ห้อง ${data.roomNumber}`,
-                createdBy:      userId,
-                // Sprint 4B: link to open cash session (null for non-cash)
-                cashSessionId:  bkCashSessionId,
-                cashBoxId:      bkCashBoxId,
-              },
-              select: { id: true },
-            });
-            await tx.paymentAllocation.create({
-              data: {
-                paymentId: depPayment.id,
-                invoiceId: invResult.invoiceId,
-                amount: new Prisma.Decimal(depositAmount),
-              },
-            });
-            await postPaymentReceived(tx, {
-              paymentMethod: paymentMethod!,
-              amount:        depositAmount,
-              paymentId:     depPayment.id,
-              createdBy:     session?.user?.email ?? 'system',
-            });
-            await recalculateFolioBalance(tx, folioId);
+            const payNum = depResult.paymentNumber;
+            const rcpNum = depResult.receiptNumber;
 
             // ── LOG: Deposit payment at booking ──────────────────────────
             await logActivity(tx, {

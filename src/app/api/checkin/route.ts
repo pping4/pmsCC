@@ -22,11 +22,9 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { createSecurityDeposit } from '@/services/securityDeposit.service';
-import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { z } from 'zod';
-import { getFolioByBookingId, addCharge, createInvoiceFromFolio, markLineItemsPaid, recalculateFolioBalance } from '@/services/folio.service';
-import { generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
-import { postPaymentReceived } from '@/services/ledger.service';
+import { getFolioByBookingId, addCharge, createInvoiceFromFolio, markLineItemsPaid } from '@/services/folio.service';
+import { createPayment } from '@/services/payment.service';
 import { logActivity } from '@/services/activityLog.service';
 import { transitionRoom } from '@/services/roomStatus.service';
 import { fmtDate } from '@/lib/date-format';
@@ -394,74 +392,26 @@ export async function POST(request: Request) {
     // ── 5. Create Payment record for upfront collection ────────────────────
     // Required so cash session calculates systemCalculatedCash correctly.
     if (collectUpfront && upfrontPaymentMethod && stayInvoiceId) {
-      const [paymentNumber, receiptNumber] = await Promise.all([
-        generatePaymentNumber(tx),
-        generateReceiptNumber(tx),
-      ]);
-
-      // Sprint 4B: server-resolve cashSessionId + cashBoxId from the
-      // cashier's open shift. Cash payments REQUIRE a shift; non-cash
-      // methods still populate cashBoxId when a shift is open (for
-      // per-counter attribution in reporting).
-      let upfrontCashSessionId: string | null = null;
-      let upfrontCashBoxId:     string | null = null;
-      const upfrontActive = await getActiveSessionForUser(tx, userId);
-      if (upfrontPaymentMethod === 'cash') {
-        if (!upfrontActive) {
-          throw new Error('การรับชำระค่าห้องด้วยเงินสดต้องเปิดกะแคชเชียร์ก่อน');
-        }
-        upfrontCashSessionId = upfrontActive.id;
-        upfrontCashBoxId     = upfrontActive.cashBoxId;
-      } else if (upfrontActive) {
-        upfrontCashSessionId = upfrontActive.id;
-        upfrontCashBoxId     = upfrontActive.cashBoxId;
-      }
-
-      const payment = await tx.payment.create({
-        data: {
-          paymentNumber,
-          receiptNumber,
-          bookingId,
-          guestId:        booking.guestId,
-          amount:         new Prisma.Decimal(ciCollectedAmount),
-          paymentMethod:  upfrontPaymentMethod as never,
-          paymentDate:    now,
-          cashSessionId:  upfrontCashSessionId,
-          cashBoxId:      upfrontCashBoxId,
-          status:         'ACTIVE' as never,
-          idempotencyKey: `ci-upfront-${bookingId}`,
-          receivedBy:     userId,
-          notes:          `ค่าห้องพัก${nights ? ` ${nights} คืน` : ''} ณ เช็คอิน — ห้อง ${booking.room.number}`,
-          createdBy:      userId,
-        },
-        select: { id: true },
+      // Single chokepoint: payment.service handles cash-session resolution,
+      // payment-number generation, allocation, invoice paid-status update,
+      // line-item paid flag, ledger pair (DR Cash / CR AR), folio recalc,
+      // and audit log.
+      const upfrontResult = await createPayment(tx, {
+        idempotencyKey: `ci-upfront-${bookingId}`,
+        guestId:        booking.guestId,
+        bookingId,
+        amount:         ciCollectedAmount,
+        paymentMethod:  upfrontPaymentMethod,
+        paymentDate:    now,
+        receivedBy:     userId,
+        notes:          `ค่าห้องพัก${nights ? ` ${nights} คืน` : ''} ณ เช็คอิน — ห้อง ${booking.room.number}`,
+        allocations:    [{ invoiceId: stayInvoiceId, amount: ciCollectedAmount }],
+        createdBy:      userId,
+        createdByName:  userName ?? undefined,
       });
-
-      // Link payment → invoice via PaymentAllocation
-      await tx.paymentAllocation.create({
-        data: {
-          paymentId: payment.id,
-          invoiceId: stayInvoiceId,
-          amount:    new Prisma.Decimal(ciCollectedAmount),
-        },
-      });
-
-      // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
-      await postPaymentReceived(tx, {
-        paymentMethod: upfrontPaymentMethod,
-        amount:        ciCollectedAmount,
-        paymentId:     payment.id,
-        createdBy:     userId,
-      });
-
-      // ── Sync folio balance after payment ────────────────────────────────
-      // CRITICAL: must call after PaymentAllocation is created so that
-      // folio.totalPayments and folio.balance reflect the actual payment.
-      // Without this, checkout fetches a stale folio.balance (= totalCharges)
-      // and incorrectly shows an outstanding balance.
-      if (folio) {
-        await recalculateFolioBalance(tx, folio.folioId);
-      }
+      const paymentNumber = upfrontResult.paymentNumber;
+      const receiptNumber = upfrontResult.receiptNumber;
+      const upfrontPaymentId = upfrontResult.id;
 
       // ── LOG: Upfront payment collected ──────────────────────────────────
       await logActivity(tx, {
@@ -480,7 +430,7 @@ export async function POST(request: Request) {
           amount: ciCollectedAmount,
           paymentMethod: upfrontPaymentMethod,
           nights,
-          paymentId: payment.id,
+          paymentId: upfrontPaymentId,
         },
       });
 

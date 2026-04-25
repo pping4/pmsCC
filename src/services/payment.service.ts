@@ -280,13 +280,22 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
     invoiceIds.push(alloc.invoiceId);
   }
 
-  // Step 4: Post ledger entries — DEBIT Cash/Bank/CardClearing, CREDIT Revenue
-  // Phase D: if feeAmount is present (credit_card only), posts a 2-pair split.
+  // Step 4: Post ledger entries — DEBIT Cash/Bank/CardClearing, CREDIT AR
+  //
+  // Why CR AR (not REVENUE): every payment routed through this service has
+  // at least one allocation, which means the corresponding Invoice was
+  // already accrued via postInvoiceAccrual (DR AR / CR Revenue). Crediting
+  // Revenue here would double-count income; instead we reduce AR by the
+  // amount collected. This matches the textbook accrual pattern.
+  //
+  // Phase D: if feeAmount is present (credit_card only), posts a 2-pair split
+  // where both legs credit AR; the fee debits Expense rather than Money.
   await postPaymentReceived(tx, {
     paymentMethod: input.paymentMethod,
     amount: input.amount,
     paymentId: payment.id,
     createdBy: input.createdBy,
+    creditSide: 'AR',
     feeAmount: input.feeAmount ?? null,
     feeAccountId: input.feeAccountId ?? null,
   });
@@ -441,12 +450,15 @@ export async function voidPayment(tx: TxClient, input: VoidPaymentInput) {
     await recalculateFolioBalance(tx, folioId);
   }
 
-  // Step 5: Post reversal ledger entries — mirror any Phase-D fee split
+  // Step 5: Post reversal ledger entries — mirror the original creditSide.
+  // Original receive used 'AR' (see createPayment Step 4), so void posts
+  // DR AR / CR Money to undo the AR reduction.
   await postPaymentVoided(tx, {
     paymentMethod: payment.paymentMethod,
     amount: Number(payment.amount),
     paymentId: payment.id,
     createdBy: input.voidedBy,
+    creditSide: 'AR',
     feeAmount: payment.feeAmount != null ? Number(payment.feeAmount) : null,
     feeAccountId: payment.feeAccountId ?? null,
   });

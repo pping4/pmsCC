@@ -36,12 +36,7 @@ import {
   createInvoiceFromFolio,
   recalculateFolioBalance,
 } from '@/services/folio.service';
-import {
-  generatePaymentNumber,
-  generateReceiptNumber,
-} from '@/services/invoice-number.service';
-import { postPaymentReceived } from '@/services/ledger.service';
-import { getActiveSessionForUser } from '@/services/cashSession.service';
+import { createPayment } from '@/services/payment.service';
 import { logActivity } from '@/services/activityLog.service';
 
 // ─── Zod schema ──────────────────────────────────────────────────────────────
@@ -178,68 +173,31 @@ export async function POST(
             },
           });
 
-          // Sprint 4B: auto-resolve cash session from the caller's open shift
-          let resolvedCashSessionId: string | null = null;
-          let resolvedCashBoxId:     string | null = null;
-          if (paymentMethod === 'cash') {
-            const active = await getActiveSessionForUser(tx, userId);
-            if (!active) {
-              throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
-            }
-            resolvedCashSessionId = active.id;
-            resolvedCashBoxId     = active.cashBoxId;
-          }
-
-          // Create one Payment record for the total
-          const [paymentNumber, receiptNumber] = await Promise.all([
-            generatePaymentNumber(tx),
-            generateReceiptNumber(tx),
-          ]);
-
+          // Delegate to payment.service so cash-session resolution, ledger
+          // posting (DR Cash / CR AR), folio recalc, and audit logging all
+          // happen through the single canonical chokepoint.
           const itemSummary = items.length === 1
             ? items[0].description
             : `${items.length} รายการ (${items.map(i => i.description).join(', ').slice(0, 60)}${items.map(i => i.description).join(', ').length > 60 ? '…' : ''})`;
 
-          const payment = await tx.payment.create({
-            data: {
-              paymentNumber,
-              receiptNumber,
-              bookingId:      params.id,
-              guestId:        booking.guestId,
-              amount:         new Prisma.Decimal(invResult.grandTotal),
-              paymentMethod:  paymentMethod as never,
-              paymentDate:    new Date(),
-              cashSessionId:  resolvedCashSessionId,
-              cashBoxId:      resolvedCashBoxId,
-              status:         'ACTIVE' as never,
-              receivedBy:     userId,
-              notes:          notes ?? `บริการเสริม — ${itemSummary}`,
-              createdBy:      userId,
-              idempotencyKey: `add-service-${params.id}-${Date.now()}`,
-            },
-            select: { id: true },
-          });
-
-          // Link payment → invoice
-          await tx.paymentAllocation.create({
-            data: {
-              paymentId: payment.id,
-              invoiceId: invResult.invoiceId,
-              amount:    new Prisma.Decimal(invResult.grandTotal),
-            },
-          });
-
-          // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
-          await postPaymentReceived(tx, {
+          await createPayment(tx, {
+            idempotencyKey: `add-service-${params.id}-${Date.now()}`,
+            guestId:        booking.guestId,
+            bookingId:      params.id,
+            amount:         invResult.grandTotal,
             paymentMethod,
-            amount:    invResult.grandTotal,
-            paymentId: payment.id,
-            createdBy: userId,
+            paymentDate:    new Date(),
+            receivedBy:     userId,
+            notes:          notes ?? `บริการเสริม — ${itemSummary}`,
+            allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+            createdBy:      userId,
+            createdByName:  userName ?? undefined,
           });
         }
       }
 
-      // ── 7. Recalculate folio balance ─────────────────────────────────────────
+      // ── 7. Recalculate folio balance (charge-only path; collectNow path
+      //       already recalc'd inside createPayment) ──────────────────────────
       await recalculateFolioBalance(tx, folio.folioId);
 
       // ── 8. Activity log ──────────────────────────────────────────────────────
