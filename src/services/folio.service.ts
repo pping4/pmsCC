@@ -16,7 +16,8 @@
 
 import { Prisma } from '@prisma/client';
 import { generateFolioNumber, generateInvoiceNumber } from './invoice-number.service';
-import { postLedgerPair } from './ledger.service';
+import { postLedgerPair, postInvoiceAccrual } from './ledger.service';
+import { getHotelSettings } from './hotelSettings.service';
 
 type TxClient = Prisma.TransactionClient;
 
@@ -196,9 +197,33 @@ export async function createInvoiceFromFolio(
     0,
   );
 
-  // For now, VAT is 0 (no_tax default); can be extended later
-  const vatAmount = 0;
-  const grandTotal = subtotal + vatAmount;
+  // ── Thai tax order of ops (Phase H1) ─────────────────────────────────────
+  //   1) serviceCharge = subtotal × serviceRate   (if enabled)
+  //   2) taxable       = subtotal + serviceCharge
+  //   3) VAT exclusive: vatAmount = taxable × vatRate,   grandTotal = taxable + vatAmount
+  //      VAT inclusive: vatAmount = taxable − taxable/(1+vatRate), grandTotal = taxable
+  // Invariant: round(subtotal + serviceCharge + vatAmount, 2) === grandTotal
+  const settings = await getHotelSettings(tx);
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+
+  const serviceCharge =
+    settings.serviceChargeEnabled
+      ? round2(subtotal * (settings.serviceChargeRate / 100))
+      : 0;
+  const taxable = round2(subtotal + serviceCharge);
+
+  let vatAmount = 0;
+  let grandTotal = taxable;
+  if (settings.vatEnabled) {
+    const r = settings.vatRate / 100;
+    if (settings.vatInclusive) {
+      vatAmount = round2(taxable - taxable / (1 + r));
+      grandTotal = taxable;
+    } else {
+      vatAmount = round2(taxable * r);
+      grandTotal = round2(taxable + vatAmount);
+    }
+  }
 
   // Step 3: Generate invoice number
   const invoiceNumber = await generateInvoiceNumber(tx, input.invoiceType);
@@ -214,8 +239,10 @@ export async function createInvoiceFromFolio(
       dueDate: input.dueDate,
       invoiceType: mapInvoiceTypeCode(input.invoiceType),
       subtotal,
+      serviceCharge,
       vatAmount,
       grandTotal,
+      isVatInclusive: settings.vatEnabled && settings.vatInclusive,
       paidAmount: 0,
       status: 'unpaid',
       billingPeriodStart: input.billingPeriodStart ?? null,
@@ -244,15 +271,15 @@ export async function createInvoiceFromFolio(
     data: { billingStatus: 'BILLED' as never },
   });
 
-  // Step 6: Post ledger (DEBIT AR / CREDIT Revenue — accrual)
-  await postLedgerPair(tx, {
-    debitAccount: 'AR',
-    creditAccount: 'REVENUE',
-    amount: grandTotal,
-    referenceType: 'Invoice',
-    referenceId: invoice.id,
-    description: `Invoice ${invoiceNumber} — ${input.notes ?? ''}`,
-    createdBy: input.createdBy,
+  // Step 6: Post ledger accrual — split into Revenue / Service / VAT legs
+  //   DR AR = CR Revenue(subtotal) + CR Service(if any) + CR VAT(if any)
+  await postInvoiceAccrual(tx, {
+    invoiceId:     invoice.id,
+    invoiceNumber: invoice.invoiceNumber,
+    revenue:       subtotal,
+    serviceCharge,
+    vatAmount,
+    createdBy:     input.createdBy,
   });
 
   return {
@@ -279,6 +306,9 @@ export async function voidInvoice(
     select: {
       id: true,
       status: true,
+      subtotal: true,
+      serviceCharge: true,
+      vatAmount: true,
       grandTotal: true,
       invoiceNumber: true,
       folioId: true,
@@ -323,16 +353,27 @@ export async function voidInvoice(
     });
   }
 
-  // Step 4: Post reversal ledger (DEBIT Revenue / CREDIT AR)
-  await postLedgerPair(tx, {
-    debitAccount: 'REVENUE',
-    creditAccount: 'AR',
-    amount: Number(invoice.grandTotal),
-    referenceType: 'Void',
-    referenceId: invoice.id,
-    description: `Void invoice ${invoice.invoiceNumber}`,
-    createdBy: input.voidedBy,
-  });
+  // Step 4: Post reversal ledger — reverse each accrual leg that was booked
+  const revAmt = Number(invoice.subtotal);
+  const svcAmt = Number(invoice.serviceCharge ?? 0);
+  const vatAmt = Number(invoice.vatAmount ?? 0);
+  const reversals: Array<{ debit: 'REVENUE' | 'SERVICE_CHARGE_PAYABLE' | 'VAT_OUTPUT'; amt: number; leg: string }> = [
+    { debit: 'REVENUE',                amt: revAmt, leg: 'revenue' },
+    { debit: 'SERVICE_CHARGE_PAYABLE', amt: svcAmt, leg: 'service charge' },
+    { debit: 'VAT_OUTPUT',             amt: vatAmt, leg: 'VAT output' },
+  ];
+  for (const r of reversals) {
+    if (r.amt <= 0) continue;
+    await postLedgerPair(tx, {
+      debitAccount: r.debit,
+      creditAccount: 'AR',
+      amount: r.amt,
+      referenceType: 'Void',
+      referenceId: invoice.id,
+      description: `Void invoice ${invoice.invoiceNumber} — ${r.leg}`,
+      createdBy: input.voidedBy,
+    });
+  }
 
   // Step 5: Recalculate folio balance if linked
   if (invoice.folioId) {

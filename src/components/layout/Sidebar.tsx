@@ -4,34 +4,13 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect, useCallback } from 'react';
 import { useTheme } from '@/lib/theme';
+import { ALL_NAV_ITEMS, NAV_CATEGORIES, type NavItem } from './navItems';
+import { useEffectivePermissions, can, canAny } from '@/lib/rbac/client';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const W_EXPANDED  = 220;  // px — full sidebar
 const W_COLLAPSED = 56;   // px — icon-only rail
 const STORAGE_KEY = 'pms-sidebar-collapsed';
-
-// ── Nav items ─────────────────────────────────────────────────────────────────
-const navItems = [
-  { href: '/dashboard',     label: 'Dashboard',           icon: '📊' },
-  { href: '/reservation',   label: 'ตารางการจอง',          icon: '📋' },
-  { href: '/checkin',       label: 'เช็คอิน / เช็คเอาท์',  icon: '🚪' },
-  { href: '/rooms',         label: 'ห้องพัก',               icon: '🏠' },
-  { href: '/guests',        label: 'ลูกค้า',                icon: '👥' },
-  { href: '/utilities',     label: 'มิเตอร์น้ำ-ไฟ',         icon: '⚡' },
-  { href: '/cashier',       label: 'แคชเชียร์ / กะ',         icon: '🏧' },
-  { href: '/billing',       label: 'Billing',              icon: '💰' },
-  { href: '/billing/folio', label: 'Guest Folio',          icon: '📒' },
-  { href: '/billing-cycle', label: 'รอบบิล / ค่าปรับ',       icon: '📅' },
-  { href: '/finance',       label: 'การเงิน / บัญชี',       icon: '📈' },
-  { href: '/sales',         label: 'Sales Dashboard',      icon: '📊' },
-  { href: '/products',      label: 'สินค้า/บริการ',          icon: '📦' },
-  { href: '/housekeeping',  label: 'แม่บ้าน',               icon: '🧹' },
-  { href: '/maintenance',   label: 'ซ่อมบำรุง',             icon: '🔧' },
-  { href: '/tm30',          label: 'รายงาน ตม.30',          icon: '🛂' },
-  { href: '/nightaudit',    label: 'Night Audit',          icon: '🌙' },
-  { href: '/city-ledger',   label: 'City Ledger / AR',     icon: '🏢' },
-  { href: '/settings/rates',label: 'กำหนดราคาห้องพัก',      icon: '🏷️' },
-];
 
 // ── Chevron icon (pure CSS, no extra deps) ────────────────────────────────────
 function ChevronIcon({ collapsed }: { collapsed: boolean }) {
@@ -52,9 +31,34 @@ function ChevronIcon({ collapsed }: { collapsed: boolean }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
+/**
+ * Filter nav items by the current user's effective permissions.
+ * Items without `permission` / `canAny` are always shown.
+ * While permissions are loading, every item is shown — avoids a "blank
+ * sidebar" flash on first paint. The server still enforces access if
+ * the user clicks a link they shouldn't see.
+ */
+function useVisibleNavItem() {
+  const { data } = useEffectivePermissions();
+  return (item: NavItem): boolean => {
+    if (!item.permission && !item.canAny) return true;
+    if (!data) return true; // loading — show everything, server will block
+    if (item.permission && !can(data, item.permission)) {
+      if (!item.canAny) return false;
+    }
+    if (item.canAny && item.canAny.length > 0 && !canAny(data, item.canAny)) {
+      if (!item.permission) return false;
+      // both set → item is visible if either check passes
+      return can(data, item.permission);
+    }
+    return true;
+  };
+}
+
 export function Sidebar() {
   const pathname = usePathname();
   const { theme, toggle: toggleTheme } = useTheme();
+  const visible = useVisibleNavItem();
 
   // Always start collapsed=false on both server and client (avoids hydration mismatch).
   // After mount, read the persisted preference and apply it.
@@ -178,74 +182,32 @@ export function Sidebar() {
         overflowX: 'hidden',
         transition: 'padding 0.22s ease',
       }}>
-        {navItems.map((item) => {
-          const active = pathname === item.href
-            || (item.href !== '/dashboard' && pathname.startsWith(item.href));
-
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              title={collapsed ? item.label : undefined}   // tooltip only when collapsed
-              style={{
-                display:        'flex',
-                alignItems:     'center',
-                justifyContent: collapsed ? 'center' : 'flex-start',
-                gap:            collapsed ? 0 : 10,
-                padding:        collapsed ? '9px 0' : '8px 10px',
-                borderRadius:   9,
-                marginBottom:   2,
-                textDecoration: 'none',
-                background:     active
-                  ? (isDark ? '#1e3a8a' : '#eff6ff')
-                  : 'transparent',
-                color: active
-                  ? (isDark ? '#93c5fd' : '#1e40af')
-                  : 'var(--text-secondary)',
-                fontWeight:     active ? 700 : 500,
-                fontSize:       13,
-                transition:     'background 0.12s, color 0.12s',
-                overflow:       'hidden',
-                whiteSpace:     'nowrap',
-                fontFamily:     "'Sarabun', 'IBM Plex Sans Thai', system-ui, sans-serif",
-                // Highlight ring for active item in collapsed mode
-                boxShadow:      (active && collapsed)
-                  ? `0 0 0 2px ${isDark ? '#2563eb40' : '#3b82f630'}`
-                  : 'none',
-              }}
-              onMouseEnter={e => {
-                if (!active)
-                  (e.currentTarget as HTMLElement).style.background = 'var(--surface-muted)';
-              }}
-              onMouseLeave={e => {
-                if (!active)
-                  (e.currentTarget as HTMLElement).style.background = 'transparent';
-              }}
-            >
-              {/* Icon — always visible */}
-              <span style={{
-                fontSize:   collapsed ? 18 : 15,
-                lineHeight: 1,
-                flexShrink: 0,
-                transition: 'font-size 0.2s ease',
-              }}>
-                {item.icon}
-              </span>
-
-              {/* Label — hidden when collapsed (clipped by overflow: hidden on parent) */}
-              {!collapsed && (
-                <span style={{
-                  overflow:     'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace:   'nowrap',
-                  flex:         1,
-                }}>
-                  {item.label}
-                </span>
-              )}
-            </Link>
-          );
-        })}
+        {collapsed
+          ? ALL_NAV_ITEMS.filter(visible).map((item) => (
+              <NavLink key={item.href} item={item} pathname={pathname} collapsed isDark={isDark} />
+            ))
+          : NAV_CATEGORIES.map((cat, idx) => {
+              const items = cat.items.filter(visible);
+              if (items.length === 0) return null; // hide empty category
+              return (
+                <div key={cat.key} style={{ marginBottom: 8, marginTop: idx === 0 ? 0 : 6 }}>
+                  <div style={{
+                    fontSize:       10,
+                    fontWeight:     700,
+                    letterSpacing:  0.5,
+                    textTransform:  'uppercase',
+                    color:          'var(--text-faint)',
+                    padding:        '4px 10px 4px',
+                  }}>
+                    {cat.title}
+                  </div>
+                  {items.map((item) => (
+                    <NavLink key={item.href} item={item} pathname={pathname} collapsed={false} isDark={isDark} />
+                  ))}
+                </div>
+              );
+            })
+        }
       </nav>
 
       {/* ── Footer — theme toggle + version ───────────────────────────────── */}
@@ -292,5 +254,77 @@ export function Sidebar() {
         </button>
       </div>
     </div>
+  );
+}
+
+// ── NavLink helper ────────────────────────────────────────────────────────────
+type NavLinkProps = {
+  item: { href: string; label: string; icon: string };
+  pathname: string;
+  collapsed: boolean;
+  isDark: boolean;
+};
+
+function NavLink({ item, pathname, collapsed, isDark }: NavLinkProps) {
+  const active = pathname === item.href
+    || (item.href !== '/dashboard' && pathname.startsWith(item.href));
+
+  return (
+    <Link
+      href={item.href}
+      title={collapsed ? item.label : undefined}
+      style={{
+        display:        'flex',
+        alignItems:     'center',
+        justifyContent: collapsed ? 'center' : 'flex-start',
+        gap:            collapsed ? 0 : 10,
+        padding:        collapsed ? '9px 0' : '8px 10px',
+        borderRadius:   9,
+        marginBottom:   2,
+        textDecoration: 'none',
+        background:     active
+          ? (isDark ? '#1e3a8a' : '#eff6ff')
+          : 'transparent',
+        color: active
+          ? (isDark ? '#93c5fd' : '#1e40af')
+          : 'var(--text-secondary)',
+        fontWeight:     active ? 700 : 500,
+        fontSize:       13,
+        transition:     'background 0.12s, color 0.12s',
+        overflow:       'hidden',
+        whiteSpace:     'nowrap',
+        fontFamily:     "'Sarabun', 'IBM Plex Sans Thai', system-ui, sans-serif",
+        boxShadow:      (active && collapsed)
+          ? `0 0 0 2px ${isDark ? '#2563eb40' : '#3b82f630'}`
+          : 'none',
+      }}
+      onMouseEnter={e => {
+        if (!active)
+          (e.currentTarget as HTMLElement).style.background = 'var(--surface-muted)';
+      }}
+      onMouseLeave={e => {
+        if (!active)
+          (e.currentTarget as HTMLElement).style.background = 'transparent';
+      }}
+    >
+      <span style={{
+        fontSize:   collapsed ? 18 : 15,
+        lineHeight: 1,
+        flexShrink: 0,
+        transition: 'font-size 0.2s ease',
+      }}>
+        {item.icon}
+      </span>
+      {!collapsed && (
+        <span style={{
+          overflow:     'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace:   'nowrap',
+          flex:         1,
+        }}>
+          {item.label}
+        </span>
+      )}
+    </Link>
   );
 }

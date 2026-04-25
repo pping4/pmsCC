@@ -27,9 +27,63 @@ export async function GET(request: NextRequest) {
       ...(tm30Pending ? { nationality: { not: 'Thai' }, tm30Reported: false } : {}),
     },
     orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      title: true,
+      firstName: true,
+      lastName: true,
+      firstNameTH: true,
+      lastNameTH: true,
+      gender: true,
+      dateOfBirth: true,
+      nationality: true,
+      idType: true,
+      idNumber: true,
+      idExpiry: true,
+      phone: true,
+      email: true,
+      lineId: true,
+      address: true,
+      visaType: true,
+      visaNumber: true,
+      arrivalDate: true,
+      departureDate: true,
+      portOfEntry: true,
+      flightNumber: true,
+      lastCountry: true,
+      purposeOfVisit: true,
+      preferredLanguage: true,
+      vipLevel: true,
+      tags: true,
+      allergies: true,
+      specialRequests: true,
+      companyName: true,
+      companyTaxId: true,
+      emergencyName: true,
+      emergencyPhone: true,
+      notes: true,
+      tm30Reported: true,
+      tm30ReportDate: true,
+      totalStays: true,
+      totalSpent: true,
+      createdAt: true,
+      invoices: {
+        where: { badDebt: true },
+        select: { grandTotal: true, paidAmount: true },
+      },
+    },
   });
 
-  return NextResponse.json(guests);
+  // Compute outstanding bad debt per guest and strip the raw invoice array
+  const result = guests.map(({ invoices, ...g }) => {
+    const outstandingBadDebt = invoices.reduce(
+      (sum, inv) => sum + Math.max(0, Number(inv.grandTotal) - Number(inv.paidAmount)),
+      0
+    );
+    return { ...g, outstandingBadDebt };
+  });
+
+  return NextResponse.json(result);
 }
 
 /** Map Thai display names or any alias → Prisma IdType enum value */

@@ -2,6 +2,7 @@
 
 import { Fragment, useState, useEffect } from 'react';
 import { fmtDate } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 // ============================================================================
 // TYPES
@@ -227,9 +228,11 @@ function QuickPayModal({
   onClose: () => void;
   onPaymentSuccess: () => void;
 }) {
+  const uiToast = useToast();
   const [loading, setLoading] = useState(false);
 
   const handlePayment = async (method: string) => {
+    if (loading) return;
     setLoading(true);
     try {
       const res = await fetch(`/api/invoices/${invoice.id}`, {
@@ -237,12 +240,16 @@ function QuickPayModal({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'pay', paymentMethod: method }),
       });
-      if (res.ok) {
-        onPaymentSuccess();
-        onClose();
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
       }
+      uiToast.success(`บันทึกการชำระเงินสำเร็จ`, invoice.invoiceNumber);
+      onPaymentSuccess();
+      onClose();
     } catch (error) {
       console.error('Payment error:', error);
+      uiToast.error('บันทึกการชำระเงินไม่สำเร็จ', error instanceof Error ? error.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -338,6 +345,7 @@ function QuickPayModal({
 // ============================================================================
 
 function CollectionCenter() {
+  const uiToast = useToast();
   const [data, setData] = useState<CollectionData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -351,11 +359,13 @@ function CollectionCenter() {
     setError('');
     try {
       const res = await fetch('/api/billing/collection');
-      if (!res.ok) throw new Error('Failed to fetch');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       setData(json);
     } catch (err) {
-      setError((err as Error).message);
+      const msg = (err as Error).message;
+      setError(msg);
+      uiToast.error('โหลดข้อมูลเก็บเงินไม่สำเร็จ', msg);
     } finally {
       setLoading(false);
     }
@@ -363,6 +373,7 @@ function CollectionCenter() {
 
   useEffect(() => {
     fetchCollection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleGenerateInvoices = async () => {
@@ -370,12 +381,18 @@ function CollectionCenter() {
       const res = await fetch('/api/billing/generate-monthly', {
         method: 'POST',
       });
-      if (!res.ok) throw new Error('Failed to generate');
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
       const json = await res.json();
       setToast(`✅ สร้าง ${json.created} รายการ / ข้าม ${json.skipped} รายการ`);
+      uiToast.success('ออกใบแจ้งหนี้สำเร็จ', `สร้าง ${json.created} / ข้าม ${json.skipped}`);
       fetchCollection();
     } catch (err) {
-      setToast(`❌ ${(err as Error).message}`);
+      const msg = (err as Error).message;
+      setToast(`❌ ${msg}`);
+      uiToast.error('ออกใบแจ้งหนี้ไม่สำเร็จ', msg);
     }
   };
 
@@ -660,6 +677,7 @@ function CollectionCenter() {
 // ============================================================================
 
 function TransactionLedger() {
+  const uiToast = useToast();
   const [period, setPeriod] = useState('month');
   const [data, setData] = useState<FinanceData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -672,11 +690,13 @@ function TransactionLedger() {
       setError('');
       try {
         const res = await fetch(`/api/finance?period=${period}`);
-        if (!res.ok) throw new Error('Failed to fetch');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         setData(json);
       } catch (err) {
-        setError((err as Error).message);
+        const msg = (err as Error).message;
+        setError(msg);
+        uiToast.error('โหลดข้อมูลธุรกรรมไม่สำเร็จ', msg);
       } finally {
         setLoading(false);
       }
@@ -907,6 +927,7 @@ function TransactionLedger() {
 // ============================================================================
 
 function RevenueSummary() {
+  const uiToast = useToast();
   const [period, setPeriod] = useState('month');
   const [data, setData] = useState<FinanceData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -918,17 +939,20 @@ function RevenueSummary() {
       setError('');
       try {
         const res = await fetch(`/api/finance?period=${period}`);
-        if (!res.ok) throw new Error('Failed to fetch');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         setData(json);
       } catch (err) {
-        setError((err as Error).message);
+        const msg = (err as Error).message;
+        setError(msg);
+        uiToast.error('โหลดสรุปรายรับไม่สำเร็จ', msg);
       } finally {
         setLoading(false);
       }
     };
 
     fetchFinance();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [period]);
 
   if (loading) {

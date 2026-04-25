@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 interface RoomRate {
   id: string;
@@ -40,6 +41,7 @@ interface Room {
 }
 
 export default function RatesPage() {
+  const toast = useToast();
   const [roomsByFloor, setRoomsByFloor] = useState<Record<number, Room[]>>({});
   const [selectedRooms, setSelectedRooms] = useState<Set<string>>(new Set());
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
@@ -99,21 +101,25 @@ export default function RatesPage() {
   const fetchRoomTypes = async () => {
     try {
       const res = await fetch('/api/room-types');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (res.ok) setRoomTypes(Array.isArray(data) ? data : []);
+      setRoomTypes(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Failed to fetch room types:', err);
+      toast.error('โหลดประเภทห้องไม่สำเร็จ', err instanceof Error ? err.message : undefined);
     }
   };
 
   const fetchRates = async () => {
     try {
       const res = await fetch('/api/rooms/rates');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setRoomsByFloor(data.byFloor ?? {});
     } catch (err) {
       console.error('Failed to fetch rates:', err);
       setRoomsByFloor({});
+      toast.error('โหลดข้อมูลราคาห้องไม่สำเร็จ', err instanceof Error ? err.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -144,6 +150,7 @@ export default function RatesPage() {
   };
 
   const handleChangeRoomType = async () => {
+    if (panelTypeSaving) return;
     if (!selectedRoom || !panelTypeId || panelTypeId === selectedRoom.roomType.id) return;
     setPanelTypeSaving(true);
     setPanelTypeError(null);
@@ -154,18 +161,17 @@ export default function RatesPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ typeId: panelTypeId }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setPanelTypeSuccess(true);
-        // update local state so the header reflects immediately
-        setSelectedRoom({ ...selectedRoom, roomType: data.roomType });
-        await fetchRates();
-        setTimeout(() => setPanelTypeSuccess(false), 2000);
-      } else {
-        setPanelTypeError(data.error ?? 'เกิดข้อผิดพลาด');
-      }
-    } catch {
-      setPanelTypeError('เกิดข้อผิดพลาดในการบันทึก');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      setPanelTypeSuccess(true);
+      setSelectedRoom({ ...selectedRoom, roomType: data.roomType });
+      await fetchRates();
+      toast.success('เปลี่ยนประเภทห้องสำเร็จ');
+      setTimeout(() => setPanelTypeSuccess(false), 2000);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'เกิดข้อผิดพลาดในการบันทึก';
+      setPanelTypeError(msg);
+      toast.error('เปลี่ยนประเภทห้องไม่สำเร็จ', msg);
     } finally {
       setPanelTypeSaving(false);
     }
@@ -192,8 +198,10 @@ export default function RatesPage() {
   };
 
   const handleSaveRoomType = async () => {
+    if (rtSaving) return;
     if (!rtForm.code.trim() || !rtForm.name.trim()) {
       setRtError('กรุณากรอกรหัสและชื่อประเภทห้อง');
+      toast.warning('กรุณากรอกรหัสและชื่อประเภทห้อง');
       return;
     }
     setRtSaving(true);
@@ -213,15 +221,15 @@ export default function RatesPage() {
           description: rtForm.description.trim() || undefined,
         }),
       });
-      const data = await res.json();
-      if (res.ok) {
-        await fetchRoomTypes();
-        openRtAdd(); // reset form
-      } else {
-        setRtError(data.error ?? 'เกิดข้อผิดพลาด');
-      }
-    } catch {
-      setRtError('เกิดข้อผิดพลาดในการบันทึก');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      await fetchRoomTypes();
+      openRtAdd();
+      toast.success(rtEditId ? 'บันทึกประเภทห้องสำเร็จ' : 'เพิ่มประเภทห้องสำเร็จ');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'เกิดข้อผิดพลาดในการบันทึก';
+      setRtError(msg);
+      toast.error('บันทึกประเภทห้องไม่สำเร็จ', msg);
     } finally {
       setRtSaving(false);
     }
@@ -234,14 +242,12 @@ export default function RatesPage() {
     setRtDeleting(id);
     try {
       const res = await fetch(`/api/room-types/${id}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (res.ok) {
-        await fetchRoomTypes();
-      } else {
-        alert(data.error ?? 'ลบไม่สำเร็จ');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการลบ');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      await fetchRoomTypes();
+      toast.success('ลบประเภทห้องสำเร็จ');
+    } catch (e) {
+      toast.error('ลบประเภทห้องไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setRtDeleting(null);
     }
@@ -272,6 +278,7 @@ export default function RatesPage() {
   };
 
   const handleSaveSingleRoom = async () => {
+    if (panelSaving) return;
     if (!selectedRoom) return;
 
     setPanelSaving(true);
@@ -285,27 +292,28 @@ export default function RatesPage() {
         body: JSON.stringify(panelForm),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
 
-      if (res.ok) {
-        setPanelSuccess(true);
-        await fetchRates();
-        setTimeout(() => {
-          setShowSidePanel(false);
-          setPanelSuccess(false);
-        }, 1000);
-      } else {
-        setPanelError(data.error || 'เกิดข้อผิดพลาด');
-      }
+      setPanelSuccess(true);
+      await fetchRates();
+      toast.success(`บันทึกราคาห้อง ${selectedRoom.number} สำเร็จ`);
+      setTimeout(() => {
+        setShowSidePanel(false);
+        setPanelSuccess(false);
+      }, 1000);
     } catch (err) {
       console.error('Save error:', err);
-      setPanelError('เกิดข้อผิดพลาดในการบันทึก');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการบันทึก';
+      setPanelError(msg);
+      toast.error('บันทึกราคาห้องไม่สำเร็จ', msg);
     } finally {
       setPanelSaving(false);
     }
   };
 
   const handleSaveBulk = async () => {
+    if (bulkSaving) return;
     const roomIds = Array.from(selectedRooms);
     if (roomIds.length === 0) return;
 
@@ -318,6 +326,7 @@ export default function RatesPage() {
 
     if (Object.keys(patch).length === 0) {
       setBulkError('กรุณาเลือกอย่างน้อยหนึ่งฟิลด์เพื่อปรับปรุง');
+      toast.warning('กรุณาเลือกอย่างน้อยหนึ่งฟิลด์เพื่อปรับปรุง');
       return;
     }
 
@@ -331,19 +340,18 @@ export default function RatesPage() {
         body: JSON.stringify({ roomIds, patch }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
 
-      if (res.ok) {
-        await fetchRates();
-        setShowBulkModal(false);
-        setSelectedRooms(new Set());
-        alert(`บันทึกข้อมูล ${roomIds.length} ห้องสำเร็จ`);
-      } else {
-        setBulkError(data.error || 'เกิดข้อผิดพลาด');
-      }
+      await fetchRates();
+      setShowBulkModal(false);
+      setSelectedRooms(new Set());
+      toast.success(`บันทึกข้อมูล ${roomIds.length} ห้องสำเร็จ`);
     } catch (err) {
       console.error('Bulk save error:', err);
-      setBulkError('เกิดข้อผิดพลาดในการบันทึก');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการบันทึก';
+      setBulkError(msg);
+      toast.error('บันทึกแบบพร้อมกันไม่สำเร็จ', msg);
     } finally {
       setBulkSaving(false);
     }

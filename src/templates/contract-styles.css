@@ -1,0 +1,137 @@
+/* contract-styles.css — print-optimised A4 Thai contract styles. */
+
+@import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500;700&display=swap');
+
+.contract-doc {
+  font-family: 'Sarabun', 'Microsoft Sans Serif', 'TH Sarabun New', sans-serif;
+  font-size: 11pt;
+  line-height: 1.5;
+  color: #000;
+  background: #fff;
+  max-width: 180mm;
+  margin: 0 auto;
+  padding: 0;
+}
+
+/* English contract — prefer a latin system sans while keeping Sarabun as a
+   fallback for any embedded Thai names. Layout and print rules below are
+   inherited unchanged. */
+.contract-doc.lang-en {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, 'Sarabun', sans-serif;
+}
+
+.contract-doc h1,
+.contract-doc h2,
+.contract-doc h3 {
+  text-align: center;
+  font-weight: 700;
+  margin: 0;
+}
+
+.contract-doc h1 { font-size: 18pt; }
+.contract-doc h2 { font-size: 14pt; margin-bottom: 6pt; }
+.contract-doc h3 { font-size: 13pt; margin: 12pt 0 4pt; }
+.contract-doc h4 { font-size: 12pt; font-weight: 700; margin: 12pt 0 4pt; }
+
+.contract-doc header {
+  text-align: center;
+  margin-bottom: 12pt;
+}
+
+.contract-doc header p {
+  margin: 2pt 0;
+}
+
+.contract-doc .contract-number {
+  text-align: right;
+  margin: 6pt 0;
+}
+
+.contract-doc .clause {
+  margin-top: 12pt;
+}
+
+.contract-doc .clause-title {
+  font-weight: 700;
+}
+
+.contract-doc p {
+  margin: 4pt 0;
+  text-indent: 1em;
+}
+
+.contract-doc p.no-indent {
+  text-indent: 0;
+}
+
+.contract-doc ul,
+.contract-doc ol {
+  margin: 4pt 0;
+  padding-left: 24pt;
+}
+
+.contract-doc .furniture-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2pt 12pt;
+  margin: 4pt 0;
+  padding-left: 16pt;
+}
+
+.contract-doc .furniture-section-title {
+  font-weight: 500;
+  margin-top: 6pt;
+  grid-column: 1 / -1;
+}
+
+.contract-doc u {
+  text-underline-offset: 3px;
+}
+
+.contract-doc .signature-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24pt;
+  margin-top: 48pt;
+}
+
+.contract-doc .signature-block {
+  text-align: center;
+}
+
+.contract-doc .signature-line {
+  border-bottom: 1px dotted #000;
+  display: inline-block;
+  min-width: 200pt;
+  margin: 0 4pt;
+}
+
+.contract-doc .page-break-before {
+  page-break-before: always;
+}
+
+.contract-doc .rules-list {
+  padding-left: 20pt;
+}
+
+.contract-doc .rules-list li {
+  margin: 4pt 0;
+}
+
+.contract-doc section {
+  break-inside: avoid-page;
+  page-break-inside: avoid;
+}
+
+@page {
+  size: A4;
+  margin: 18mm 16mm;
+}
+
+@media print {
+  .no-print { display: none !important; }
+  .contract-doc { font-size: 10.5pt; }
+  section { page-break-inside: avoid; }
+  body { background: #fff !important; }
+}

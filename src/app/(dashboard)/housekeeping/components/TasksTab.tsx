@@ -1,265 +1,483 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { HOUSEKEEPING_STATUSES } from '@/lib/constants';
-import { formatDate } from '@/lib/tax';
+/**
+ * TasksTab — Sprint 2b rebuild.
+ *
+ * Table-first: every column uses the shared DataTable (project's
+ * GoogleSheetTable) so filter/sort/group works uniformly. Adds KPI cards +
+ * a daily/monthly donut chart per Sprint 2b UX spec.
+ *
+ * Columns: Task# · Room · Floor · TaskType · Source · Channel · Status ·
+ * Priority · Fee · AssignedTo · Scheduled · AgeHrs · Actions.
+ */
 
-interface RoomType { name: string; }
-interface Room { id: string; number: string; floor: number; roomType: RoomType; }
-interface MaidTeam { id: string; name: string; }
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { HOUSEKEEPING_STATUSES } from '@/lib/constants';
+import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
+import { DataTable, type ColDef } from '@/components/data-table';
+import {
+  Clock, Activity, AlertTriangle, DollarSign, CalendarCheck,
+} from 'lucide-react';
+import {
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RTooltip, Legend,
+} from 'recharts';
+
+// ─── Types ─────────────────────────────────────────────────────────────────
+
 interface HousekeepingTask {
-  id: string; taskNumber: string;
-  room: Room; taskType: string;
-  assignedTo?: string; maidTeam?: MaidTeam; status: string;
-  priority: string; scheduledAt: string;
-  completedAt?: string; notes?: string;
+  id: string;
+  taskNumber: string;
+  taskType: string;
+  status: string;
+  priority: string;
+  scheduledAt: string;
+  completedAt: string | null;
+  assignedTo: string | null;
+  notes: string | null;
+  createdAt: string;
+  chargeable: boolean;
+  fee: number | string | null;
+  requestSource: string;
+  requestChannel: string | null;
+  requestedAt: string | null;
+  requestedBy: string | null;
+  declinedAt: string | null;
+  declinedBy: string | null;
+  declineChannel: string | null;
+  declineNotes: string | null;
+  bookingId: string | null;
+  scheduleId: string | null;
+  folioLineItemId: string | null;
+  room: {
+    id: string;
+    number: string;
+    floor: number;
+    roomType: { name: string; code?: string };
+  };
+  maidTeam?: { id: string; name: string } | null;
 }
 
-const TASK_TYPES = [
-  'ทำความสะอาดประจำวัน', 'เปลี่ยนผ้าปูที่นอน',
-  'ทำความสะอาดเช็คเอาท์', 'ทำความสะอาดพิเศษ',
-  'ทำความสะอาดห้องน้ำ', 'ดูดฝุ่น/ถูพื้น',
-];
+// ─── Constants ─────────────────────────────────────────────────────────────
 
-const MAIDS = ['คุณสมศรี', 'คุณนงลักษณ์', 'คุณวิไล', 'คุณจันทร์', 'คุณมาลี'];
+const SOURCE_LABELS: Record<string, { label: string; color: string }> = {
+  auto_checkout:        { label: 'เช็คเอาท์อัตโนมัติ', color: '#6b7280' },
+  daily_auto:           { label: 'รายวัน (อัตโนมัติ)',  color: '#10b981' },
+  guest_request:        { label: 'แขกขอ',              color: '#0284c7' },
+  monthly_scheduled:    { label: 'รายเดือน (นัด)',      color: '#7c3aed' },
+  recurring_auto:       { label: 'รอบประจำ',           color: '#8b5cf6' },
+  manual:               { label: 'Manual',             color: '#475569' },
+  maintenance_followup: { label: 'ต่อเนื่องซ่อม',       color: '#f59e0b' },
+};
+
+const CHANNEL_ICONS: Record<string, string> = {
+  door_sign:   '🏷️',
+  phone:       '📞',
+  guest_app:   '📱',
+  front_desk:  '🛎️',
+  system:      '🤖',
+};
+
+const STATUS_STYLES: Record<string, { label: string; color: string; bg: string }> = {
+  pending:     { label: 'รอทำ',        color: '#f59e0b', bg: '#fef3c7' },
+  in_progress: { label: 'กำลังทำ',     color: '#3b82f6', bg: '#dbeafe' },
+  completed:   { label: 'เสร็จแล้ว',    color: '#22c55e', bg: '#dcfce7' },
+  inspected:   { label: 'ตรวจแล้ว',    color: '#8b5cf6', bg: '#ede9fe' },
+  cancelled:   { label: 'ยกเลิก',      color: '#64748b', bg: '#f1f5f9' },
+};
+
+const KPI_COLORS = ['#f59e0b', '#3b82f6', '#ef4444', '#10b981', '#8b5cf6'];
+
+// ─── KPI Card ──────────────────────────────────────────────────────────────
+
+function KpiCard({
+  icon, title, value, subtitle, iconBg,
+}: {
+  icon: React.ReactNode; title: string; value: string | number;
+  subtitle?: string; iconBg: string;
+}) {
+  return (
+    <div className="pms-card pms-transition" style={{
+      borderRadius: 12, padding: '16px 18px',
+      border: '1px solid var(--border-default)',
+      flex: '1 1 180px', minWidth: 170,
+      display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 600, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          {title}
+        </div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1.1 }}>
+          {value}
+        </div>
+        {subtitle && (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-faint)' }}>
+            {subtitle}
+          </div>
+        )}
+      </div>
+      <div style={{
+        width: 42, height: 42, borderRadius: 10,
+        background: iconBg, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        {icon}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main ──────────────────────────────────────────────────────────────────
 
 export default function TasksTab() {
+  const toast = useToast();
   const [tasks, setTasks] = useState<HousekeepingTask[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filterStatus, setFilterStatus] = useState('all');
-  const [showForm, setShowForm] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
-  const [form, setForm] = useState({
-    roomNumber: '', taskType: 'ทำความสะอาดประจำวัน',
-    assignedTo: '', priority: 'normal',
-    scheduledAt: new Date().toISOString().split('T')[0],
-    notes: '',
-  });
+  const [filterStatus, setFilterStatus] = useState<string>('all');
+  const [updatingId, setUpdatingId] = useState<string | null>(null);
 
   const fetchTasks = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (filterStatus !== 'all') params.set('status', filterStatus);
-    const res = await fetch(`/api/housekeeping?${params}`);
-    const data = await res.json();
-    setTasks(data);
-    setLoading(false);
-  }, [filterStatus]);
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/housekeeping`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setTasks(await res.json());
+    } catch (e) {
+      toast.error('โหลดตารางงานไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
   const updateStatus = async (id: string, newStatus: string) => {
-    await fetch(`/api/housekeeping/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    await fetchTasks();
+    if (updatingId) return;
+    setUpdatingId(id);
+    try {
+      const res = await fetch(`/api/housekeeping/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await fetchTasks();
+      toast.success('อัปเดตสถานะสำเร็จ');
+    } catch (e) {
+      toast.error('อัปเดตสถานะไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setUpdatingId(null);
+    }
   };
 
-  const save = async () => {
-    setSaving(true);
-    await fetch('/api/housekeeping', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form),
+  // ── Filters ───────────────────────────────────────────────────────────────
+  const filtered = useMemo(() => {
+    if (filterStatus === 'all') return tasks;
+    return tasks.filter(t => t.status === filterStatus);
+  }, [tasks, filterStatus]);
+
+  // ── KPI stats ─────────────────────────────────────────────────────────────
+  const stats = useMemo(() => {
+    const now = Date.now();
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+
+    const pending    = tasks.filter(t => t.status === 'pending').length;
+    const inProgress = tasks.filter(t => t.status === 'in_progress').length;
+    const overdue    = tasks.filter(t =>
+      t.status === 'pending' && new Date(t.scheduledAt).getTime() < today.getTime()
+    ).length;
+
+    // today
+    const todayTasks = tasks.filter(t => {
+      const d = new Date(t.scheduledAt); d.setHours(0, 0, 0, 0);
+      return d.getTime() === today.getTime();
     });
-    await fetchTasks();
-    setShowForm(false);
-    setSaving(false);
-  };
+    const dailyCount = todayTasks.filter(t =>
+      t.requestSource === 'daily_auto' || t.requestSource === 'auto_checkout'
+    ).length;
+    const monthlyCount = todayTasks.filter(t =>
+      t.requestSource === 'monthly_scheduled' || t.requestSource === 'recurring_auto'
+    ).length;
+    const guestCount = todayTasks.filter(t => t.requestSource === 'guest_request').length;
 
-  const upd = (k: string, v: string) => setForm(p => ({ ...p, [k]: v }));
+    // fees
+    const feePaid    = tasks.filter(t => t.chargeable && (t.status === 'completed' || t.status === 'inspected'))
+      .reduce((s, t) => s + Number(t.fee ?? 0), 0);
+    const feePending = tasks.filter(t => t.chargeable && (t.status === 'pending' || t.status === 'in_progress'))
+      .reduce((s, t) => s + Number(t.fee ?? 0), 0);
 
-  const statusCounts = Object.keys(HOUSEKEEPING_STATUSES).reduce((acc, k) => {
-    acc[k] = tasks.filter(t => t.status === k).length;
+    return { pending, inProgress, overdue, dailyCount, monthlyCount, guestCount, feePaid, feePending, todayTotal: todayTasks.length };
+  }, [tasks]);
+
+  const todayPieData = useMemo(() => [
+    { name: 'รายวัน / เช็คเอาท์', value: stats.dailyCount,   fill: KPI_COLORS[3] },
+    { name: 'รายเดือน / รอบ',    value: stats.monthlyCount, fill: KPI_COLORS[4] },
+    { name: 'แขกขอเพิ่ม',         value: stats.guestCount,   fill: KPI_COLORS[1] },
+  ].filter(d => d.value > 0), [stats]);
+
+  // ── Columns ───────────────────────────────────────────────────────────────
+  type ColKey =
+    | 'taskNumber' | 'room' | 'floor' | 'taskType' | 'source' | 'channel'
+    | 'status' | 'priority' | 'fee' | 'assigned' | 'scheduled' | 'age' | 'actions';
+
+  const columns: ColDef<HousekeepingTask, ColKey>[] = useMemo(() => [
+    {
+      key: 'taskNumber', label: 'Task #', minW: 90,
+      getValue: t => t.taskNumber,
+      render: t => <span style={{ fontFamily: 'monospace', fontSize: 11, color: 'var(--text-muted)' }}>{t.taskNumber}</span>,
+    },
+    {
+      key: 'room', label: 'ห้อง', minW: 80,
+      getValue: t => String(t.room.number).padStart(6, '0'),
+      getLabel: t => t.room.number,
+      render: t => <strong>{t.room.number}</strong>,
+    },
+    {
+      key: 'floor', label: 'ชั้น', minW: 60, align: 'center',
+      getValue: t => String(t.room.floor).padStart(3, '0'),
+      getLabel: t => String(t.room.floor),
+      render: t => <span>{t.room.floor}</span>,
+    },
+    {
+      key: 'taskType', label: 'ประเภทงาน', minW: 140,
+      getValue: t => t.taskType,
+      render: t => <span style={{ fontSize: 12 }}>{t.taskType}</span>,
+    },
+    {
+      key: 'source', label: 'ที่มา', minW: 130,
+      getValue: t => SOURCE_LABELS[t.requestSource]?.label ?? t.requestSource,
+      render: t => {
+        const s = SOURCE_LABELS[t.requestSource] ?? { label: t.requestSource, color: '#64748b' };
+        return (
+          <span style={{
+            display: 'inline-flex', padding: '3px 10px', borderRadius: 12,
+            fontSize: 11, fontWeight: 600,
+            color: s.color, background: s.color + '18',
+          }}>
+            {s.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'channel', label: 'ช่องทาง', minW: 90, align: 'center',
+      getValue: t => t.requestChannel ?? '-',
+      render: t => t.requestChannel
+        ? <span title={t.requestChannel} style={{ fontSize: 18 }}>{CHANNEL_ICONS[t.requestChannel] ?? '·'}</span>
+        : <span style={{ color: 'var(--text-faint)' }}>—</span>,
+    },
+    {
+      key: 'status', label: 'สถานะ', minW: 100,
+      getValue: t => STATUS_STYLES[t.status]?.label ?? t.status,
+      render: t => {
+        const s = STATUS_STYLES[t.status] ?? { label: t.status, color: '#64748b', bg: '#f1f5f9' };
+        return (
+          <span style={{
+            display: 'inline-flex', padding: '3px 10px', borderRadius: 12,
+            fontSize: 11, fontWeight: 600, color: s.color, background: s.bg,
+          }}>
+            {s.label}
+          </span>
+        );
+      },
+    },
+    {
+      key: 'priority', label: 'ความสำคัญ', minW: 90,
+      getValue: t => t.priority,
+      render: t => {
+        if (t.priority === 'urgent') return <span style={{ color: '#dc2626', fontWeight: 700, fontSize: 12 }}>🔥 urgent</span>;
+        if (t.priority === 'high')   return <span style={{ color: '#ef4444', fontWeight: 600, fontSize: 12 }}>⚡ สูง</span>;
+        if (t.priority === 'low')    return <span style={{ color: '#6b7280', fontSize: 12 }}>ต่ำ</span>;
+        return <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>ปกติ</span>;
+      },
+    },
+    {
+      key: 'fee', label: 'ค่าบริการ', minW: 110, align: 'right', noFilter: true,
+      getValue: t => t.chargeable ? String(Math.round(Number(t.fee ?? 0) * 100)).padStart(12, '0') : '0',
+      getLabel: t => t.chargeable && t.fee ? `฿${fmtBaht(Number(t.fee))}` : '—',
+      aggregate: 'sum',
+      aggValue: t => Number(t.fee ?? 0),
+      render: t => t.chargeable && t.fee
+        ? <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0284c7' }}>฿{fmtBaht(Number(t.fee))}</span>
+        : <span style={{ color: 'var(--text-faint)' }}>—</span>,
+    },
+    {
+      key: 'assigned', label: 'ผู้รับผิดชอบ', minW: 130,
+      getValue: t => t.maidTeam?.name ?? t.assignedTo ?? '-ยังไม่มอบหมาย-',
+      render: t => t.maidTeam
+        ? <span style={{ fontSize: 12 }}>👥 {t.maidTeam.name}</span>
+        : t.assignedTo
+          ? <span style={{ fontSize: 12 }}>👤 {t.assignedTo}</span>
+          : <span style={{ color: 'var(--text-faint)', fontSize: 12 }}>—</span>,
+    },
+    {
+      key: 'scheduled', label: 'กำหนด', minW: 140,
+      getValue: t => (t.scheduledAt ?? '').slice(0, 10),
+      getLabel: t => fmtDate(t.scheduledAt),
+      render: t => <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{fmtDate(t.scheduledAt)}</span>,
+    },
+    {
+      key: 'age', label: 'อายุงาน (ชม.)', minW: 90, align: 'right', noFilter: true,
+      getValue: t => {
+        const hrs = Math.floor((Date.now() - new Date(t.createdAt).getTime()) / (1000 * 60 * 60));
+        return String(hrs).padStart(6, '0');
+      },
+      getLabel: t => {
+        const hrs = Math.floor((Date.now() - new Date(t.createdAt).getTime()) / (1000 * 60 * 60));
+        return `${hrs}h`;
+      },
+      render: t => {
+        const hrs = Math.floor((Date.now() - new Date(t.createdAt).getTime()) / (1000 * 60 * 60));
+        const color = hrs > 24 ? '#dc2626' : hrs > 8 ? '#f59e0b' : 'var(--text-muted)';
+        return <span style={{ fontSize: 12, fontFamily: 'monospace', color }}>{hrs}h</span>;
+      },
+    },
+    {
+      key: 'actions', label: 'จัดการ', align: 'center', minW: 160, noFilter: true,
+      getValue: () => '',
+      render: t => (
+        <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+          {t.status === 'pending' && (
+            <button onClick={(e) => { e.stopPropagation(); updateStatus(t.id, 'in_progress'); }}
+              style={{ padding: '3px 10px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>
+              ▶ เริ่ม
+            </button>
+          )}
+          {t.status === 'in_progress' && (
+            <button onClick={(e) => { e.stopPropagation(); updateStatus(t.id, 'completed'); }}
+              style={{ padding: '3px 10px', background: '#22c55e', color: '#fff', border: 'none', borderRadius: 6, fontSize: 11, cursor: 'pointer', fontWeight: 600 }}>
+              ✓ เสร็จ
+            </button>
+          )}
+          {t.status === 'completed' && (
+            <button onClick={(e) => { e.stopPropagation(); updateStatus(t.id, 'inspected'); }}
+              style={{ padding: '3px 10px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 11, cursor: 'pointer', color: '#7c3aed', fontWeight: 600 }}>
+              ✅ ตรวจ
+            </button>
+          )}
+          {t.status === 'inspected' && <span style={{ fontSize: 11, color: '#8b5cf6', fontWeight: 700 }}>✅ สมบูรณ์</span>}
+          {t.status === 'cancelled' && (
+            <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}
+                  title={t.declineNotes ?? undefined}>
+              🚫 {t.declineChannel ? (CHANNEL_ICONS[t.declineChannel] ?? '') : ''}
+            </span>
+          )}
+        </div>
+      ),
+    },
+  ], [updatingId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Status tabs ────────────────────────────────────────────────────────────
+  const statusTabs = [
+    { id: 'all',         label: 'ทั้งหมด',     color: '#374151' },
+    { id: 'pending',     label: 'รอทำ',        color: '#f59e0b' },
+    { id: 'in_progress', label: 'กำลังทำ',     color: '#3b82f6' },
+    { id: 'completed',   label: 'เสร็จแล้ว',    color: '#22c55e' },
+    { id: 'inspected',   label: 'ตรวจแล้ว',    color: '#8b5cf6' },
+    { id: 'cancelled',   label: 'ยกเลิก',      color: '#64748b' },
+  ];
+
+  const statusCounts = tasks.reduce((acc, t) => {
+    acc[t.status] = (acc[t.status] ?? 0) + 1;
     return acc;
   }, {} as Record<string, number>);
 
-  const inputStyle = { width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, outline: 'none', boxSizing: 'border-box' as const, background: '#fff' };
-  const labelStyle = { display: 'block' as const, fontSize: 12, fontWeight: 600 as const, color: '#374151', marginBottom: 5 };
-
   return (
-    <div>
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: 18 }}>ตารางงานแม่บ้านวันนี้</h2>
-          <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6b7280' }}>
-            รอทำ: <strong style={{ color: '#f59e0b' }}>{statusCounts.pending || 0}</strong> | กำลังทำ: <strong style={{ color: '#3b82f6' }}>{statusCounts.in_progress || 0}</strong>
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <div style={{ display: 'flex', background: '#f3f4f6', borderRadius: 8, padding: 4 }}>
-            <button onClick={() => setViewMode('grid')} style={{ padding: '5px 12px', background: viewMode === 'grid' ? '#fff' : 'transparent', color: viewMode === 'grid' ? '#111827' : '#6b7280', border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: viewMode === 'grid' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none' }}>Grid</button>
-            <button onClick={() => setViewMode('table')} style={{ padding: '5px 12px', background: viewMode === 'table' ? '#fff' : 'transparent', color: viewMode === 'table' ? '#111827' : '#6b7280', border: 'none', borderRadius: 6, fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: viewMode === 'table' ? '0 1px 2px rgba(0,0,0,0.1)' : 'none' }}>Table</button>
-          </div>
-          <button onClick={() => setShowForm(true)} style={{ padding: '9px 16px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
-            + มอบหมายงาน (เดี่ยว)
-          </button>
-        </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+
+      {/* KPI Cards */}
+      <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+        <KpiCard
+          icon={<Clock size={20} color="#f59e0b" />} iconBg="#fef3c7"
+          title="รอทำ" value={stats.pending} subtitle="pending tasks"
+        />
+        <KpiCard
+          icon={<Activity size={20} color="#3b82f6" />} iconBg="#dbeafe"
+          title="กำลังทำ" value={stats.inProgress} subtitle="in-progress"
+        />
+        <KpiCard
+          icon={<AlertTriangle size={20} color="#dc2626" />} iconBg="#fee2e2"
+          title="เกินกำหนด" value={stats.overdue} subtitle="overdue"
+        />
+        <KpiCard
+          icon={<DollarSign size={20} color="#10b981" />} iconBg="#d1fae5"
+          title="ค่าบริการ"
+          value={`฿${fmtBaht(stats.feePaid)}`}
+          subtitle={`ค้างเก็บ ฿${fmtBaht(stats.feePending)}`}
+        />
+        <KpiCard
+          icon={<CalendarCheck size={20} color="#7c3aed" />} iconBg="#ede9fe"
+          title="วันนี้ต้องทำ" value={stats.todayTotal}
+          subtitle={`รายวัน ${stats.dailyCount} / เดือน ${stats.monthlyCount}`}
+        />
       </div>
 
-      {/* Status Filter Tabs */}
-      <div style={{ display: 'flex', gap: 2, background: '#f3f4f6', borderRadius: 10, padding: 3, marginBottom: 16, overflowX: 'auto' }}>
-        {[{ key: 'all', label: 'ทั้งหมด', color: '#374151' }, ...Object.entries(HOUSEKEEPING_STATUSES).map(([k, v]) => ({ key: k, label: v.label, color: v.color }))].map(t => (
-          <button key={t.key} onClick={() => setFilterStatus(t.key)} style={{ padding: '7px 14px', borderRadius: 8, border: 'none', fontSize: 12, fontWeight: 600, cursor: 'pointer', background: filterStatus === t.key ? '#fff' : 'transparent', color: filterStatus === t.key ? t.color : '#6b7280', boxShadow: filterStatus === t.key ? '0 1px 3px rgba(0,0,0,0.1)' : 'none', whiteSpace: 'nowrap' }}>
-            {t.label} {t.key !== 'all' && statusCounts[t.key] ? `(${statusCounts[t.key]})` : ''}
+      {/* Donut — today breakdown */}
+      {todayPieData.length > 0 && (
+        <div className="pms-card pms-transition" style={{
+          borderRadius: 12, padding: 18, border: '1px solid var(--border-default)',
+          display: 'flex', gap: 20, alignItems: 'center', flexWrap: 'wrap',
+        }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>
+            งานวันนี้แบ่งตามที่มา
+          </div>
+          <div style={{ flex: '1 1 300px', minWidth: 260, height: 140 }}>
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie data={todayPieData} dataKey="value" nameKey="name"
+                     cx="50%" cy="50%" innerRadius={32} outerRadius={55} paddingAngle={3}>
+                  {todayPieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                </Pie>
+                <RTooltip formatter={(v) => [`${v} งาน`]} />
+                <Legend verticalAlign="middle" align="right" layout="vertical" iconSize={10} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* Status tabs */}
+      <div style={{ display: 'flex', gap: 4, background: 'var(--surface-muted)', borderRadius: 10, padding: 3, overflowX: 'auto' }}>
+        {statusTabs.map(t => (
+          <button key={t.id} onClick={() => setFilterStatus(t.id)}
+            className="pms-transition"
+            style={{
+              padding: '7px 14px', borderRadius: 8, border: 'none',
+              fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              background: filterStatus === t.id ? 'var(--surface-card)' : 'transparent',
+              color:      filterStatus === t.id ? t.color : 'var(--text-muted)',
+              whiteSpace: 'nowrap',
+              boxShadow:  filterStatus === t.id ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+            }}>
+            {t.label}{t.id !== 'all' && statusCounts[t.id] ? ` (${statusCounts[t.id]})` : ''}
           </button>
         ))}
       </div>
 
-      {/* Task Grid / Table */}
+      {/* Table */}
       {loading ? (
-        <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>กำลังโหลด...</div>
-      ) : tasks.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af', background: '#fff', borderRadius: 12 }}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>🧹</div>
-          <div>ไม่มีงานแม่บ้าน</div>
-        </div>
-      ) : viewMode === 'grid' ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-          {tasks.map(task => {
-            const st = HOUSEKEEPING_STATUSES[task.status as keyof typeof HOUSEKEEPING_STATUSES] || { label: task.status, color: '#6b7280' };
-            return (
-              <div key={task.id} style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', padding: 16, borderLeft: `4px solid ${st.color}` }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div>
-                    <div style={{ fontSize: 10, color: '#6b7280', fontFamily: 'monospace' }}>{task.taskNumber}</div>
-                    <div style={{ fontSize: 18, fontWeight: 800 }}>ห้อง {task.room.number}</div>
-                  </div>
-                  <span style={{ display: 'inline-flex', padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, color: st.color, background: st.color + '15', alignSelf: 'flex-start' }}>{st.label}</span>
-                </div>
-                <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 10 }}>
-                  <div>📋 {task.taskType}</div>
-                  {task.maidTeam ? (
-                    <div>👥 ทีม: <strong>{task.maidTeam.name}</strong></div>
-                  ) : task.assignedTo && (
-                    <div>👤 {task.assignedTo}</div>
-                  )}
-                  <div>📅 {formatDate(task.scheduledAt)}</div>
-                  {task.priority === 'high' && <div>⚡ <span style={{ color: '#ef4444', fontWeight: 600 }}>ด่วน</span></div>}
-                </div>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {task.status === 'pending' && (
-                    <button onClick={() => updateStatus(task.id, 'in_progress')} style={{ flex: 1, padding: '7px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>▶ เริ่มทำ</button>
-                  )}
-                  {task.status === 'in_progress' && (
-                    <button onClick={() => updateStatus(task.id, 'completed')} style={{ flex: 1, padding: '7px', background: '#22c55e', color: '#fff', border: 'none', borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>✓ เสร็จแล้ว</button>
-                  )}
-                  {task.status === 'completed' && (
-                    <button onClick={() => updateStatus(task.id, 'inspected')} style={{ flex: 1, padding: '7px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#7c3aed' }}>✅ ตรวจผ่าน</button>
-                  )}
-                  {task.status === 'inspected' && (
-                    <div style={{ flex: 1, padding: '7px', textAlign: 'center', fontSize: 12, color: '#8b5cf6', fontWeight: 600 }}>✅ เสร็จสมบูรณ์</div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-faint)' }}>กำลังโหลด...</div>
       ) : (
-        <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #e5e7eb', overflowX: 'auto' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151' }}>ห้อง</th>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151' }}>ประเภทงาน</th>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151' }}>วันที่นัดหมาย</th>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151' }}>ผู้รับผิดชอบ</th>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151' }}>สถานะ</th>
-                <th style={{ padding: '4px 16px', fontWeight: 600, color: '#374151', textAlign: 'center' }}>จัดการ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tasks.map(task => {
-                const st = HOUSEKEEPING_STATUSES[task.status as keyof typeof HOUSEKEEPING_STATUSES] || { label: task.status, color: '#6b7280' };
-                return (
-                  <tr key={task.id} style={{ borderBottom: '1px solid #f3f4f6' }}>
-                    <td style={{ padding: '4px 16px' }}>
-                      <strong>{task.room.number}</strong>
-                      <span style={{ fontSize: 10, color: '#9ca3af', fontFamily: 'monospace', marginLeft: 8 }}>{task.taskNumber.slice(-8)}</span>
-                    </td>
-                    <td style={{ padding: '4px 16px' }}>
-                      {task.taskType} 
-                      {task.priority === 'high' && <span style={{ color: '#ef4444', fontWeight: 600, fontSize: 11, marginLeft: 6 }}>[⚡ ด่วน]</span>}
-                    </td>
-                    <td style={{ padding: '4px 16px', color: '#6b7280' }}>{formatDate(task.scheduledAt)}</td>
-                    <td style={{ padding: '4px 16px' }}>
-                      {task.maidTeam ? (
-                        <span style={{ background: '#f3f4f6', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 500 }}>👥 {task.maidTeam.name}</span>
-                      ) : task.assignedTo ? (
-                        <span style={{ background: '#f3f4f6', padding: '3px 8px', borderRadius: 4, fontSize: 12, fontWeight: 500 }}>👤 {task.assignedTo}</span>
-                      ) : (
-                        <span style={{ color: '#9ca3af' }}>-ไม่ได้มอบหมาย-</span>
-                      )}
-                    </td>
-                    <td style={{ padding: '4px 16px' }}>
-                      <span style={{ display: 'inline-flex', padding: '3px 10px', borderRadius: 12, fontSize: 11, fontWeight: 600, color: st.color, background: st.color + '15' }}>
-                        {st.label}
-                      </span>
-                    </td>
-                    <td style={{ padding: '4px 16px', textAlign: 'center', whiteSpace: 'nowrap' }}>
-                      <div style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-                        {task.status === 'pending' && <button onClick={() => updateStatus(task.id, 'in_progress')} style={{ padding: '3px 12px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>▶ เริ่มทำ</button>}
-                        {task.status === 'in_progress' && <button onClick={() => updateStatus(task.id, 'completed')} style={{ padding: '3px 12px', background: '#22c55e', color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>✓ เสร็จแล้ว</button>}
-                        {task.status === 'completed' && <button onClick={() => updateStatus(task.id, 'inspected')} style={{ padding: '3px 12px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 12, cursor: 'pointer', color: '#7c3aed', fontWeight: 600 }}>✅ ตรวจผ่าน</button>}
-                        {task.status === 'inspected' && <span style={{ fontSize: 12, color: '#8b5cf6', fontWeight: 800 }}>✅ สมบูรณ์</span>}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* New Task Form Modal */}
-      {showForm && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={() => setShowForm(false)}>
-          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)' }} />
-          <div style={{ position: 'relative', background: '#fff', borderRadius: 16, width: '100%', maxWidth: 480, padding: 24 }} onClick={e => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>มอบหมายงานแม่บ้าน</h3>
-              <button onClick={() => setShowForm(false)} style={{ background: '#f3f4f6', border: 'none', cursor: 'pointer', padding: '6px 10px', borderRadius: 8 }}>✕</button>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 14px' }}>
-              <div style={{ marginBottom: 14 }}><label style={labelStyle}>หมายเลขห้อง*</label><input value={form.roomNumber} onChange={e => upd('roomNumber', e.target.value)} placeholder="เช่น 201" style={inputStyle} /></div>
-              <div style={{ marginBottom: 14 }}><label style={labelStyle}>วันที่</label><input type="date" value={form.scheduledAt} onChange={e => upd('scheduledAt', e.target.value)} style={inputStyle} /></div>
-              <div style={{ marginBottom: 14, gridColumn: '1 / -1' }}>
-                <label style={labelStyle}>ประเภทงาน</label>
-                <select value={form.taskType} onChange={e => upd('taskType', e.target.value)} style={inputStyle}>
-                  {TASK_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-                </select>
-              </div>
-              <div style={{ marginBottom: 14 }}>
-                <label style={labelStyle}>มอบหมายให้ (รายบุคคล)</label>
-                <select value={form.assignedTo} onChange={e => upd('assignedTo', e.target.value)} style={inputStyle}>
-                  <option value="">-- เลือกแม่บ้าน --</option>
-                  {MAIDS.map(m => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-              <div style={{ marginBottom: 14 }}>
-                <label style={labelStyle}>ความเร่งด่วน</label>
-                <select value={form.priority} onChange={e => upd('priority', e.target.value)} style={inputStyle}>
-                  <option value="normal">ปกติ</option>
-                  <option value="high">ด่วน</option>
-                </select>
-              </div>
-              <div style={{ marginBottom: 14, gridColumn: '1 / -1' }}>
-                <label style={labelStyle}>หมายเหตุ</label>
-                <textarea value={form.notes} onChange={e => upd('notes', e.target.value)} style={{ ...inputStyle, minHeight: 60, resize: 'vertical', fontFamily: 'inherit' }} />
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => setShowForm(false)} style={{ flex: 1, padding: '11px', background: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>ยกเลิก</button>
-              <button onClick={save} disabled={saving || !form.roomNumber} style={{ flex: 1, padding: '11px', background: '#1e40af', color: '#fff', border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: saving ? 0.7 : 1 }}>
-                {saving ? 'กำลังบันทึก...' : '💾 มอบหมายงาน'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <DataTable<HousekeepingTask, ColKey>
+          tableKey={`housekeeping.tasks.${filterStatus}`}
+          syncUrl
+          exportFilename={`pms_housekeeping_${filterStatus}`}
+          exportSheetName="ตารางงานแม่บ้าน"
+          rows={filtered}
+          columns={columns}
+          rowKey={t => t.id}
+          defaultSort={{ col: 'scheduled', dir: 'desc' }}
+          dateRange={{
+            col: 'scheduled',
+            getDate: t => t.scheduledAt ? new Date(t.scheduledAt) : null,
+            label: 'วันที่กำหนด',
+          }}
+          groupByCols={['status', 'source', 'floor', 'assigned', 'taskType']}
+          emptyText="ไม่มีงานแม่บ้าน"
+          summaryLabel={(f, total) => (
+            <>🧹 {f}{f !== total ? `/${total}` : ''} งาน · ช่วงเวลาที่แสดงตาม {fmtDateTime(new Date())}</>
+          )}
+        />
       )}
     </div>
   );

@@ -16,6 +16,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import FolioLedger from '@/components/folio/FolioLedger';
 import { fmtDate } from '@/lib/date-format';
+import { useToast, Dialog, Button } from '@/components/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,11 +53,17 @@ const CHARGE_TYPES = [
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function FolioPage() {
+  const toast = useToast();
   const [search, setSearch] = useState('');
   const [bookings, setBookings] = useState<BookingSummary[]>([]);
   const [selectedBookingId, setSelectedBookingId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [folioKey, setFolioKey] = useState(0); // force FolioLedger to re-mount on refresh
+
+  // Void invoice dialog
+  const [voidTarget, setVoidTarget] = useState<{ invoiceId: string; invoiceNumber: string } | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [isVoiding, setIsVoiding] = useState(false);
 
   // Add charge form
   const [showAddCharge, setShowAddCharge] = useState(false);
@@ -78,15 +85,16 @@ export default function FolioPage() {
     try {
       const q = encodeURIComponent(search.trim());
       const res = await fetch(`/api/bookings?search=${q}&status=all`);
-      if (!res.ok) throw new Error('โหลดข้อมูลล้มเหลว');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setBookings(data);
-    } catch {
+    } catch (e) {
       setBookings([]);
+      toast.error('ค้นหา booking ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, toast]);
 
   useEffect(() => {
     if (search.length >= 2) {
@@ -98,11 +106,13 @@ export default function FolioPage() {
   // ── Add extra charge ────────────────────────────────────────────────────────
   async function handleAddCharge(e: React.FormEvent) {
     e.preventDefault();
+    if (saving) return;
     if (!selectedBooking?.folio) return;
 
     const amount = parseFloat(chargeForm.amount);
     if (isNaN(amount) || amount <= 0) {
       setSaveMsg('❌ ระบุจำนวนเงินให้ถูกต้อง');
+      toast.warning('กรุณาระบุจำนวนเงินให้ถูกต้อง');
       return;
     }
 
@@ -119,36 +129,51 @@ export default function FolioPage() {
           notes: chargeForm.notes || undefined,
         }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'บันทึกล้มเหลว');
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
 
       setSaveMsg('✅ เพิ่มรายการสำเร็จ');
+      toast.success('เพิ่มรายการค่าบริการสำเร็จ');
       setChargeForm({ chargeType: 'EXTRA_SERVICE', description: '', amount: '', notes: '' });
       setShowAddCharge(false);
       setFolioKey((k) => k + 1); // refresh FolioLedger
     } catch (err) {
-      setSaveMsg(`❌ ${err instanceof Error ? err.message : 'เกิดข้อผิดพลาด'}`);
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setSaveMsg(`❌ ${msg}`);
+      toast.error('เพิ่มรายการค่าบริการไม่สำเร็จ', msg);
     } finally {
       setSaving(false);
     }
   }
 
   // ── Void invoice ─────────────────────────────────────────────────────────────
-  async function handleVoidInvoice(invoiceId: string, invoiceNumber: string) {
-    const reason = prompt(`เหตุผลในการ Void ${invoiceNumber}:`);
-    if (!reason) return;
+  function openVoidDialog(invoiceId: string, invoiceNumber: string) {
+    setVoidReason('');
+    setVoidTarget({ invoiceId, invoiceNumber });
+  }
+
+  async function handleVoidInvoiceConfirm() {
+    if (!voidTarget || isVoiding) return;
+    if (!voidReason.trim()) {
+      toast.warning('กรุณาระบุเหตุผลในการ Void');
+      return;
+    }
+    setIsVoiding(true);
     try {
-      const res = await fetch(`/api/invoices/${invoiceId}`, {
+      const res = await fetch(`/api/invoices/${voidTarget.invoiceId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'void', reason }),
+        body: JSON.stringify({ action: 'void', reason: voidReason.trim() }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'Void ล้มเหลว');
-      alert(`✅ Void ${invoiceNumber} สำเร็จ — รายการถูกปลดล็อกกลับเป็น UNBILLED แล้ว`);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      toast.success(`Void ${voidTarget.invoiceNumber} สำเร็จ`, 'รายการถูกปลดล็อกกลับเป็น UNBILLED แล้ว');
+      setVoidTarget(null);
       setFolioKey((k) => k + 1);
     } catch (err) {
-      alert(`❌ ${err instanceof Error ? err.message : 'เกิดข้อผิดพลาด'}`);
+      toast.error('Void ใบแจ้งหนี้ไม่สำเร็จ', err instanceof Error ? err.message : undefined);
+    } finally {
+      setIsVoiding(false);
     }
   }
 
@@ -352,11 +377,57 @@ export default function FolioPage() {
                 key={`${selectedBookingId}-${folioKey}`}
                 bookingId={selectedBookingId}
                 onRefresh={() => setFolioKey((k) => k + 1)}
+                onVoidInvoice={openVoidDialog}
               />
             </div>
           )}
         </div>
       </div>
+      {/* ── Void Invoice Dialog ── */}
+      <Dialog
+        open={!!voidTarget}
+        onClose={() => !isVoiding && setVoidTarget(null)}
+        title={`Void ${voidTarget?.invoiceNumber ?? ''}?`}
+        size="sm"
+        footer={
+          <>
+            <Button variant="secondary" onClick={() => setVoidTarget(null)} disabled={isVoiding}>
+              ยกเลิก
+            </Button>
+            <Button variant="danger" onClick={handleVoidInvoiceConfirm} loading={isVoiding}>
+              Void ใบแจ้งหนี้
+            </Button>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>
+            ใบแจ้งหนี้จะถูก Void และรายการทั้งหมดจะถูกปลดล็อกกลับเป็น UNBILLED
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+              เหตุผล *
+            </label>
+            <input
+              autoFocus
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleVoidInvoiceConfirm(); }}
+              placeholder="ระบุเหตุผล..."
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                border: '1px solid var(--border-default)',
+                borderRadius: 6,
+                fontSize: 13,
+                background: 'var(--surface-muted)',
+                color: 'var(--text-primary)',
+                outline: 'none',
+              }}
+            />
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

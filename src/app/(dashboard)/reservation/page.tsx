@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { parseUTCDate, formatDateStr, addDays, buildDayList } from './lib/date-utils';
 import { DAY_W, ROW_H, GROUP_H, LEFT_W, FONT, ROOM_STATUS_DOT } from './lib/constants';
-import type { ApiData, FilterState, ContextMenuState } from './lib/types';
+import type { ApiData, FilterState, ContextMenuState, RoomStatus } from './lib/types';
 import type { BookingItem, RoomItem } from './lib/types';
 import TapeHeader from './components/TapeHeader';
 import type { ViewMode } from './components/TapeHeader';
@@ -26,6 +27,8 @@ import { useToast, ErrorBoundary } from '@/components/ui';
 
 export default function ReservationPage() {
   const toast = useToast();
+  const searchParams = useSearchParams();
+  const router = useRouter();
   // ──── Data State ────
   const [data, setData] = useState<ApiData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -108,6 +111,35 @@ export default function ReservationPage() {
     fetchData();
   }, [fetchData]);
 
+  // ──── Deep-link: ?booking=<id> opens DetailPanel for that booking ────
+  // Triggered by quick-action buttons on the rooms page that used to link to
+  // the deleted /checkin route. We strip the param once applied so it doesn't
+  // re-open on navigation back.
+  useEffect(() => {
+    const bookingId = searchParams.get('booking');
+    if (!bookingId || !data) return;
+
+    for (const rt of data.roomTypes) {
+      for (const room of rt.rooms) {
+        const match = room.bookings.find((b: BookingItem) => b.id === bookingId);
+        if (match) {
+          setDetailBooking({ booking: match, room });
+          const params = new URLSearchParams(Array.from(searchParams.entries()));
+          params.delete('booking');
+          const qs = params.toString();
+          router.replace(qs ? `/reservation?${qs}` : '/reservation');
+          return;
+        }
+      }
+    }
+    // Booking not in current range — inform user and clear the param
+    toast.info('ไม่พบการจองในช่วงเวลาที่แสดง', 'ลองปรับช่วงวันที่');
+    const params = new URLSearchParams(Array.from(searchParams.entries()));
+    params.delete('booking');
+    const qs = params.toString();
+    router.replace(qs ? `/reservation?${qs}` : '/reservation');
+  }, [data, searchParams, router, toast]);
+
   // ──── Derived Data ────
   const rangeStart = useMemo(() => parseUTCDate(fromStr), [fromStr]);
   const days = useMemo(() => buildDayList(rangeStart, rangeDays), [rangeStart, rangeDays]);
@@ -183,6 +215,74 @@ export default function ReservationPage() {
   const occupancyToday = useMemo(() => {
     if (!data) return 0;
     return data.occupancyPerDay[data.today] ?? 0;
+  }, [data]);
+
+  // ──── Room status counts for TODAY (derived from bookings, not stored) ────
+  // The per-room `room.status` column is a snapshot that drifts from truth
+  // (not bumped back to `available` on cancel, etc.), so we derive the
+  // authoritative counts from live booking data.
+  //
+  // The key concept is "who is in the room TONIGHT" — a room's stay window
+  // is [checkIn, checkOut) where checkOut is EXCLUSIVE (guest leaves that
+  // morning and does not stay that night).
+  //
+  // Priority (first match wins per room):
+  //   1. maintenance / cleaning — physical room state (from stored status)
+  //   2. occupied  — a checked_in booking is in house tonight
+  //   3. reserved  — a confirmed booking is scheduled for tonight (not yet CI)
+  //   4. checkout  — someone departed today but no one is staying tonight
+  //   5. available — everything else
+  //
+  // NOTE: an "arrives-today-after-departure" case (room A checks out 09:00,
+  // room A checks in new guest 14:00) is correctly categorised as RESERVED
+  // (the incoming guest), not CHECKOUT, because what matters for the
+  // dashboard is the current/next occupant of the room.
+  const statusCountsToday = useMemo<Record<RoomStatus, number>>(() => {
+    const base: Record<RoomStatus, number> = {
+      available: 0, occupied: 0, reserved: 0,
+      checkout: 0, cleaning: 0, maintenance: 0,
+    };
+    if (!data) return base;
+    const today = data.today;
+
+    for (const rt of data.roomTypes) {
+      for (const room of rt.rooms) {
+        if (room.status === 'maintenance') { base.maintenance += 1; continue; }
+        if (room.status === 'cleaning')    { base.cleaning    += 1; continue; }
+
+        // Walk the room's bookings once, classifying each relative to today.
+        // Segment dates (if present) override booking dates — a booking that
+        // was moved mid-stay physically occupies per-segment.
+        let hasCheckedInTonight   = false;  // someone is in house tonight
+        let hasConfirmedTonight   = false;  // reserved for tonight, not yet CI
+        let hasDepartedToday      = false;  // someone left this morning
+
+        for (const b of room.bookings) {
+          if (b.status === 'cancelled') continue;
+          const from = b.segmentFrom ?? b.checkIn;
+          const to   = b.segmentTo   ?? b.checkOut;
+
+          // Stay window is [from, to) — tonight ⇔ from ≤ today < to
+          const inTonight = from <= today && today < to;
+          if (inTonight) {
+            if (b.status === 'checked_in')      hasCheckedInTonight = true;
+            else if (b.status === 'confirmed')  hasConfirmedTonight = true;
+          }
+
+          // Departure today ⇔ to === today (exclusive end-date lands on today).
+          // We only care about this if nobody is staying tonight.
+          if (to === today && (b.status === 'checked_in' || b.status === 'checked_out')) {
+            hasDepartedToday = true;
+          }
+        }
+
+        if (hasCheckedInTonight)      base.occupied += 1;
+        else if (hasConfirmedTonight) base.reserved += 1;
+        else if (hasDepartedToday)    base.checkout += 1;
+        else                          base.available += 1;
+      }
+    }
+    return base;
   }, [data]);
 
   // ──── Per-day arrivals / departures / stay-overs for the DateHeader tooltip ────
@@ -453,6 +553,7 @@ export default function ReservationPage() {
         onNewBooking={() => setNewBookingState({ room: null, checkIn: data?.today ?? fromStr })}
         onRefresh={fetchData}
         isMobile={isMobile}
+        statusCountsToday={statusCountsToday}
       />
 
       {/* ──── Loading / Error ────

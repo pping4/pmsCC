@@ -31,7 +31,8 @@ export type LogCategory =
   | 'maintenance'
   | 'guest'
   | 'system'
-  | 'city_ledger';
+  | 'city_ledger'
+  | 'night_audit';
 
 /** Parameters for a single log entry */
 export interface LogActivityParams {
@@ -87,6 +88,7 @@ const CATEGORY_ICONS: Record<LogCategory, string> = {
   guest:         '👤',
   system:        '⚙️',
   city_ledger:   '🏢',
+  night_audit:   '🌙',
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

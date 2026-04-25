@@ -11,6 +11,7 @@ export async function GET(request: NextRequest) {
   const period = searchParams.get('period') || 'month'; // today | week | month | custom
   const fromParam = searchParams.get('from');
   const toParam = searchParams.get('to');
+  const sessionIdParam = searchParams.get('sessionId'); // CashSession filter
 
   const now = new Date();
   let fromDate: Date;
@@ -46,11 +47,20 @@ export async function GET(request: NextRequest) {
       fromDate = new Date(now.getFullYear(), now.getMonth(), 1);
   }
 
+  // When a cashier wants to audit their own shift, scope the invoice list to
+  // those that received at least one ACTIVE payment booked to that session.
+  // The `payments.some` predicate is indexed on `cashSessionId` and keeps the
+  // query to a single round-trip.
+  const sessionFilter = sessionIdParam
+    ? { payments: { some: { cashSessionId: sessionIdParam, status: 'ACTIVE' as const } } }
+    : {};
+
   // Get ALL paid invoices for the period
   const paidInvoices = await prisma.invoice.findMany({
     where: {
       status: 'paid',
       createdAt: { gte: fromDate, lte: toDate },
+      ...sessionFilter,
     },
     include: {
       guest: { select: { id: true, firstName: true, lastName: true } },

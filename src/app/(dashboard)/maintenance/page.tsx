@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { MAINTENANCE_PRIORITIES } from '@/lib/constants';
 import { formatCurrency, formatDate } from '@/lib/tax';
+import { useToast } from '@/components/ui';
 
 interface RoomType { name: string; }
 interface Room { id: string; number: string; floor: number; roomType: RoomType; }
@@ -31,6 +32,7 @@ const ISSUE_TYPES = [
 ];
 
 export default function MaintenancePage() {
+  const toast = useToast();
   const [tasks, setTasks] = useState<MaintenanceTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterPriority, setFilterPriority] = useState('all');
@@ -42,35 +44,65 @@ export default function MaintenancePage() {
   });
 
   const fetchTasks = useCallback(async () => {
-    const params = new URLSearchParams({ status: 'all' });
-    if (filterPriority !== 'all') params.set('priority', filterPriority);
-    const res = await fetch(`/api/maintenance?${params}`);
-    const data = await res.json();
-    setTasks(data);
-    setLoading(false);
-  }, [filterPriority]);
+    try {
+      const params = new URLSearchParams({ status: 'all' });
+      if (filterPriority !== 'all') params.set('priority', filterPriority);
+      const res = await fetch(`/api/maintenance?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTasks(data);
+    } catch (e) {
+      toast.error('โหลดรายการซ่อมไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [filterPriority, toast]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
   const updateStatus = async (id: string, newStatus: string) => {
-    await fetch(`/api/maintenance/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    await fetchTasks();
+    try {
+      const res = await fetch(`/api/maintenance/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchTasks();
+      toast.success('อัปเดตสถานะสำเร็จ');
+    } catch (e) {
+      toast.error('อัปเดตสถานะไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   const save = async () => {
+    if (saving) return;
+    if (!form.roomNumber.trim() || !form.issue.trim()) {
+      toast.warning('กรุณาระบุหมายเลขห้องและปัญหา');
+      return;
+    }
     setSaving(true);
-    await fetch('/api/maintenance', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form),
-    });
-    await fetchTasks();
-    setShowForm(false);
-    setSaving(false);
+    try {
+      const res = await fetch('/api/maintenance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchTasks();
+      setShowForm(false);
+      toast.success('บันทึกการซ่อมสำเร็จ');
+    } catch (e) {
+      toast.error('บันทึกการซ่อมไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const upd = (k: string, v: unknown) => setForm(p => ({ ...p, [k]: v }));

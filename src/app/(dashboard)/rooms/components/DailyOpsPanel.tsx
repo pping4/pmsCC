@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { fmtDate, fmtTime } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -203,6 +204,7 @@ interface Props {
 }
 
 export default function DailyOpsPanel({ onRefresh }: Props) {
+  const toast = useToast();
   const [report, setReport] = useState<DailyReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
@@ -211,10 +213,11 @@ export default function DailyOpsPanel({ onRefresh }: Props) {
     try {
       setLoading(true);
       const res = await fetch('/api/rooms/daily-report');
-      if (res.ok) {
-        setReport(await res.json());
-        setLastUpdated(new Date());
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setReport(await res.json());
+      setLastUpdated(new Date());
+    } catch (e) {
+      toast.error('โหลดรายงานประจำวันไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }

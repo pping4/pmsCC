@@ -2,7 +2,8 @@ import { getServerSession } from 'next-auth';
 import { redirect } from 'next/navigation';
 import { authOptions } from '@/lib/auth';
 import { Sidebar } from '@/components/layout/Sidebar';
-import { BottomNav } from '@/components/layout/BottomNav';
+import { MobileNav } from '@/components/layout/MobileNav';
+import { CommandPalette } from '@/components/layout/CommandPalette';
 import { Header } from '@/components/layout/Header';
 
 export default async function DashboardLayout({
@@ -46,10 +47,13 @@ export default async function DashboardLayout({
         </main>
       </div>
 
-      {/* Mobile Bottom Nav */}
+      {/* Mobile Bottom Nav + Drawer (all 20+ modules) */}
       <div className="lg:hidden">
-        <BottomNav />
+        <MobileNav />
       </div>
+
+      {/* Global Command Palette (Ctrl/Cmd + K) */}
+      <CommandPalette />
     </div>
   );
 }

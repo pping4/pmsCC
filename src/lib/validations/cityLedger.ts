@@ -46,12 +46,9 @@ export const ReceiveCLPaymentSchema = z.object({
   paymentMethod: z.enum(['cash', 'transfer', 'credit_card', 'promptpay']),
   paymentDate:   z.string().datetime({ message: 'รูปแบบวันที่ไม่ถูกต้อง' }),
   referenceNo:   z.string().max(100).optional(),
-  cashSessionId: z.string().uuid().optional(),
+  // Sprint 4B: `cashSessionId` is resolved server-side — never from client.
   notes:         z.string().max(500).optional(),
-}).refine(
-  (d) => d.paymentMethod !== 'cash' || !!d.cashSessionId,
-  { message: 'ต้องระบุกะแคชเชียร์สำหรับการชำระด้วยเงินสด', path: ['cashSessionId'] }
-);
+});
 
 export type ReceiveCLPaymentInput = z.infer<typeof ReceiveCLPaymentSchema>;
 

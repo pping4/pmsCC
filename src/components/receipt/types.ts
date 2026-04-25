@@ -3,10 +3,14 @@
  */
 
 export interface ReceiptLineItem {
-  description: string;
-  quantity?:   number;
-  unitPrice?:  number;
-  amount:      number;    // positive = charge, negative = credit/discount
+  description:  string;
+  quantity?:    number;
+  unitPrice?:   number;
+  amount:       number;    // positive = charge, negative = credit/discount
+  /** Billing period start — shown under description e.g. "2026-04-18" */
+  periodStart?: string;
+  /** Billing period end — shown under description e.g. "2026-04-27" */
+  periodEnd?:   string;
 }
 
 export type ReceiptType =

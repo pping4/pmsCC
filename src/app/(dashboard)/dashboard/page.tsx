@@ -1,9 +1,13 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { formatCurrency, formatDate } from '@/lib/tax';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { formatCurrency } from '@/lib/tax';
 import { fmtDate } from '@/lib/date-format';
 import { ROOM_STATUSES, BOOKING_TYPES } from '@/lib/constants';
+import { useToast } from '@/components/ui';
+import { DataTable, type ColDef } from '@/components/data-table';
+
+const FONT = "'Sarabun', 'IBM Plex Sans Thai', sans-serif";
 
 // ── Time Period Types ─────────────────────────────────────────────────────────
 
@@ -218,18 +222,6 @@ function thDate(d: string | null | undefined) {
   return fmtDate(d);
 }
 
-// ── Shared table styles ───────────────────────────────────────────────────────
-// Note: these are overridden in dark mode via globals.css html.dark table th / td
-const TH: React.CSSProperties = {
-  padding: '8px 10px', textAlign: 'left', background: 'var(--surface-muted)',
-  borderBottom: '2px solid var(--border-default)', fontWeight: 700, fontSize: 12,
-  color: 'var(--text-secondary)', whiteSpace: 'nowrap',
-};
-const TD: React.CSSProperties = {
-  padding: '8px 10px', fontSize: 13, color: 'var(--text-primary)',
-  borderBottom: '1px solid var(--border-light)',
-};
-
 // ── StatCard ──────────────────────────────────────────────────────────────────
 
 const StatCard = ({
@@ -300,19 +292,10 @@ function DetailPanel({ title, onClose, children }: {
   );
 }
 
-function EmptyRow({ text = 'ไม่มีข้อมูล' }) {
-  return (
-    <tr>
-      <td colSpan={99} style={{ padding: '24px', textAlign: 'center', color: '#9ca3af', fontSize: 13 }}>
-        {text}
-      </td>
-    </tr>
-  );
-}
-
 // ── Main Dashboard ────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const toast = useToast();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeDetail, setActiveDetail] = useState<string | null>(null);
@@ -337,10 +320,11 @@ export default function DashboardPage() {
       setData(d);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
+      toast.error('โหลดแดชบอร์ดไม่สำเร็จ', err instanceof Error ? err.message : undefined);
     } finally {
       setLoading(false);
     }
-  }, [period, customFrom, customTo]);
+  }, [period, customFrom, customTo, toast]);
 
   useEffect(() => {
     fetchData();
@@ -349,6 +333,237 @@ export default function DashboardPage() {
   const toggle = (key: string) =>
     setActiveDetail((prev) => (prev === key ? null : key));
 
+  const today = new Date();
+  const todayFormatted = fmtDate(today);
+
+  // ── ColDef arrays for drill-down tables ─────────────────────────────────
+  // Defined BEFORE any conditional early return — React requires hooks
+  // (incl. useMemo) to be called in the same order every render.
+  // All use the shared <DataTable> which provides per-column filter/sort,
+  // export (xlsx/csv) and column-visibility toggle for free.
+
+  const roomCols = useMemo<ColDef<RoomItem, 'number'|'floor'|'typeName'|'status'|'notes'>[]>(() => [
+    { key: 'number',   label: 'ห้อง',     getValue: r => r.number,
+      render: r => <strong>{r.number}</strong> },
+    { key: 'floor',    label: 'ชั้น',     getValue: r => String(r.floor).padStart(3,'0'),
+      getLabel: r => String(r.floor), render: r => r.floor },
+    { key: 'typeName', label: 'ประเภท',   getValue: r => r.typeName, render: r => r.typeName },
+    { key: 'status',   label: 'สถานะ',    getValue: r => r.status,
+      getLabel: r => (ROOM_STATUSES[r.status as keyof typeof ROOM_STATUSES]?.label ?? r.status),
+      render: r => {
+        const s = ROOM_STATUSES[r.status as keyof typeof ROOM_STATUSES];
+        return (
+          <span style={{ display:'inline-flex', alignItems:'center', gap:4, padding:'2px 10px',
+            borderRadius:12, background:s?.bg||'#f9fafb', fontSize:11, fontWeight:700,
+            color:s?.color||'#6b7280' }}>
+            <span style={{ width:6, height:6, borderRadius:'50%', background:s?.color||'#6b7280', display:'inline-block' }} />
+            {s?.label||r.status}
+          </span>
+        );
+      } },
+    { key: 'notes',    label: 'หมายเหตุ', getValue: r => r.notes ?? '',
+      getLabel: r => r.notes || '-',
+      render: r => <span style={{ color:'#9ca3af', fontSize:12 }}>{r.notes || '-'}</span> },
+  ], []);
+
+  const availableRoomCols = useMemo<ColDef<RoomItem, 'number'|'floor'|'typeName'|'notes'>[]>(() => [
+    { key: 'number',   label: 'ห้อง',     getValue: r => r.number,
+      render: r => <strong style={{ color:'#16a34a' }}>{r.number}</strong> },
+    { key: 'floor',    label: 'ชั้น',     getValue: r => String(r.floor).padStart(3,'0'),
+      getLabel: r => String(r.floor), render: r => r.floor },
+    { key: 'typeName', label: 'ประเภท',   getValue: r => r.typeName, render: r => r.typeName },
+    { key: 'notes',    label: 'หมายเหตุ', getValue: r => r.notes ?? '',
+      getLabel: r => r.notes || '-',
+      render: r => <span style={{ color:'#9ca3af', fontSize:12 }}>{r.notes || '-'}</span> },
+  ], []);
+
+  const paidInvoiceCols = useMemo<ColDef<PaidInvoice, 'invoiceNumber'|'guestName'|'roomNumber'|'amount'|'paymentMethod'|'paidAt'>[]>(() => [
+    { key: 'invoiceNumber', label: 'Invoice', getValue: r => r.invoiceNumber,
+      render: r => <span style={{ fontFamily:'monospace', fontSize:12, color:'#6b7280' }}>{r.invoiceNumber}</span> },
+    { key: 'guestName',     label: 'ชื่อแขก', getValue: r => r.guestName,
+      render: r => <strong>{r.guestName}</strong> },
+    { key: 'roomNumber',    label: 'ห้อง',    getValue: r => r.roomNumber, render: r => r.roomNumber },
+    { key: 'amount',        label: 'ยอด',    align:'right',
+      getValue: r => String(Math.round(r.amount)).padStart(12,'0'),
+      getLabel: r => formatCurrency(r.amount),
+      render: r => <span style={{ fontWeight:700, fontFamily:'monospace', color:'#16a34a' }}>{formatCurrency(r.amount)}</span>,
+      aggregate:'sum', aggValue: r => r.amount },
+    { key: 'paymentMethod', label: 'วิธีชำระ',
+      getValue: r => r.paymentMethod ?? '',
+      getLabel: r => METHOD_LABEL[r.paymentMethod || ''] || r.paymentMethod || '-',
+      render: r => METHOD_LABEL[r.paymentMethod || ''] || r.paymentMethod || '-' },
+    { key: 'paidAt',        label: 'วันที่ชำระ',
+      getValue: r => r.paidAt ?? '',
+      getLabel: r => thDate(r.paidAt),
+      render: r => <span style={{ color:'#6b7280', fontSize:12 }}>{thDate(r.paidAt)}</span> },
+  ], []);
+
+  const outstandingInvoiceCols = useMemo<ColDef<OutstandingInvoice, 'invoiceNumber'|'guestName'|'roomNumber'|'bookingType'|'amount'|'dueDate'|'status'>[]>(() => [
+    { key: 'invoiceNumber', label: 'Invoice', getValue: r => r.invoiceNumber,
+      render: r => <span style={{ fontFamily:'monospace', fontSize:12, color:'#6b7280' }}>{r.invoiceNumber}</span> },
+    { key: 'guestName',     label: 'ชื่อแขก', getValue: r => r.guestName,
+      render: r => <strong>{r.guestName}</strong> },
+    { key: 'roomNumber',    label: 'ห้อง',    getValue: r => r.roomNumber, render: r => r.roomNumber },
+    { key: 'bookingType',   label: 'ประเภท',
+      getValue: r => r.bookingType,
+      getLabel: r => BOOKING_TYPE_LABEL[r.bookingType] || r.bookingType,
+      render: r => <span style={{ fontSize:12, color:'#6b7280' }}>{BOOKING_TYPE_LABEL[r.bookingType] || r.bookingType}</span> },
+    { key: 'amount',        label: 'ยอด',    align:'right',
+      getValue: r => String(Math.round(r.amount)).padStart(12,'0'),
+      getLabel: r => formatCurrency(r.amount),
+      render: r => <span style={{ fontWeight:700, fontFamily:'monospace', color:'#dc2626' }}>{formatCurrency(r.amount)}</span>,
+      aggregate:'sum', aggValue: r => r.amount },
+    { key: 'dueDate',       label: 'ครบกำหนด',
+      getValue: r => r.dueDate,
+      getLabel: r => thDate(r.dueDate),
+      render: r => {
+        const isOverdue = new Date(r.dueDate) < today;
+        return <span style={{ color:isOverdue?'#ef4444':'#6b7280', fontWeight:isOverdue?700:400, fontSize:12 }}>
+          {isOverdue?'⚠️ ':''}{thDate(r.dueDate)}
+        </span>;
+      } },
+    { key: 'status',        label: 'สถานะ',
+      getValue: r => r.badDebt ? '__baddebt__' : (new Date(r.dueDate) < today ? '__overdue__' : '__unpaid__'),
+      getLabel: r => r.badDebt ? 'หนี้เสีย' : (new Date(r.dueDate) < today ? 'เกินกำหนด' : 'ค้างชำระ'),
+      render: r => {
+        const isOverdue = new Date(r.dueDate) < today;
+        return (
+          <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600,
+            color: r.badDebt?'#991b1b':isOverdue?'#ef4444':'#f59e0b',
+            background: r.badDebt?'#fef2f2':isOverdue?'#fee2e2':'#fffbeb' }}>
+            {r.badDebt?'หนี้เสีย':isOverdue?'เกินกำหนด':'ค้างชำระ'}
+          </span>
+        );
+      } },
+  ], [today]);
+
+  const checkedInGuestCols = useMemo<ColDef<CheckedInGuest, 'guestName'|'roomNumber'|'roomType'|'bookingType'|'checkIn'|'checkOut'|'rate'|'nationality'>[]>(() => [
+    { key: 'guestName',   label: 'ชื่อ-นามสกุล', getValue: r => r.guestName,
+      render: r => <strong>{r.guestName}</strong> },
+    { key: 'roomNumber',  label: 'ห้อง', getValue: r => r.roomNumber,
+      render: r => <strong style={{ color:'#2563eb' }}>{r.roomNumber}</strong> },
+    { key: 'roomType',    label: 'ประเภทห้อง',
+      getValue: r => r.roomType,
+      render: r => <span style={{ fontSize:12, color:'#6b7280' }}>{r.roomType}</span> },
+    { key: 'bookingType', label: 'ประเภทพัก',
+      getValue: r => r.bookingType,
+      getLabel: r => BOOKING_TYPE_LABEL[r.bookingType] || r.bookingType,
+      render: r => <span style={{ fontSize:12 }}>{BOOKING_TYPE_LABEL[r.bookingType] || r.bookingType}</span> },
+    { key: 'checkIn',     label: 'เข้า',
+      getValue: r => r.checkIn, getLabel: r => thDate(r.checkIn),
+      render: r => <span style={{ fontSize:12 }}>{thDate(r.checkIn)}</span> },
+    { key: 'checkOut',    label: 'ออก',
+      getValue: r => r.checkOut, getLabel: r => thDate(r.checkOut),
+      render: r => <span style={{ fontSize:12 }}>{thDate(r.checkOut)}</span> },
+    { key: 'rate',        label: 'ราคา/คืน', align:'right',
+      getValue: r => String(Math.round(r.rate)).padStart(10,'0'),
+      getLabel: r => formatCurrency(r.rate),
+      render: r => <span style={{ fontFamily:'monospace', fontWeight:600 }}>{formatCurrency(r.rate)}</span>,
+      aggregate:'sum', aggValue: r => r.rate },
+    { key: 'nationality', label: 'สัญชาติ',
+      getValue: r => r.nationality,
+      render: r => <span style={{ fontSize:12, color: r.nationality !== 'Thai' ? '#ef4444' : '#6b7280' }}>
+        {r.nationality !== 'Thai' ? '🌍 ' : ''}{r.nationality}
+      </span> },
+  ], []);
+
+  const tm30Cols = useMemo<ColDef<TM30Item, 'fullName'|'nationality'|'roomNumber'|'floor'|'isCheckedIn'>[]>(() => [
+    { key: 'fullName',    label: 'ชื่อ-นามสกุล',
+      getValue: r => `${r.firstName} ${r.lastName}`,
+      render: r => <strong>{r.firstName} {r.lastName}</strong> },
+    { key: 'nationality', label: 'สัญชาติ',
+      getValue: r => r.nationality,
+      render: r => <span style={{ color:'#ef4444', fontWeight:600 }}>🌍 {r.nationality}</span> },
+    { key: 'roomNumber',  label: 'ห้อง', getValue: r => r.roomNumber,
+      render: r => <strong>{r.roomNumber}</strong> },
+    { key: 'floor',       label: 'ชั้น',
+      getValue: r => r.floor != null ? String(r.floor).padStart(3,'0') : '',
+      getLabel: r => r.floor != null ? String(r.floor) : '-',
+      render: r => r.floor ?? '-' },
+    { key: 'isCheckedIn', label: 'สถานะ',
+      getValue: r => r.isCheckedIn ? '__in__' : '__out__',
+      getLabel: r => r.isCheckedIn ? 'กำลังพัก' : 'ไม่ได้พัก',
+      render: r => (
+        <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600,
+          color:r.isCheckedIn?'#16a34a':'#6b7280',
+          background:r.isCheckedIn?'#dcfce7':'#f3f4f6' }}>
+          {r.isCheckedIn?'🏠 กำลังพัก':'ไม่ได้พัก'}
+        </span>
+      ) },
+  ], []);
+
+  const hkTaskCols = useMemo<ColDef<HKTask, 'taskNumber'|'roomNumber'|'floor'|'taskType'|'priority'|'status'|'scheduledAt'|'assignedTo'>[]>(() => [
+    { key: 'taskNumber',  label: 'เลขที่', getValue: r => r.taskNumber,
+      render: r => <span style={{ fontFamily:'monospace', fontSize:11, color:'#9ca3af' }}>{r.taskNumber}</span> },
+    { key: 'roomNumber',  label: 'ห้อง', getValue: r => r.roomNumber,
+      render: r => <strong>{r.roomNumber}</strong> },
+    { key: 'floor',       label: 'ชั้น',
+      getValue: r => String(r.floor).padStart(3,'0'),
+      getLabel: r => String(r.floor), render: r => r.floor },
+    { key: 'taskType',    label: 'ประเภทงาน', getValue: r => r.taskType, render: r => r.taskType },
+    { key: 'priority',    label: 'ความสำคัญ',
+      getValue: r => r.priority,
+      getLabel: r => (PRIORITY_LABEL[r.priority] ?? PRIORITY_LABEL.normal).label,
+      render: r => {
+        const p = PRIORITY_LABEL[r.priority] || PRIORITY_LABEL.normal;
+        return <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600, color:p.color, background:p.bg }}>{p.label}</span>;
+      } },
+    { key: 'status',      label: 'สถานะ',
+      getValue: r => r.status,
+      getLabel: r => r.status === 'in_progress' ? 'กำลังทำ' : 'รอทำ',
+      render: r => (
+        <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600,
+          color:r.status==='in_progress'?'#2563eb':'#f59e0b',
+          background:r.status==='in_progress'?'#dbeafe':'#fffbeb' }}>
+          {r.status==='in_progress'?'🔄 กำลังทำ':'⏳ รอทำ'}
+        </span>
+      ) },
+    { key: 'scheduledAt', label: 'กำหนดวัน',
+      getValue: r => r.scheduledAt, getLabel: r => thDate(r.scheduledAt),
+      render: r => <span style={{ fontSize:12, color:'#6b7280' }}>{thDate(r.scheduledAt)}</span> },
+    { key: 'assignedTo',  label: 'มอบหมาย',
+      getValue: r => r.assignedTo ?? '',
+      getLabel: r => r.assignedTo || '—',
+      render: r => <span style={{ fontSize:12, color: r.assignedTo ? '#374151' : '#9ca3af' }}>{r.assignedTo || '—'}</span> },
+  ], []);
+
+  const mtTaskCols = useMemo<ColDef<MTTask, 'taskNumber'|'roomNumber'|'floor'|'issue'|'priority'|'status'|'reportDate'|'assignedTo'>[]>(() => [
+    { key: 'taskNumber',  label: 'เลขที่', getValue: r => r.taskNumber,
+      render: r => <span style={{ fontFamily:'monospace', fontSize:11, color:'#9ca3af' }}>{r.taskNumber}</span> },
+    { key: 'roomNumber',  label: 'ห้อง', getValue: r => r.roomNumber,
+      render: r => <strong>{r.roomNumber}</strong> },
+    { key: 'floor',       label: 'ชั้น',
+      getValue: r => String(r.floor).padStart(3,'0'),
+      getLabel: r => String(r.floor), render: r => r.floor },
+    { key: 'issue',       label: 'รายละเอียด', getValue: r => r.issue,
+      render: r => <span style={{ maxWidth:200, display:'inline-block' }}>{r.issue}</span> },
+    { key: 'priority',    label: 'ความสำคัญ',
+      getValue: r => r.priority,
+      getLabel: r => (PRIORITY_LABEL[r.priority] ?? PRIORITY_LABEL.medium).label,
+      render: r => {
+        const p = PRIORITY_LABEL[r.priority] || PRIORITY_LABEL.medium;
+        return <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600, color:p.color, background:p.bg }}>{p.label}</span>;
+      } },
+    { key: 'status',      label: 'สถานะ',
+      getValue: r => r.status,
+      getLabel: r => r.status === 'in_progress' ? 'ดำเนินการ' : 'เปิดใหม่',
+      render: r => (
+        <span style={{ display:'inline-flex', padding:'2px 8px', borderRadius:10, fontSize:11, fontWeight:600,
+          color:r.status==='in_progress'?'#2563eb':'#ef4444',
+          background:r.status==='in_progress'?'#dbeafe':'#fee2e2' }}>
+          {r.status==='in_progress'?'🔄 ดำเนินการ':'🔴 เปิดใหม่'}
+        </span>
+      ) },
+    { key: 'reportDate',  label: 'วันแจ้ง',
+      getValue: r => r.reportDate, getLabel: r => thDate(r.reportDate),
+      render: r => <span style={{ fontSize:12, color:'#6b7280' }}>{thDate(r.reportDate)}</span> },
+    { key: 'assignedTo',  label: 'มอบหมาย',
+      getValue: r => r.assignedTo ?? '',
+      getLabel: r => r.assignedTo || '—',
+      render: r => <span style={{ fontSize:12, color: r.assignedTo ? '#374151' : '#9ca3af' }}>{r.assignedTo || '—'}</span> },
+  ], []);
+
+  // ── Early returns AFTER all hooks ───────────────────────────────────────
   // First load — show full-screen spinner
   if (loading && !data) {
     return (
@@ -362,9 +577,6 @@ export default function DashboardPage() {
   }
 
   if (!data) return null;
-
-  const today = new Date();
-  const todayFormatted = fmtDate(today);
 
   return (
     <div style={{ fontFamily: "'Sarabun', 'IBM Plex Sans Thai', sans-serif", color: 'var(--text-primary)' }}>
@@ -498,69 +710,36 @@ export default function DashboardPage() {
               );
             })}
           </div>
-          {/* room table */}
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ชั้น</th>
-                  <th style={TH}>ประเภท</th>
-                  <th style={TH}>สถานะ</th>
-                  <th style={TH}>หมายเหตุ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.roomList.length === 0 ? <EmptyRow /> : data.roomList.map((r) => {
-                  const s = ROOM_STATUSES[r.status as keyof typeof ROOM_STATUSES];
-                  return (
-                    <tr key={r.id}>
-                      <td style={{ ...TD, fontWeight: 700 }}>{r.number}</td>
-                      <td style={TD}>{r.floor}</td>
-                      <td style={TD}>{r.typeName}</td>
-                      <td style={TD}>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 10px', borderRadius: 12, background: s?.bg || '#f9fafb', fontSize: 11, fontWeight: 700, color: s?.color || '#6b7280' }}>
-                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: s?.color || '#6b7280', display: 'inline-block' }} />
-                          {s?.label || r.status}
-                        </span>
-                      </td>
-                      <td style={{ ...TD, color: '#9ca3af', fontSize: 12 }}>{r.notes || '-'}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.occupancy"
+            exportFilename="pms_rooms_status"
+            exportSheetName="สถานะห้อง"
+            rows={data.roomList}
+            columns={roomCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'number', dir: 'asc' }}
+            emptyText="ไม่มีข้อมูลห้อง"
+            summaryLabel={(f, t) => <>🏠 {f}{f !== t ? `/${t}` : ''} ห้อง</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
       {/* ── 2. ห้องว่าง → รายชื่อห้องที่ available ────────────────────────── */}
       {activeDetail === 'available_rooms' && (
         <DetailPanel title={`🟢 ห้องว่างพร้อมรับแขก (${data.rooms.available} ห้อง)`} onClose={() => setActiveDetail(null)}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ชั้น</th>
-                  <th style={TH}>ประเภท</th>
-                  <th style={TH}>หมายเหตุ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.roomList.filter((r) => r.status === 'available').length === 0
-                  ? <EmptyRow text="ไม่มีห้องว่าง" />
-                  : data.roomList.filter((r) => r.status === 'available').map((r) => (
-                    <tr key={r.id}>
-                      <td style={{ ...TD, fontWeight: 700, color: '#16a34a' }}>{r.number}</td>
-                      <td style={TD}>{r.floor}</td>
-                      <td style={TD}>{r.typeName}</td>
-                      <td style={{ ...TD, color: '#9ca3af', fontSize: 12 }}>{r.notes || '-'}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.availableRooms"
+            exportFilename="pms_rooms_available"
+            exportSheetName="ห้องว่าง"
+            rows={data.roomList.filter(r => r.status === 'available')}
+            columns={availableRoomCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'number', dir: 'asc' }}
+            emptyText="ไม่มีห้องว่าง"
+            summaryLabel={(f, t) => <>🟢 {f}{f !== t ? `/${t}` : ''} ห้องว่าง</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
@@ -577,34 +756,18 @@ export default function DashboardPage() {
               <div style={{ fontSize: 20, fontWeight: 800, color: '#f59e0b', fontFamily: 'monospace' }}>{formatCurrency(data.revenue.pending)}</div>
             </div>
           </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>Invoice</th>
-                  <th style={TH}>ชื่อแขก</th>
-                  <th style={TH}>ห้อง</th>
-                  <th style={{ ...TH, textAlign: 'right' }}>ยอด</th>
-                  <th style={TH}>วิธีชำระ</th>
-                  <th style={TH}>วันที่ชำระ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.recentPaidInvoices.length === 0
-                  ? <EmptyRow text="ยังไม่มีรายการชำระเงิน" />
-                  : data.recentPaidInvoices.map((inv) => (
-                    <tr key={inv.id}>
-                      <td style={{ ...TD, fontFamily: 'monospace', fontSize: 12, color: '#6b7280' }}>{inv.invoiceNumber}</td>
-                      <td style={{ ...TD, fontWeight: 600 }}>{inv.guestName}</td>
-                      <td style={TD}>{inv.roomNumber}</td>
-                      <td style={{ ...TD, textAlign: 'right', fontWeight: 700, fontFamily: 'monospace', color: '#16a34a' }}>{formatCurrency(inv.amount)}</td>
-                      <td style={TD}>{METHOD_LABEL[inv.paymentMethod || ''] || inv.paymentMethod || '-'}</td>
-                      <td style={{ ...TD, color: '#6b7280', fontSize: 12 }}>{thDate(inv.paidAt)}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.revenue"
+            exportFilename="pms_revenue"
+            exportSheetName="รายรับ"
+            rows={data.recentPaidInvoices}
+            columns={paidInvoiceCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'paidAt', dir: 'desc' }}
+            emptyText="ยังไม่มีรายการชำระเงิน"
+            summaryLabel={(f, t) => <>💰 {f}{f !== t ? `/${t}` : ''} รายการ</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
@@ -623,85 +786,36 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>Invoice</th>
-                  <th style={TH}>ชื่อแขก</th>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ประเภท</th>
-                  <th style={{ ...TH, textAlign: 'right' }}>ยอด</th>
-                  <th style={TH}>ครบกำหนด</th>
-                  <th style={TH}>สถานะ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.outstandingBalance.invoices.length === 0
-                  ? <EmptyRow text="ไม่มีบิลค้างชำระ" />
-                  : data.outstandingBalance.invoices.map((inv) => {
-                    const isOverdue = new Date(inv.dueDate) < today;
-                    return (
-                      <tr key={inv.id}>
-                        <td style={{ ...TD, fontFamily: 'monospace', fontSize: 12, color: '#6b7280' }}>{inv.invoiceNumber}</td>
-                        <td style={{ ...TD, fontWeight: 600 }}>{inv.guestName}</td>
-                        <td style={TD}>{inv.roomNumber}</td>
-                        <td style={{ ...TD, fontSize: 12, color: '#6b7280' }}>{BOOKING_TYPE_LABEL[inv.bookingType] || inv.bookingType}</td>
-                        <td style={{ ...TD, textAlign: 'right', fontWeight: 700, fontFamily: 'monospace', color: '#dc2626' }}>{formatCurrency(inv.amount)}</td>
-                        <td style={{ ...TD, color: isOverdue ? '#ef4444' : '#6b7280', fontWeight: isOverdue ? 700 : 400, fontSize: 12 }}>
-                          {isOverdue ? '⚠️ ' : ''}{thDate(inv.dueDate)}
-                        </td>
-                        <td style={TD}>
-                          <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: inv.badDebt ? '#991b1b' : isOverdue ? '#ef4444' : '#f59e0b', background: inv.badDebt ? '#fef2f2' : isOverdue ? '#fee2e2' : '#fffbeb' }}>
-                            {inv.badDebt ? 'หนี้เสีย' : inv.status === 'overdue' ? 'เกินกำหนด' : 'ค้างชำระ'}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.outstanding"
+            exportFilename="pms_invoices_outstanding"
+            exportSheetName="บิลค้างชำระ"
+            rows={data.outstandingBalance.invoices}
+            columns={outstandingInvoiceCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'dueDate', dir: 'asc' }}
+            emptyText="ไม่มีบิลค้างชำระ"
+            summaryLabel={(f, t) => <>⏳ {f}{f !== t ? `/${t}` : ''} ใบ</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
       {/* ── 5. กำลังเข้าพัก → ตารางลูกค้าที่อยู่ในห้องตอนนี้ ──────────────── */}
       {activeDetail === 'guests' && (
         <DetailPanel title={`👥 ลูกค้าที่กำลังเข้าพัก (${data.guests.checkedIn} คน)`} onClose={() => setActiveDetail(null)}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>ชื่อ-นามสกุล</th>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ประเภทห้อง</th>
-                  <th style={TH}>ประเภทพัก</th>
-                  <th style={TH}>เข้า</th>
-                  <th style={TH}>ออก</th>
-                  <th style={{ ...TH, textAlign: 'right' }}>ราคา/คืน</th>
-                  <th style={TH}>สัญชาติ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.checkedInGuests.length === 0
-                  ? <EmptyRow text="ไม่มีลูกค้าเข้าพัก" />
-                  : data.checkedInGuests.map((g) => (
-                    <tr key={g.bookingId}>
-                      <td style={{ ...TD, fontWeight: 600 }}>{g.guestName}</td>
-                      <td style={{ ...TD, fontWeight: 700, color: '#2563eb' }}>{g.roomNumber}</td>
-                      <td style={{ ...TD, fontSize: 12, color: '#6b7280' }}>{g.roomType}</td>
-                      <td style={{ ...TD, fontSize: 12 }}>{BOOKING_TYPE_LABEL[g.bookingType] || g.bookingType}</td>
-                      <td style={{ ...TD, fontSize: 12 }}>{thDate(g.checkIn)}</td>
-                      <td style={{ ...TD, fontSize: 12 }}>{thDate(g.checkOut)}</td>
-                      <td style={{ ...TD, textAlign: 'right', fontFamily: 'monospace', fontWeight: 600 }}>{formatCurrency(g.rate)}</td>
-                      <td style={{ ...TD, fontSize: 12, color: g.nationality !== 'Thai' ? '#ef4444' : '#6b7280' }}>
-                        {g.nationality !== 'Thai' ? '🌍 ' : ''}{g.nationality}
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.checkedInGuests"
+            exportFilename="pms_guests_checkedin"
+            exportSheetName="ลูกค้าเข้าพัก"
+            rows={data.checkedInGuests}
+            columns={checkedInGuestCols}
+            rowKey={r => r.bookingId}
+            defaultSort={{ col: 'checkIn', dir: 'asc' }}
+            emptyText="ไม่มีลูกค้าเข้าพัก"
+            summaryLabel={(f, t) => <>👥 {f}{f !== t ? `/${t}` : ''} คน</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
@@ -711,34 +825,18 @@ export default function DashboardPage() {
           {data.tm30List.length === 0 ? (
             <div style={{ textAlign: 'center', padding: '24px', color: '#22c55e', fontWeight: 600 }}>✅ ไม่มีค้าง — แจ้งครบแล้ว</div>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    <th style={TH}>ชื่อ-นามสกุล</th>
-                    <th style={TH}>สัญชาติ</th>
-                    <th style={TH}>ห้อง</th>
-                    <th style={TH}>ชั้น</th>
-                    <th style={TH}>สถานะ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.tm30List.map((g) => (
-                    <tr key={g.id}>
-                      <td style={{ ...TD, fontWeight: 600 }}>{g.firstName} {g.lastName}</td>
-                      <td style={{ ...TD, color: '#ef4444', fontWeight: 600 }}>🌍 {g.nationality}</td>
-                      <td style={{ ...TD, fontWeight: 700 }}>{g.roomNumber}</td>
-                      <td style={TD}>{g.floor ?? '-'}</td>
-                      <td style={TD}>
-                        <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: g.isCheckedIn ? '#16a34a' : '#6b7280', background: g.isCheckedIn ? '#dcfce7' : '#f3f4f6' }}>
-                          {g.isCheckedIn ? '🏠 กำลังพัก' : 'ไม่ได้พัก'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              tableKey="dashboard.tm30"
+              exportFilename="pms_tm30_pending"
+              exportSheetName="ตม30 ค้าง"
+              rows={data.tm30List}
+              columns={tm30Cols}
+              rowKey={r => r.id}
+              defaultSort={{ col: 'roomNumber', dir: 'asc' }}
+              emptyText="ไม่มีค้าง"
+              summaryLabel={(f, t) => <>🛂 {f}{f !== t ? `/${t}` : ''} คน</>}
+              fontFamily={FONT}
+            />
           )}
         </DetailPanel>
       )}
@@ -746,102 +844,36 @@ export default function DashboardPage() {
       {/* ── 7. แม่บ้าน → รายการงานที่รอ/กำลังทำ ───────────────────────────── */}
       {activeDetail === 'housekeeping' && (
         <DetailPanel title={`🧹 งานแม่บ้านที่ยังค้างอยู่ (${data.housekeeping.pending + data.housekeeping.inProgress} งาน)`} onClose={() => setActiveDetail(null)}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>เลขที่</th>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ชั้น</th>
-                  <th style={TH}>ประเภทงาน</th>
-                  <th style={TH}>ความสำคัญ</th>
-                  <th style={TH}>สถานะ</th>
-                  <th style={TH}>กำหนดวัน</th>
-                  <th style={TH}>มอบหมาย</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.housekeepingList.length === 0
-                  ? <EmptyRow text="ไม่มีงานค้าง" />
-                  : data.housekeepingList.map((t) => {
-                    const p = PRIORITY_LABEL[t.priority] || PRIORITY_LABEL['normal'];
-                    return (
-                      <tr key={t.id}>
-                        <td style={{ ...TD, fontFamily: 'monospace', fontSize: 11, color: '#9ca3af' }}>{t.taskNumber}</td>
-                        <td style={{ ...TD, fontWeight: 700 }}>{t.roomNumber}</td>
-                        <td style={TD}>{t.floor}</td>
-                        <td style={TD}>{t.taskType}</td>
-                        <td style={TD}>
-                          <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: p.color, background: p.bg }}>
-                            {p.label}
-                          </span>
-                        </td>
-                        <td style={TD}>
-                          <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: t.status === 'in_progress' ? '#2563eb' : '#f59e0b', background: t.status === 'in_progress' ? '#dbeafe' : '#fffbeb' }}>
-                            {t.status === 'in_progress' ? '🔄 กำลังทำ' : '⏳ รอทำ'}
-                          </span>
-                        </td>
-                        <td style={{ ...TD, fontSize: 12, color: '#6b7280' }}>{thDate(t.scheduledAt)}</td>
-                        <td style={{ ...TD, fontSize: 12, color: t.assignedTo ? '#374151' : '#9ca3af' }}>
-                          {t.assignedTo || '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.housekeeping"
+            exportFilename="pms_housekeeping"
+            exportSheetName="งานแม่บ้าน"
+            rows={data.housekeepingList}
+            columns={hkTaskCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'scheduledAt', dir: 'asc' }}
+            emptyText="ไม่มีงานค้าง"
+            summaryLabel={(f, t) => <>🧹 {f}{f !== t ? `/${t}` : ''} งาน</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
       {/* ── 8. งานซ่อม → รายการงานซ่อมที่ค้างอยู่ ────────────────────────── */}
       {activeDetail === 'maintenance' && (
         <DetailPanel title={`🔧 งานซ่อมบำรุงที่ยังค้างอยู่ (${data.maintenance.open} งาน)`} onClose={() => setActiveDetail(null)}>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-              <thead>
-                <tr>
-                  <th style={TH}>เลขที่</th>
-                  <th style={TH}>ห้อง</th>
-                  <th style={TH}>ชั้น</th>
-                  <th style={TH}>รายละเอียด</th>
-                  <th style={TH}>ความสำคัญ</th>
-                  <th style={TH}>สถานะ</th>
-                  <th style={TH}>วันแจ้ง</th>
-                  <th style={TH}>มอบหมาย</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.maintenanceList.length === 0
-                  ? <EmptyRow text="ไม่มีงานซ่อมค้าง" />
-                  : data.maintenanceList.map((t) => {
-                    const p = PRIORITY_LABEL[t.priority] || PRIORITY_LABEL['medium'];
-                    return (
-                      <tr key={t.id}>
-                        <td style={{ ...TD, fontFamily: 'monospace', fontSize: 11, color: '#9ca3af' }}>{t.taskNumber}</td>
-                        <td style={{ ...TD, fontWeight: 700 }}>{t.roomNumber}</td>
-                        <td style={TD}>{t.floor}</td>
-                        <td style={{ ...TD, maxWidth: 200 }}>{t.issue}</td>
-                        <td style={TD}>
-                          <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: p.color, background: p.bg }}>
-                            {p.label}
-                          </span>
-                        </td>
-                        <td style={TD}>
-                          <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: t.status === 'in_progress' ? '#2563eb' : '#ef4444', background: t.status === 'in_progress' ? '#dbeafe' : '#fee2e2' }}>
-                            {t.status === 'in_progress' ? '🔄 ดำเนินการ' : '🔴 เปิดใหม่'}
-                          </span>
-                        </td>
-                        <td style={{ ...TD, fontSize: 12, color: '#6b7280' }}>{thDate(t.reportDate)}</td>
-                        <td style={{ ...TD, fontSize: 12, color: t.assignedTo ? '#374151' : '#9ca3af' }}>
-                          {t.assignedTo || '—'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
+          <DataTable
+            tableKey="dashboard.maintenance"
+            exportFilename="pms_maintenance"
+            exportSheetName="งานซ่อม"
+            rows={data.maintenanceList}
+            columns={mtTaskCols}
+            rowKey={r => r.id}
+            defaultSort={{ col: 'reportDate', dir: 'desc' }}
+            emptyText="ไม่มีงานซ่อมค้าง"
+            summaryLabel={(f, t) => <>🔧 {f}{f !== t ? `/${t}` : ''} งาน</>}
+            fontFamily={FONT}
+          />
         </DetailPanel>
       )}
 
@@ -871,43 +903,18 @@ export default function DashboardPage() {
             ))}
           </div>
           {outstandingExpanded && (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr>
-                    <th style={TH}>Invoice</th>
-                    <th style={TH}>ชื่อแขก</th>
-                    <th style={TH}>ห้อง</th>
-                    <th style={TH}>ประเภท</th>
-                    <th style={{ ...TH, textAlign: 'right' }}>ยอด</th>
-                    <th style={TH}>ครบกำหนด</th>
-                    <th style={TH}>สถานะ</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.outstandingBalance.invoices.length === 0
-                    ? <EmptyRow text="ไม่มีบิลค้างชำระ" />
-                    : data.outstandingBalance.invoices.map((inv) => {
-                      const isOverdue = new Date(inv.dueDate) < today;
-                      return (
-                        <tr key={inv.id}>
-                          <td style={{ ...TD, fontFamily: 'monospace', fontSize: 12, color: '#6b7280' }}>{inv.invoiceNumber}</td>
-                          <td style={{ ...TD, fontWeight: 600 }}>{inv.guestName}</td>
-                          <td style={TD}>{inv.roomNumber}</td>
-                          <td style={{ ...TD, fontSize: 12, color: '#6b7280' }}>{BOOKING_TYPE_LABEL[inv.bookingType] || inv.bookingType}</td>
-                          <td style={{ ...TD, textAlign: 'right', fontWeight: 700, fontFamily: 'monospace', color: '#dc2626' }}>{formatCurrency(inv.amount)}</td>
-                          <td style={{ ...TD, color: isOverdue ? '#ef4444' : '#6b7280', fontSize: 12, fontWeight: isOverdue ? 700 : 400 }}>{thDate(inv.dueDate)}</td>
-                          <td style={TD}>
-                            <span style={{ display: 'inline-flex', padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600, color: inv.badDebt ? '#991b1b' : isOverdue ? '#ef4444' : '#f59e0b', background: inv.badDebt ? '#fef2f2' : isOverdue ? '#fee2e2' : '#fffbeb' }}>
-                              {inv.badDebt ? 'หนี้เสีย' : isOverdue ? 'เกินกำหนด' : 'ค้างชำระ'}
-                            </span>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                </tbody>
-              </table>
-            </div>
+            <DataTable
+              tableKey="dashboard.outstandingBottom"
+              exportFilename="pms_invoices_outstanding_all"
+              exportSheetName="บิลค้างชำระทั้งหมด"
+              rows={data.outstandingBalance.invoices}
+              columns={outstandingInvoiceCols}
+              rowKey={r => r.id}
+              defaultSort={{ col: 'dueDate', dir: 'asc' }}
+              emptyText="ไม่มีบิลค้างชำระ"
+              summaryLabel={(f, t) => <>💸 {f}{f !== t ? `/${t}` : ''} ใบ</>}
+              fontFamily={FONT}
+            />
           )}
         </div>
       )}

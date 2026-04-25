@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logActivity } from '@/services/activityLog.service';
+import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 
 export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -18,12 +19,32 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
       if (data.status === 'completed' || data.status === 'inspected') {
         updateData.completedAt = new Date();
       }
-      if (data.status === 'inspected') {
-        const existingTask = await tx.housekeepingTask.findUnique({ where: { id: params.id } });
-        if (existingTask) {
-          await tx.room.update({
-            where: { id: existingTask.roomId },
-            data: { status: 'available' },
+
+      const existingTask = await tx.housekeepingTask.findUnique({ where: { id: params.id } });
+      if (existingTask) {
+        // Side-effects on room status per task state change. Each guarded by
+        // canTransition — if another subsystem (maintenance) has taken the
+        // room, don't overwrite.
+        const live = await tx.room.findUniqueOrThrow({
+          where: { id: existingTask.roomId },
+          select: { status: true },
+        });
+        const userId   = session.user?.email ?? 'system';
+        const userName = session.user?.name ?? undefined;
+
+        if (data.status === 'in_progress' && canTransition(live.status, 'cleaning')) {
+          await transitionRoom(tx, {
+            roomId: existingTask.roomId,
+            to:     'cleaning',
+            reason: 'housekeeping started',
+            userId, userName,
+          });
+        } else if (data.status === 'inspected' && canTransition(live.status, 'available')) {
+          await transitionRoom(tx, {
+            roomId: existingTask.roomId,
+            to:     'available',
+            reason: 'housekeeping inspected',
+            userId, userName,
           });
         }
       }

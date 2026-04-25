@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { fmtDate } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 import RoomInspectionTab from './components/RoomInspectionTab';
 import RoomHistoryTab from './components/RoomHistoryTab';
 import DailyOpsPanel from './components/DailyOpsPanel';
@@ -74,7 +75,14 @@ interface Room {
   currentBooking: Booking | null;
   nextBooking: NextBooking | null;
   hasMaintenance: boolean;
+  housekeepingTask: { id: string; status: string; priority: string; taskType: string } | null;
 }
+
+const HK_BADGE: Record<string, { label: string; bg: string; fg: string; icon: string }> = {
+  pending:     { label: 'รอทำความสะอาด', bg: '#fef3c7', fg: '#92400e', icon: '🧹' },
+  in_progress: { label: 'กำลังทำความสะอาด', bg: '#dbeafe', fg: '#1e40af', icon: '🧽' },
+  completed:   { label: 'รอตรวจ', bg: '#dcfce7', fg: '#166534', icon: '🔍' },
+};
 
 // ─── Status config ────────────────────────────────────────────────────────────
 
@@ -164,6 +172,19 @@ function RoomCard({ room, onClick }: { room: Room; onClick: () => void }) {
           position: 'absolute', top: 7, right: 18,
           fontSize: 9, color: '#dc2626',
         }}>🔧</div>
+      )}
+
+      {/* Housekeeping task indicator */}
+      {room.housekeepingTask && HK_BADGE[room.housekeepingTask.status] && (
+        <div
+          title={HK_BADGE[room.housekeepingTask.status].label}
+          style={{
+            position: 'absolute', top: 7, right: room.hasMaintenance ? 30 : 18,
+            fontSize: 9,
+          }}
+        >
+          {HK_BADGE[room.housekeepingTask.status].icon}
+        </div>
       )}
 
       {/* Next booking indicator (blue dot bottom-left) */}
@@ -260,6 +281,7 @@ function RoomCard({ room, onClick }: { room: Room; onClick: () => void }) {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function RoomsPage() {
+  const toast = useToast();
   const router = useRouter();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
@@ -272,11 +294,17 @@ export default function RoomsPage() {
   const [modalTab, setModalTab] = useState<'info' | 'history' | 'inspection'>('info');
 
   const fetchRooms = useCallback(async () => {
-    const res = await fetch('/api/rooms');
-    const data = await res.json();
-    setRooms(data);
-    setLoading(false);
-  }, []);
+    try {
+      const res = await fetch('/api/rooms');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRooms(data);
+    } catch (e) {
+      toast.error('โหลดข้อมูลห้องไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
   useEffect(() => { fetchRooms(); }, [fetchRooms]);
 
@@ -305,16 +333,27 @@ export default function RoomsPage() {
   };
 
   const updateStatus = async () => {
+    if (updatingStatus) return;
     if (!selectedRoom || newStatus === selectedRoom.status) return;
     setUpdatingStatus(true);
-    await fetch(`/api/rooms/${selectedRoom.id}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    await fetchRooms();
-    setSelectedRoom(prev => prev ? { ...prev, status: newStatus } : null);
-    setUpdatingStatus(false);
+    try {
+      const res = await fetch(`/api/rooms/${selectedRoom.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchRooms();
+      setSelectedRoom(prev => prev ? { ...prev, status: newStatus } : null);
+      toast.success('อัปเดตสถานะห้องสำเร็จ');
+    } catch (e) {
+      toast.error('อัปเดตสถานะห้องไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setUpdatingStatus(false);
+    }
   };
 
   if (loading) {
@@ -684,7 +723,7 @@ export default function RoomsPage() {
                         <div style={{ display: 'flex', gap: 8, marginBottom: 14 }}>
                           {booking.status === 'confirmed' && (
                             <button
-                              onClick={() => { setSelectedRoom(null); router.push('/checkin'); }}
+                              onClick={() => { setSelectedRoom(null); router.push(`/reservation?booking=${encodeURIComponent(booking.id)}`); }}
                               style={{
                                 flex: 1, padding: '9px', borderRadius: 8, border: 'none', cursor: 'pointer',
                                 background: '#1e40af', color: '#fff', fontSize: 12, fontWeight: 700,
@@ -695,7 +734,7 @@ export default function RoomsPage() {
                           )}
                           {booking.status === 'checked_in' && (
                             <button
-                              onClick={() => { setSelectedRoom(null); router.push('/checkin?tab=checkout'); }}
+                              onClick={() => { setSelectedRoom(null); router.push(`/reservation?booking=${encodeURIComponent(booking.id)}`); }}
                               style={{
                                 flex: 1, padding: '9px', borderRadius: 8, border: 'none', cursor: 'pointer',
                                 background: '#7c3aed', color: '#fff', fontSize: 12, fontWeight: 700,

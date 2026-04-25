@@ -33,6 +33,8 @@ import {
 } from '@/services/folio.service';
 import { recalculateFolioBalance } from '@/services/folio.service';
 import { generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
+import { postPaymentReceived } from '@/services/ledger.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { logActivity }       from '@/services/activityLog.service';
 
 const ExtendSchema = z.object({
@@ -43,7 +45,6 @@ const ExtendSchema = z.object({
   /** Whether to collect payment right now */
   collectNow:    z.boolean().default(false),
   paymentMethod: z.enum(['cash', 'transfer', 'credit_card']).optional(),
-  cashSessionId: z.string().optional(),
   notes:         z.string().max(500).optional(),
 });
 
@@ -67,15 +68,14 @@ export async function POST(
     );
   }
 
-  const { newCheckOut: newCheckOutStr, newRate, collectNow, paymentMethod, cashSessionId, notes } = parsed.data;
+  const { newCheckOut: newCheckOutStr, newRate, collectNow, paymentMethod, notes } = parsed.data;
 
   // Validate payment info when collecting now
   if (collectNow && !paymentMethod) {
     return NextResponse.json({ error: 'ต้องระบุวิธีการชำระเงิน' }, { status: 422 });
   }
-  if (collectNow && paymentMethod === 'cash' && !cashSessionId) {
-    return NextResponse.json({ error: 'ต้องระบุกะแคชเชียร์สำหรับการชำระด้วยเงินสด' }, { status: 422 });
-  }
+  // Sprint 4B: cashSessionId is resolved server-side from the caller's open
+  // shift — never accepted from the client.
 
   const userId   = session.user.id   ?? session.user.email ?? 'system';
   const userName = session.user.name ?? undefined;
@@ -242,6 +242,18 @@ export async function POST(
             },
           });
 
+          // Sprint 4B: auto-resolve cash session from the caller's open shift
+          let resolvedCashSessionId: string | null = null;
+          let resolvedCashBoxId:     string | null = null;
+          if (paymentMethod === 'cash') {
+            const active = await getActiveSessionForUser(tx, userId);
+            if (!active) {
+              throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
+            }
+            resolvedCashSessionId = active.id;
+            resolvedCashBoxId     = active.cashBoxId;
+          }
+
           // Create Payment record
           const [paymentNumber, receiptNumber] = await Promise.all([
             generatePaymentNumber(tx),
@@ -257,7 +269,8 @@ export async function POST(
               amount:         new Prisma.Decimal(invResult.grandTotal),
               paymentMethod:  paymentMethod as never,
               paymentDate:    new Date(),
-              cashSessionId:  cashSessionId ?? null,
+              cashSessionId:  resolvedCashSessionId,
+              cashBoxId:      resolvedCashBoxId,
               status:         'ACTIVE' as never,
               receivedBy:     userId,
               notes:          notes ?? `ต่ออายุการจอง +${extraDays} วัน`,
@@ -276,6 +289,14 @@ export async function POST(
               invoiceId: invResult.invoiceId,
               amount:    new Prisma.Decimal(invResult.grandTotal),
             },
+          });
+
+          // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
+          await postPaymentReceived(tx, {
+            paymentMethod,
+            amount:    invResult.grandTotal,
+            paymentId: payment.id,
+            createdBy: userId,
           });
         }
       }

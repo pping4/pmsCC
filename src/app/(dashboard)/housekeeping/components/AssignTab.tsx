@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useToast } from '@/components/ui';
 
 interface MaidTeam {
   id: string;
@@ -8,22 +9,29 @@ interface MaidTeam {
 }
 
 export default function AssignTab() {
+  const toast = useToast();
   const [teams, setTeams] = useState<MaidTeam[]>([]);
   const [floor, setFloor] = useState('all');
   const [evenOdd, setEvenOdd] = useState('all');
   const [teamId, setTeamId] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
-  const [payoutAmount, setPayoutAmount] = useState('50'); // default 50 THB per room
+  const [payoutAmount, setPayoutAmount] = useState('50');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState('');
 
   useEffect(() => {
-    fetch('/api/maid-teams').then(res => res.json()).then(setTeams);
-  }, []);
+    fetch('/api/maid-teams')
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then(setTeams)
+      .catch(e => toast.error('โหลดรายชื่อทีมไม่สำเร็จ', e instanceof Error ? e.message : undefined));
+  }, [toast]);
 
   const handleAssign = async () => {
+    if (loading) return;
     if (!teamId) {
-      alert('กรุณาเลือกทีม');
+      toast.warning('กรุณาเลือกทีม');
       return;
     }
     setLoading(true);
@@ -31,19 +39,13 @@ export default function AssignTab() {
       const res = await fetch('/api/housekeeping/bulk-assign', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          floor,
-          evenOdd,
-          maidTeamId: teamId,
-          date,
-          payoutAmount
-        })
+        body: JSON.stringify({ floor, evenOdd, maidTeamId: teamId, date, payoutAmount }),
       });
       const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setResult(`สำเร็จ! แจกงานให้ห้องไปทั้งหมด ${data.assignedCount} ห้อง`);
-    } catch (e: any) {
-      setResult(`เกิดข้อผิดพลาด: ${e.message}`);
+      if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+      toast.success('จ่ายงานสำเร็จ', `มอบหมาย ${data.assignedCount} ห้อง`);
+    } catch (e) {
+      toast.error('จ่ายงานไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -93,15 +95,9 @@ export default function AssignTab() {
         ))}
       </select>
 
-      <button onClick={handleAssign} disabled={loading} style={{ ...btnStyle, opacity: loading ? 0.7 : 1 }}>
+      <button onClick={handleAssign} disabled={loading} style={{ ...btnStyle, opacity: loading ? 0.7 : 1, cursor: loading ? 'not-allowed' : 'pointer' }}>
         {loading ? 'กำลังจ่ายงาน...' : '⚡ จ่ายงานเดี๋ยวนี้'}
       </button>
-
-      {result && (
-        <div style={{ marginTop: 20, padding: 12, background: result.includes('สำเร็จ') ? '#ecfdf5' : '#fef2f2', color: result.includes('สำเร็จ') ? '#047857' : '#b91c1c', borderRadius: 8, textAlign: 'center', fontWeight: 600 }}>
-          {result}
-        </div>
-      )}
     </div>
   );
 }

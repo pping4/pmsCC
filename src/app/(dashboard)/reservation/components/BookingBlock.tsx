@@ -308,9 +308,29 @@ const BookingBlock = React.memo(function BookingBlock({
         </span>
       )}
 
-      {/* Resize handle removed — extending a stay must go through the "อยู่ต่อ"
-          wizard in DetailPanel which creates the correct extension invoice.
-          Drag-resize bypassed rate recalculation / invoice generation. */}
+      {/* Resize handle — right edge. Drag to shorten/extend stay.
+          preview-resize + ResizeConfirmDialog compute rate diff + pending refund
+          via Scenarios A–F, so this path is now invariant-safe. */}
+      {!dragDisabled && blockWidth > 18 && (
+        <div
+          data-resize="true"
+          title="ลากเพื่อย่น/ขยายวันพัก"
+          onPointerDown={e => {
+            e.stopPropagation();
+            onPointerDown(e, booking, room, 'resize');
+          }}
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 6,
+            cursor: 'ew-resize',
+            touchAction: 'none',
+            background: 'transparent',
+          }}
+        />
+      )}
     </div>
   );
 }, (prev, next) => {

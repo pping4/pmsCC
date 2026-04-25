@@ -412,7 +412,6 @@ html.dark [style*="box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04)"] {
    transition (it has no width of its own, so the child drives it)
 ───────────────────────────────────────────────────────────────────────────── */
 .sidebar-wrapper {
-  display: flex;
   flex-direction: column;
   transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { NATIONALITIES, VIP_LEVELS } from '@/lib/constants';
 import { formatDate, formatCurrency } from '@/lib/tax';
 import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 // ─── Types for comprehensive Guest History ────────────────────────────────────
 
@@ -184,6 +185,7 @@ interface Guest {
   tm30ReportDate?: string;
   totalStays: number;
   totalSpent: number;
+  outstandingBadDebt?: number;
   createdAt: string;
 }
 
@@ -232,6 +234,7 @@ function Badge({ children, color = '#374151', bg = '#f3f4f6' }: {
 }
 
 export default function GuestsPage() {
+  const toast = useToast();
   const [guests, setGuests] = useState<Guest[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -264,14 +267,20 @@ export default function GuestsPage() {
   const [form, setForm] = useState<typeof EMPTY_GUEST>(EMPTY_GUEST);
 
   const fetchGuests = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (search) params.set('search', search);
-    if (filterNat !== 'all') params.set('nationality', filterNat);
-    const res = await fetch(`/api/guests?${params}`);
-    const data = await res.json();
-    setGuests(data);
-    setLoading(false);
-  }, [search, filterNat]);
+    try {
+      const params = new URLSearchParams();
+      if (search) params.set('search', search);
+      if (filterNat !== 'all') params.set('nationality', filterNat);
+      const res = await fetch(`/api/guests?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setGuests(data);
+    } catch (e) {
+      toast.error('โหลดรายชื่อลูกค้าไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [search, filterNat, toast]);
 
   useEffect(() => {
     const t = setTimeout(fetchGuests, 300);
@@ -308,31 +317,48 @@ export default function GuestsPage() {
   };
 
   const saveGuest = async () => {
-    if (!form.firstName || !form.lastName || !form.idNumber) return;
-    setSaving(true);
-    if (editGuest) {
-      await fetch(`/api/guests/${editGuest.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
-    } else {
-      await fetch('/api/guests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
+    if (saving) return;
+    if (!form.firstName || !form.lastName || !form.idNumber) {
+      toast.warning('กรุณาระบุชื่อ นามสกุล และเลขบัตร');
+      return;
     }
-    await fetchGuests();
-    setShowForm(false);
-    setSaving(false);
+    setSaving(true);
+    try {
+      const url = editGuest ? `/api/guests/${editGuest.id}` : '/api/guests';
+      const method = editGuest ? 'PUT' : 'POST';
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchGuests();
+      setShowForm(false);
+      toast.success(editGuest ? 'แก้ไขลูกค้าสำเร็จ' : 'สร้างลูกค้าสำเร็จ');
+    } catch (e) {
+      toast.error('บันทึกลูกค้าไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const markTM30 = async (guestId: string) => {
-    await fetch(`/api/guests/${guestId}/tm30`, { method: 'POST' });
-    await fetchGuests();
-    if (selectedGuest?.id === guestId) {
-      setSelectedGuest(prev => prev ? { ...prev, tm30Reported: true, tm30ReportDate: new Date().toISOString() } : null);
+    try {
+      const res = await fetch(`/api/guests/${guestId}/tm30`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchGuests();
+      if (selectedGuest?.id === guestId) {
+        setSelectedGuest(prev => prev ? { ...prev, tm30Reported: true, tm30ReportDate: new Date().toISOString() } : null);
+      }
+      toast.success('บันทึก TM30 สำเร็จ');
+    } catch (e) {
+      toast.error('บันทึก TM30 ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     }
   };
 
@@ -651,6 +677,9 @@ export default function GuestsPage() {
                       ? <Badge color="#22c55e" bg="#f0fdf4">TM30 ✓</Badge>
                       : <Badge color="#ef4444" bg="#fef2f2">TM30 ✗</Badge>
                     )}
+                    {(g.outstandingBadDebt ?? 0) > 0 && (
+                      <Badge color="#dc2626" bg="#fef2f2">⚠️ หนี้เสีย ฿{fmtBaht(g.outstandingBadDebt ?? 0)}</Badge>
+                    )}
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11, color: '#6b7280' }}>
@@ -702,6 +731,23 @@ export default function GuestsPage() {
                       </div>
                     </div>
                   </div>
+                  {/* ── Bad Debt Warning Banner ─────────────────────────── */}
+                  {(selectedGuest.outstandingBadDebt ?? 0) > 0 && (
+                    <div style={{ background: '#fef2f2', border: '1.5px solid #fca5a5', borderRadius: 10, padding: '12px 16px', marginBottom: 14, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontSize: 22 }}>⚠️</span>
+                        <div>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: '#991b1b' }}>ลูกค้ามียอดหนี้เสียค้างชำระ</div>
+                          <div style={{ fontSize: 12, color: '#b91c1c', marginTop: 2 }}>
+                            ยอดคงค้าง: <strong>฿{fmtBaht(selectedGuest.outstandingBadDebt ?? 0)}</strong> — กรุณาแจ้งหัวหน้าก่อนรับเข้าพัก
+                          </div>
+                        </div>
+                      </div>
+                      <a href="/bad-debt" style={{ padding: '7px 14px', background: '#dc2626', color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                        ดูรายการหนี้เสีย →
+                      </a>
+                    </div>
+                  )}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 10, fontSize: 13 }}>
                     <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: 14 }}>
                       <div style={{ fontSize: 11, fontWeight: 700, color: '#1e40af', marginBottom: 8 }}>📋 เอกสาร</div>

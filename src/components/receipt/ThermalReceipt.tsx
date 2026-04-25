@@ -185,6 +185,17 @@ export default function ThermalReceipt({ receipt, printRef, isReprint = false }:
       {receipt.items.map((item, idx) => (
         <div key={idx} style={{ ...s.mb2 }}>
           <div style={{ fontSize: 10, lineHeight: 1.4 }}>{item.description}</div>
+          {/* Date range for room / service charges */}
+          {item.periodStart && item.periodEnd && (
+            <div style={{ fontSize: 9, color: '#1e40af', paddingLeft: 4, fontStyle: 'italic' }}>
+              {item.periodStart} – {item.periodEnd}
+            </div>
+          )}
+          {item.periodStart && !item.periodEnd && (
+            <div style={{ fontSize: 9, color: '#1e40af', paddingLeft: 4, fontStyle: 'italic' }}>
+              {item.periodStart}
+            </div>
+          )}
           {item.quantity !== undefined && item.unitPrice !== undefined && (
             <div style={{ fontSize: 9, ...s.gray, paddingLeft: 8 }}>
               {item.quantity} × ฿{fmt(item.unitPrice)}

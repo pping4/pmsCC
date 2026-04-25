@@ -4,8 +4,10 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { recalculateRate, RateCalculationContext } from '@/services/bookingRate.service';
 import { logActivity } from '@/services/activityLog.service';
+import { addCharge, createInvoiceFromFolio, getFolioByBookingId } from '@/services/folio.service';
+import { createPendingRefund } from '@/services/refund.service';
+import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 import { z } from 'zod';
-import { Decimal } from '@prisma/client/runtime/library';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,8 +54,8 @@ const ReservationUpdateSchema = z.object({
   checkIn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   checkOut: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   roomId: z.string().optional(),
-  expectedVersion: z.number().int().min(1).optional(),
-  idempotencyKey: z.string().optional(),
+  expectedVersion: z.number().int().min(1),
+  idempotencyKey: z.string().min(1),
 });
 
 // ─── GET /api/reservation ─────────────────────────────────────────────────────
@@ -717,13 +719,22 @@ export async function PATCH(request: NextRequest) {
 
       // Create RateAudit record — wrapped in try/catch so audit failures don't block the booking update
       try {
-        const rateAuditId = `ra_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-        const auditNotes = rateResult.userMessage || null;
         const changedBy = session.user?.id || session.user?.email || 'system';
-        await tx.$executeRaw`
-          INSERT INTO rate_audits (id, booking_id, changed_by, change_type, previous_rate, new_rate, previous_nights, new_nights, previous_total, new_total, scenario, notes, created_at)
-          VALUES (${rateAuditId}, ${bookingId}, ${changedBy}, 'drag_resize', ${Number(booking.rate)}, ${Number(rateResult.newRate)}, ${originalNights}, ${newNights}, ${Number(booking.rate)}, ${Number(rateResult.newRate)}, ${rateResult.scenario}, ${auditNotes}, NOW())
-        `;
+        await tx.rateAudit.create({
+          data: {
+            bookingId,
+            changedBy,
+            changeType: 'drag_resize',
+            previousRate: booking.rate,
+            newRate: rateResult.newRate,
+            previousNights: originalNights,
+            newNights,
+            previousTotal: booking.rate,
+            newTotal: rateResult.newRate,
+            scenario: rateResult.scenario,
+            notes: rateResult.userMessage || null,
+          },
+        });
       } catch (auditErr) {
         // Log but don't fail the booking update if audit insert fails
         console.warn('RateAudit insert failed (non-fatal):', auditErr);
@@ -735,23 +746,63 @@ export async function PATCH(request: NextRequest) {
         rateResult.additionalCharge &&
         rateResult.additionalCharge.greaterThan(0)
       ) {
-        // Scenario D (extend, fully paid): Create new invoice
-        const invoiceCount = await tx.invoice.count();
-        const invoiceNumber = `INV-EX-${String(invoiceCount + 1).padStart(5, '0')}`;
+        // Scenario D (extend, fully paid): post the additional charge through the
+        // folio-centric billing engine so the new invoice is linked to a
+        // FolioLineItem (billing invariant preserved) and invoice-number generation
+        // goes through the sequential service instead of Invoice.count() + 1.
+        const folio = await getFolioByBookingId(tx, bookingId);
+        if (!folio) {
+          throw new Error('FOLIO_NOT_FOUND');
+        }
 
-        await tx.invoice.create({
-          data: {
-            invoiceNumber,
-            bookingId,
-            guestId: booking.guestId,
-            issueDate: new Date(),
-            dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-            subtotal: rateResult.additionalCharge,
-            vatAmount: new Decimal(0),
-            grandTotal: rateResult.additionalCharge,
-            status: 'unpaid',
-            notes: `Additional charge for extended stay`,
-          },
+        const changedBy = session.user?.id || session.user?.email || 'system';
+        const nightsAdded = newNights - originalNights;
+
+        await addCharge(tx, {
+          folioId: folio.folioId,
+          chargeType: 'ROOM',
+          description: `Extended stay — ${nightsAdded} คืน`,
+          amount: Number(rateResult.additionalCharge),
+          quantity: nightsAdded,
+          unitPrice: Number(rateResult.additionalCharge) / nightsAdded,
+          taxType: 'no_tax',
+          serviceDate: new Date(),
+          referenceType: 'Booking',
+          referenceId: bookingId,
+          notes: 'Drag-resize extension',
+          createdBy: changedBy,
+        });
+
+        await createInvoiceFromFolio(tx, {
+          folioId: folio.folioId,
+          guestId: booking.guestId,
+          bookingId,
+          invoiceType: 'EX',
+          dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          notes: `Additional charge for extended stay (${nightsAdded} คืน)`,
+          createdBy: changedBy,
+        });
+      }
+
+      // Refund obligations — Scenarios B (deposit > new rate) and C (shortening, partial paid)
+      // Create a PENDING refund record; actual cash-out is handled by finance later.
+      if (rateResult.refundDue && rateResult.refundDue.greaterThan(0)) {
+        const changedBy = session.user?.id || session.user?.email || 'system';
+        const reason =
+          rateResult.scenario === 'B'
+            ? 'เงินมัดจำเกินกว่าอัตราใหม่ (drag-resize)'
+            : `ลดการพัก ${originalNights - newNights} คืน (drag-resize)`;
+
+        await createPendingRefund(tx, {
+          bookingId,
+          guestId: booking.guestId,
+          amount: rateResult.refundDue,
+          source: 'rate_adjustment',
+          reason,
+          referenceType: 'Booking',
+          referenceId: bookingId,
+          notes: rateResult.userMessage,
+          createdBy: changedBy,
         });
       }
 
@@ -765,18 +816,41 @@ export async function PATCH(request: NextRequest) {
             status: { in: ['confirmed', 'checked_in'] },
           },
         });
+        const changedBy = session.user?.id || session.user?.email || 'system';
         if (oldRoomActiveBookings === 0) {
-          await tx.room.update({
+          const oldLive = await tx.room.findUniqueOrThrow({
             where: { id: booking.roomId },
-            data: { status: 'available', currentBookingId: null },
+            select: { status: true },
           });
+          if (canTransition(oldLive.status, 'available')) {
+            await transitionRoom(tx, {
+              roomId:           booking.roomId,
+              to:               'available',
+              reason:           'room move — old room freed',
+              userId:           changedBy,
+              userName:         session.user?.name ?? undefined,
+              bookingId,
+              currentBookingId: null,
+            });
+          }
         }
         // Mark new room as reserved/occupied
         const newStatus = upd.status === 'checked_in' ? 'occupied' : 'reserved';
-        await tx.room.update({
+        const newLive = await tx.room.findUniqueOrThrow({
           where: { id: roomId },
-          data: { status: newStatus, currentBookingId: bookingId },
+          select: { status: true },
         });
+        if (canTransition(newLive.status, newStatus)) {
+          await transitionRoom(tx, {
+            roomId:           roomId,
+            to:               newStatus,
+            reason:           'room move — new room assigned',
+            userId:           changedBy,
+            userName:         session.user?.name ?? undefined,
+            bookingId,
+            currentBookingId: bookingId,
+          });
+        }
       }
 
       return upd;
@@ -830,6 +904,12 @@ export async function PATCH(request: NextRequest) {
           error: 'การจองนี้ถูก split ข้ามห้อง — ไม่สามารถใช้ drag-resize ได้ กรุณาใช้เมนู "ย้ายห้อง" / "แยกช่วง" ใน Detail Panel',
         },
         { status: 400 }
+      );
+    }
+    if (error instanceof Error && error.message === 'FOLIO_NOT_FOUND') {
+      return NextResponse.json(
+        { error: 'ไม่พบ Folio สำหรับการจองนี้ กรุณาติดต่อผู้ดูแลระบบ' },
+        { status: 500 }
       );
     }
     console.error('PATCH /api/reservation error:', error);

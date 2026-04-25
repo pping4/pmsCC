@@ -9,8 +9,10 @@
  *  3. Contract Renewal  — extend a booking's contract
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { fmtDate, fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
+import { DataTable, type ColDef } from '@/components/data-table';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -94,12 +96,52 @@ export default function BillingCyclePage() {
 // ─── Tab 1: Generate Monthly Invoices ─────────────────────────────────────────
 
 function GenerateTab() {
+  const toast = useToast();
   const [loading,  setLoading]  = useState(false);
   const [result,   setResult]   = useState<GenerateSummary | null>(null);
   const [error,    setError]    = useState('');
   const [date,     setDate]     = useState(new Date().toISOString().split('T')[0]);
 
+  // DataTable columns for generate results
+  type GenColKey = 'roomNumber' | 'invoiceNumber' | 'amount' | 'status' | 'reason';
+  const genColumns: ColDef<GenerateResult, GenColKey>[] = useMemo(() => [
+    {
+      key: 'roomNumber', label: 'ห้อง', minW: 80,
+      getValue: r => r.roomNumber,
+      render:   r => <span className="font-medium text-gray-700">{r.roomNumber}</span>,
+    },
+    {
+      key: 'invoiceNumber', label: 'เลขที่บิล', minW: 160,
+      getValue: r => r.invoiceNumber ?? '—',
+      render:   r => <span className="text-gray-600">{r.invoiceNumber ?? '—'}</span>,
+    },
+    {
+      key: 'amount', label: 'จำนวนเงิน', align: 'right', minW: 110,
+      getValue: r => r.amount != null ? String(Math.round(r.amount * 100)).padStart(14, '0') : '__none__',
+      getLabel: r => r.amount != null ? `฿${fmtBaht(r.amount)}` : '—',
+      aggregate: 'sum',
+      aggValue:  r => r.amount ?? 0,
+      render:    r => <span className="text-gray-700">{r.amount != null ? `฿${fmtBaht(r.amount)}` : '—'}</span>,
+    },
+    {
+      key: 'status', label: 'สถานะ', align: 'center', minW: 110,
+      getValue: r => r.status,
+      getLabel: r => r.status === 'created' ? 'สร้างแล้ว' : r.status === 'skipped' ? 'ข้าม' : 'Error',
+      render:   r => r.status === 'created'
+        ? <span className="text-xs font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✅ สร้างแล้ว</span>
+        : r.status === 'skipped'
+          ? <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">⏭️ ข้าม</span>
+          : <span className="text-xs font-medium text-red-600 bg-red-50 px-2 py-0.5 rounded-full">❌ Error</span>,
+    },
+    {
+      key: 'reason', label: 'หมายเหตุ', minW: 180,
+      getValue: r => r.reason ?? '',
+      render:   r => <span className="text-xs text-gray-400">{r.reason ?? ''}</span>,
+    },
+  ], []);
+
   const handleGenerate = async () => {
+    if (loading) return;
     setError('');
     setResult(null);
     setLoading(true);
@@ -109,11 +151,14 @@ function GenerateTab() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ billingDate: date }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'เกิดข้อผิดพลาด');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
       setResult(data as GenerateSummary);
+      toast.success('ออกบิลรายเดือนสำเร็จ', `สร้าง ${data.created} / ข้าม ${data.skipped} / ผิดพลาด ${data.errors}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('ออกบิลรายเดือนไม่สำเร็จ', msg);
     } finally {
       setLoading(false);
     }
@@ -175,40 +220,13 @@ function GenerateTab() {
           </div>
 
           {/* Detail table */}
-          <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">ห้อง</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">เลขที่บิล</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">จำนวนเงิน</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-gray-500">สถานะ</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">หมายเหตุ</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {result.results.map((r) => (
-                  <tr key={r.bookingId} className="hover:bg-gray-50">
-                    <td className="px-4 py-3 font-medium text-gray-700">{r.roomNumber}</td>
-                    <td className="px-4 py-3 text-gray-600">{r.invoiceNumber ?? '—'}</td>
-                    <td className="px-4 py-3 text-right text-gray-700">
-                      {r.amount != null ? `฿${baht(r.amount)}` : '—'}
-                    </td>
-                    <td className="px-4 py-3 text-center">
-                      {r.status === 'created' ? (
-                        <span className="text-xs font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✅ สร้างแล้ว</span>
-                      ) : r.status === 'skipped' ? (
-                        <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">⏭️ ข้าม</span>
-                      ) : (
-                        <span className="text-xs font-medium text-red-600 bg-red-50 px-2 py-0.5 rounded-full">❌ Error</span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-gray-400">{r.reason ?? ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <DataTable<GenerateResult, GenColKey>
+            tableKey="billing-cycle.generate"
+            rows={result.results}
+            columns={genColumns}
+            rowKey={r => r.bookingId}
+            emptyText="ไม่มีรายการ"
+          />
         </div>
       )}
     </div>
@@ -218,6 +236,7 @@ function GenerateTab() {
 // ─── Tab 2: Late Penalties ────────────────────────────────────────────────────
 
 function PenaltiesTab() {
+  const toast = useToast();
   const [data,       setData]       = useState<PenaltyData | null>(null);
   const [loading,    setLoading]    = useState(false);
   const [applying,   setApplying]   = useState(false);
@@ -233,18 +252,83 @@ function PenaltiesTab() {
     setLoading(true);
     try {
       const res  = await fetch(`/api/billing/penalties?dailyRate=${dailyRate}`);
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'โหลดข้อมูลล้มเหลว');
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       setData(json as PenaltyData);
       setSelected(new Set()); // reset selection
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('โหลดค่าปรับไม่สำเร็จ', msg);
     } finally {
       setLoading(false);
     }
-  }, [dailyRate]);
+  }, [dailyRate, toast]);
 
   useEffect(() => { fetchPreviews(); }, [fetchPreviews]);
+
+  // DataTable columns for penalty preview table
+  type PenColKey = 'check' | 'roomNumber' | 'guestName' | 'invoiceNumber' | 'daysOverdue' | 'originalAmount' | 'penaltyAmount';
+  const penColumns: ColDef<PenaltyPreview, PenColKey>[] = useMemo(() => [
+    {
+      key: 'check', label: '', minW: 36, align: 'center', noFilter: true,
+      getValue: () => '',
+      render: p => (
+        <input
+          type="checkbox"
+          checked={selected.has(p.invoiceId)}
+          onChange={() => setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(p.invoiceId)) next.delete(p.invoiceId); else next.add(p.invoiceId);
+            return next;
+          })}
+          onClick={e => e.stopPropagation()}
+          className="rounded"
+        />
+      ),
+    },
+    {
+      key: 'roomNumber', label: 'ห้อง', minW: 80,
+      getValue: p => p.roomNumber,
+      render:   p => <span className="font-medium text-gray-700">{p.roomNumber}</span>,
+    },
+    {
+      key: 'guestName', label: 'ผู้เช่า', minW: 140,
+      getValue: p => p.guestName,
+      render:   p => <span className="text-gray-600">{p.guestName}</span>,
+    },
+    {
+      key: 'invoiceNumber', label: 'เลขที่บิล', minW: 150,
+      getValue: p => p.invoiceNumber,
+      render:   p => <span className="text-gray-500 text-xs">{p.invoiceNumber}</span>,
+    },
+    {
+      key: 'daysOverdue', label: 'เกิน (วัน)', align: 'center', minW: 90,
+      getValue: p => String(p.daysOverdue).padStart(5, '0'),
+      getLabel: p => String(p.daysOverdue),
+      render:   p => (
+        <span className={`font-bold ${p.daysOverdue > 30 ? 'text-red-600' : 'text-amber-600'}`}>
+          {p.daysOverdue}
+        </span>
+      ),
+    },
+    {
+      key: 'originalAmount', label: 'ยอดต้น', align: 'right', minW: 110,
+      getValue: p => String(Math.round(p.originalAmount * 100)).padStart(14, '0'),
+      getLabel: p => `฿${fmtBaht(p.originalAmount)}`,
+      aggregate: 'sum',
+      aggValue:  p => p.originalAmount,
+      render:    p => <span className="text-gray-700">฿{fmtBaht(p.originalAmount)}</span>,
+    },
+    {
+      key: 'penaltyAmount', label: 'ค่าปรับ', align: 'right', minW: 110,
+      getValue: p => String(Math.round(p.penaltyAmount * 100)).padStart(14, '0'),
+      getLabel: p => `฿${fmtBaht(p.penaltyAmount)}`,
+      aggregate: 'sum',
+      aggValue:  p => p.penaltyAmount,
+      render:    p => <span className="font-medium text-red-600">฿{fmtBaht(p.penaltyAmount)}</span>,
+    },
+  ], [selected]);
 
   const toggleAll = () => {
     if (!data) return;
@@ -256,7 +340,11 @@ function PenaltiesTab() {
   };
 
   const handleApply = async () => {
-    if (selected.size === 0) return;
+    if (applying) return;
+    if (selected.size === 0) {
+      toast.warning('กรุณาเลือกใบแจ้งหนี้อย่างน้อย 1 รายการ');
+      return;
+    }
     setError('');
     setSuccess('');
     setApplying(true);
@@ -270,12 +358,15 @@ function PenaltiesTab() {
           penaltyNote: `ค่าปรับ — อัตรา ${rateInput}% ต่อเดือน`,
         }),
       });
-      const json = await res.json();
-      if (!res.ok) throw new Error(json.error ?? 'เกิดข้อผิดพลาด');
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
       setSuccess(`✅ บันทึกค่าปรับ ${json.applied} รายการเรียบร้อย`);
+      toast.success('บันทึกค่าปรับสำเร็จ', `${json.applied} รายการ`);
       fetchPreviews();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('บันทึกค่าปรับไม่สำเร็จ', msg);
     } finally {
       setApplying(false);
     }
@@ -343,70 +434,34 @@ function PenaltiesTab() {
         </div>
       )}
 
+      {/* Select-all bar */}
+      {data && data.penalties.length > 0 && (
+        <div className="flex items-center gap-2 text-xs text-gray-500">
+          <input
+            type="checkbox"
+            checked={selected.size === data.penalties.length}
+            onChange={toggleAll}
+            className="rounded"
+          />
+          เลือกทั้งหมด ({data.penalties.length})
+        </div>
+      )}
+
       {/* Table */}
       {data && data.penalties.length > 0 && (
-        <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr>
-                <th className="px-4 py-3 text-center w-10">
-                  <input
-                    type="checkbox"
-                    checked={selected.size === data.penalties.length}
-                    onChange={toggleAll}
-                    className="rounded"
-                  />
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">ห้อง</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">ผู้เช่า</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">เลขที่บิล</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500">เกิน (วัน)</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">ยอดต้น</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">ค่าปรับ</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {data.penalties.map((p) => (
-                <tr
-                  key={p.invoiceId}
-                  className={`hover:bg-gray-50 cursor-pointer ${selected.has(p.invoiceId) ? 'bg-amber-50' : ''}`}
-                  onClick={() => {
-                    setSelected((prev) => {
-                      const next = new Set(prev);
-                      next.has(p.invoiceId) ? next.delete(p.invoiceId) : next.add(p.invoiceId);
-                      return next;
-                    });
-                  }}
-                >
-                  <td className="px-4 py-3 text-center" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      checked={selected.has(p.invoiceId)}
-                      onChange={() => {
-                        setSelected((prev) => {
-                          const next = new Set(prev);
-                          next.has(p.invoiceId) ? next.delete(p.invoiceId) : next.add(p.invoiceId);
-                          return next;
-                        });
-                      }}
-                      className="rounded"
-                    />
-                  </td>
-                  <td className="px-4 py-3 font-medium text-gray-700">{p.roomNumber}</td>
-                  <td className="px-4 py-3 text-gray-600">{p.guestName}</td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">{p.invoiceNumber}</td>
-                  <td className="px-4 py-3 text-center">
-                    <span className={`font-bold ${p.daysOverdue > 30 ? 'text-red-600' : 'text-amber-600'}`}>
-                      {p.daysOverdue}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right text-gray-700">฿{baht(p.originalAmount)}</td>
-                  <td className="px-4 py-3 text-right font-medium text-red-600">฿{baht(p.penaltyAmount)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        <DataTable<PenaltyPreview, PenColKey>
+          tableKey="billing-cycle.penalties"
+          rows={data.penalties}
+          columns={penColumns}
+          rowKey={p => p.invoiceId}
+          rowHighlight={p => selected.has(p.invoiceId) ? '#fffbeb' : undefined}
+          onRowClick={p => setSelected(prev => {
+            const next = new Set(prev);
+            if (next.has(p.invoiceId)) next.delete(p.invoiceId); else next.add(p.invoiceId);
+            return next;
+          })}
+          emptyText="ไม่มีใบเกินกำหนด"
+        />
       )}
 
       {data && data.penalties.length === 0 && (
@@ -432,6 +487,7 @@ interface ActiveBooking {
 }
 
 function RenewalTab() {
+  const toast = useToast();
   const [bookings,  setBookings]  = useState<ActiveBooking[]>([]);
   const [loading,   setLoading]   = useState(true);
   const [selected,  setSelected]  = useState<ActiveBooking | null>(null);
@@ -448,6 +504,7 @@ function RenewalTab() {
       setLoading(true);
       try {
         const res  = await fetch('/api/bookings?status=checked_in&bookingType=monthly_short,monthly_long&limit=100');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const bks: ActiveBooking[] = (data.bookings ?? data ?? []).map((b: {
           id: string;
@@ -467,12 +524,14 @@ function RenewalTab() {
           bookingType:  b.bookingType,
         })).filter((b: ActiveBooking) => b.bookingType !== 'daily');
         setBookings(bks);
-      } catch {
+      } catch (e) {
         setError('โหลดข้อมูลการจองล้มเหลว');
+        toast.error('โหลดข้อมูลการจองไม่สำเร็จ', e instanceof Error ? e.message : undefined);
       } finally {
         setLoading(false);
       }
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSelect = (bk: ActiveBooking) => {
@@ -485,7 +544,12 @@ function RenewalTab() {
   };
 
   const handleRenew = async () => {
-    if (!selected || !newDate) return;
+    if (saving) return;
+    if (!selected) return;
+    if (!newDate) {
+      toast.warning('กรุณาระบุวันสิ้นสุดสัญญาใหม่');
+      return;
+    }
     setError('');
     setSuccess('');
     setSaving(true);
@@ -499,9 +563,10 @@ function RenewalTab() {
           notes,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? 'เกิดข้อผิดพลาด');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
       setSuccess(`✅ ต่อสัญญาห้อง ${selected.roomNumber} สำเร็จ — สิ้นสุดใหม่: ${fmtDate(data.newCheckOut)}`);
+      toast.success('ต่อสัญญาสำเร็จ', `ห้อง ${selected.roomNumber} — สิ้นสุดใหม่ ${fmtDate(data.newCheckOut)}`);
       setSelected(null);
       // Refresh list
       const refresh = await fetch('/api/bookings?status=checked_in&bookingType=monthly_short,monthly_long&limit=100');
@@ -524,7 +589,9 @@ function RenewalTab() {
         bookingType:  b.bookingType,
       })).filter((b: ActiveBooking) => b.bookingType !== 'daily'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'เกิดข้อผิดพลาด');
+      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('ต่อสัญญาไม่สำเร็จ', msg);
     } finally {
       setSaving(false);
     }

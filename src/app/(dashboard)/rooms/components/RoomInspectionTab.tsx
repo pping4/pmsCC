@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { fmtDateTime, fmtMonthLongTH } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -62,6 +63,7 @@ const FONT = "'Inter', 'Noto Sans Thai', -apple-system, sans-serif";
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
+  const toast = useToast();
   const [inspections, setInspections] = useState<Inspection[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -85,13 +87,13 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
     setLoading(true);
     try {
       const res = await fetch(`/api/inspection?roomId=${roomId}&limit=50`);
-      if (res.ok) {
-        const data = await res.json();
-        setInspections(data.inspections ?? []);
-      }
-    } catch { /* non-fatal */ }
-    finally { setLoading(false); }
-  }, [roomId]);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setInspections(data.inspections ?? []);
+    } catch (e) {
+      toast.error('โหลดประวัติการตรวจไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally { setLoading(false); }
+  }, [roomId, toast]);
 
   useEffect(() => { loadInspections(); }, [loadInspections]);
 
@@ -125,8 +127,9 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
   // ── Submit inspection ───────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
-    if (!inspectorName.trim()) return alert('กรุณาระบุชื่อผู้ตรวจ');
-    if (selectedFiles.length === 0 && !remark.trim()) return alert('กรุณากรอกข้อมูลหรือเลือกรูปภาพ');
+    if (saving) return;
+    if (!inspectorName.trim()) { toast.warning('กรุณาระบุชื่อผู้ตรวจ'); return; }
+    if (selectedFiles.length === 0 && !remark.trim()) { toast.warning('กรุณากรอกข้อมูลหรือเลือกรูปภาพ'); return; }
 
     setSaving(true);
     setUploadMsg('กำลังเตรียมรูปภาพ...');
@@ -151,8 +154,8 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
       });
 
       if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.error || 'เกิดข้อผิดพลาด');
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || err?.message || `HTTP ${res.status}`);
       }
 
       // Reset form
@@ -165,9 +168,9 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
 
       // Reload
       await loadInspections();
+      toast.success('บันทึกการตรวจสำเร็จ');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
-      alert(msg);
+      toast.error('บันทึกการตรวจไม่สำเร็จ', err instanceof Error ? err.message : undefined);
     } finally {
       setSaving(false);
       setUploadMsg('');
@@ -180,10 +183,15 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
     if (!confirm('ลบประวัติการตรวจนี้ทั้งหมด รวมถึงรูปภาพ?')) return;
     try {
       const res = await fetch(`/api/inspection/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        setInspections((prev) => prev.filter((i) => i.id !== id));
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
       }
-    } catch { /* non-fatal */ }
+      setInspections((prev) => prev.filter((i) => i.id !== id));
+      toast.success('ลบการตรวจสำเร็จ');
+    } catch (e) {
+      toast.error('ลบการตรวจไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   // ── Delete single photo ─────────────────────────────────────────────────────
@@ -192,16 +200,21 @@ export default function RoomInspectionTab({ roomId, roomNumber }: Props) {
     if (!confirm('ลบรูปภาพนี้?')) return;
     try {
       const res = await fetch(`/api/inspection/photo/${photoId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setInspections((prev) =>
-          prev.map((insp) =>
-            insp.id === inspectionId
-              ? { ...insp, photos: insp.photos.filter((p) => p.id !== photoId) }
-              : insp
-          )
-        );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
       }
-    } catch { /* non-fatal */ }
+      toast.success('ลบรูปภาพสำเร็จ');
+      setInspections((prev) =>
+        prev.map((insp) =>
+          insp.id === inspectionId
+            ? { ...insp, photos: insp.photos.filter((p) => p.id !== photoId) }
+            : insp
+        )
+      );
+    } catch (e) {
+      toast.error('ลบรูปภาพไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   // ── Group by month ──────────────────────────────────────────────────────────

@@ -79,7 +79,66 @@ import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 <td>฿{fmtBaht(invoice.grandTotal)}</td>      // "฿1,234.50"
 ```
 
-## 5. Pre-Delivery Verification (The "Stop & Check" Rule)
+## 5. Data Tables & Dashboards (Mandatory Standard)
+
+Every **data table / list view** in this project **must** use the `GoogleSheetTable<T>` component from `src/app/(dashboard)/[feature]/components/GoogleSheetTable.tsx`.
+
+Reference implementations:
+- Component: `src/app/(dashboard)/sales/components/GoogleSheetTable.tsx`
+- Page example: `src/app/(dashboard)/sales/page.tsx`
+- Products page: `src/app/(dashboard)/products/page.tsx`
+
+### Required table features (every table must have):
+- Per-column **filter dropdown** with Sort A→Z/Z→A, Search box, Checkbox list, Select All, Clear
+- **Global search** across all columns
+- **Row count** display: `{filtered} / {total} แถว`
+- **"ล้างทั้งหมด"** button when filters are active
+- **Alternating row colors** using `var(--surface-card)` / `var(--surface-subtle)`
+
+### Required visual indicators (when data supports it):
+- **KPI Cards** — key metrics with trend indicators (TrendingUp/TrendingDown from lucide-react)
+- **Charts via recharts** — Area (time series), Bar (comparison), Pie/Donut (proportion)
+- **Mini Progress Bar** — value vs target in table cells
+- **Status Badge** — colored pill with icon per status value
+
+### Styling rules:
+- **Always** use CSS variables for surface/text/border — never hardcode hex for these
+- **Always** use `className="pms-card pms-transition"` for cards
+- Semantic colors (`#f0fdf4`, `#eff6ff`, etc.) may use hex — globals.css provides dark mode overrides
+
+### CSS variables reference:
+```
+Surfaces:  var(--surface-card)  var(--surface-muted)  var(--surface-subtle)
+Borders:   var(--border-default)  var(--border-light)
+Text:      var(--text-primary)  var(--text-secondary)  var(--text-muted)  var(--text-faint)
+Colors:    var(--primary-light)  var(--success)  var(--warning)  var(--danger)
+```
+
+### TypeScript note:
+```tsx
+// ✅ recharts Tooltip — use Number(v), not typed param
+<Tooltip formatter={(v) => `฿${fmtBaht(Number(v))}`} />
+```
+
+## 6. Skills (focused playbooks at `.claude/skills/*.md`)
+
+Load the relevant skill before editing — each file has a detailed checklist, anti-patterns, and reference files.
+
+**Finance / Accounting (correctness)**
+- [finance-invariants](.claude/skills/finance-invariants.md) — double-entry, posted-record immutability, idempotency, rounding
+- [prisma-money-transactions](.claude/skills/prisma-money-transactions.md) — `$transaction`, isolation, lock order, P2034 retry
+- [tax-thailand](.claude/skills/tax-thailand.md) — VAT 7% + service 10% order of ops, inclusive/exclusive, WHT
+- [night-audit-checklist](.claude/skills/night-audit-checklist.md) — day-close pre-checks, atomic postings, immutability
+- [money-formatting-rules](.claude/skills/money-formatting-rules.md) — `fmtBaht` only, right-align, credit display
+- [schema-migration-safety](.claude/skills/schema-migration-safety.md) — red-zone tables, NOT NULL backfill, rollback plan
+
+**Smart Flow / UX (consistency)**
+- [multi-step-dialog-wizard](.claude/skills/multi-step-dialog-wizard.md) — stepper + per-step validation + summary
+- [mutation-toast-pattern](.claude/skills/mutation-toast-pattern.md) — guard + try/finally + toast + ConfirmDialog
+- [keyboard-first-flow](.claude/skills/keyboard-first-flow.md) — Ctrl+K, Esc, focus trap, ARIA
+- [google-sheet-filter-sort](.claude/skills/google-sheet-filter-sort.md) — per-column filter/sort dropdown: getValue/getLabel/counts, Enter-to-apply, composite row keys
+
+## 7. Pre-Delivery Verification (The "Stop & Check" Rule)
 Before outputting any code, you MUST mentally verify the following checklist:
 - [ ] **Security:** Is the action authorized? Are inputs validated with Zod?
 - [ ] **Prisma Check:** Am I using `select` to avoid data leaks? Should this be a `$transaction`?

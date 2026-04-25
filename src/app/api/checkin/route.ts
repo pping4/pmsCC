@@ -22,11 +22,15 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { createSecurityDeposit } from '@/services/securityDeposit.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { z } from 'zod';
-import { getFolioByBookingId, addCharge, createInvoiceFromFolio, markLineItemsPaid } from '@/services/folio.service';
+import { getFolioByBookingId, addCharge, createInvoiceFromFolio, markLineItemsPaid, recalculateFolioBalance } from '@/services/folio.service';
 import { generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
+import { postPaymentReceived } from '@/services/ledger.service';
 import { logActivity } from '@/services/activityLog.service';
+import { transitionRoom } from '@/services/roomStatus.service';
 import { fmtDate } from '@/lib/date-format';
+import { expandNightlyReceiptItems } from '@/lib/invoice-utils';
 import type { ReceiptData } from '@/components/receipt/types';
 
 const CheckinSchema = z.object({
@@ -36,13 +40,13 @@ const CheckinSchema = z.object({
   // Security deposit (optional — handled via SecurityDeposit model now)
   depositAmount:         z.number().positive().optional(),
   depositPaymentMethod:  z.enum(['cash', 'transfer', 'credit_card', 'promptpay', 'ota_collect']).optional(),
-  depositCashSessionId:  z.string().uuid().optional(),   // required if depositMethod=cash
   depositReferenceNo:    z.string().max(100).optional(),
 
   // Upfront stay payment
   collectUpfront:        z.boolean().optional().default(false),
   upfrontPaymentMethod:  z.enum(['cash', 'transfer', 'credit_card', 'promptpay', 'ota_collect']).optional(),
-  cashSessionId:         z.string().uuid().optional(),   // required if upfront method=cash
+  // Sprint 4B: cashSessionId / depositCashSessionId are NOT accepted from the
+  // client. For cash payments, the server looks up the caller's open shift.
 });
 
 export async function POST(request: Request) {
@@ -71,11 +75,9 @@ export async function POST(request: Request) {
     notes,
     depositAmount,
     depositPaymentMethod,
-    depositCashSessionId,
     depositReferenceNo,
     collectUpfront,
     upfrontPaymentMethod,
-    cashSessionId,
   } = parsed.data;
 
   // ── Fetch booking ─────────────────────────────────────────────────────────
@@ -144,19 +146,10 @@ export async function POST(request: Request) {
     }
   }
 
-  // ── Validate cash session (after double-payment guard) ───────────────────
-  if (depositPaymentMethod === 'cash' && depositAmount && !depositCashSessionId) {
-    return NextResponse.json(
-      { error: 'การรับเงินมัดจำด้วยเงินสดต้องระบุ cashSessionId' },
-      { status: 422 }
-    );
-  }
-  if (upfrontPaymentMethod === 'cash' && collectUpfront && !cashSessionId) {
-    return NextResponse.json(
-      { error: 'การรับชำระค่าห้องด้วยเงินสดต้องระบุ cashSessionId' },
-      { status: 422 }
-    );
-  }
+  // Sprint 4B: cashSessionId is server-resolved inside the services
+  // (securityDeposit.service / payment.service) — no client-side validation
+  // here. If the cashier has no open shift, those services throw a friendly
+  // error which the $transaction below surfaces as a 400.
 
   // Use invoiceType for reliable detection (not notes string matching)
   const existingStayInvoiceRecord = booking.invoices.find(
@@ -187,10 +180,15 @@ export async function POST(request: Request) {
       },
     });
 
-    // ── 2. Update room → occupied ─────────────────────────────────────────
-    await tx.room.update({
-      where: { id: booking.roomId },
-      data:  { status: 'occupied', currentBookingId: bookingId },
+    // ── 2. Update room → occupied (via chokepoint) ────────────────────────
+    await transitionRoom(tx, {
+      roomId:           booking.roomId,
+      to:               'occupied',
+      reason:           'check-in',
+      userId,
+      userName,
+      bookingId,
+      currentBookingId: bookingId,
     });
 
     // ── LOG: Check-in event ────────────────────────────────────────────────
@@ -214,33 +212,42 @@ export async function POST(request: Request) {
       },
     });
 
-    // ── 3. Folio-centric stay invoice — for ANY booking type when collectUpfront ──
+    // ── 3. Folio charges + optional upfront payment ───────────────────────────
     //
     // BILLING FLOW (revised):
-    //  • collectUpfront = false → nothing here; daily rooms billed at checkout,
-    //                             monthly rooms billed at next renewal cycle.
-    //  • collectUpfront = true  → collect NOW regardless of booking type:
-    //      1. If no ROOM charge in folio yet → add it.
-    //      2. Credit back any DEPOSIT_BOOKING already paid (prevents double-billing).
-    //      3. createInvoiceFromFolio → INV-CI for the NET amount due.
-    //      4. Mark invoice + line items PAID so checkout/renewal won't re-bill.
     //
-    // The double-payment guard earlier in this function (totalAlreadyPaid >= stayAmount)
-    // ensures we never reach this block when the booking is already fully paid.
+    //  3a. ADD ROOM CHARGE — runs at check-in regardless of collectUpfront:
+    //      • Daily bookings: ALWAYS add ROOM charge so folio.balance is accurate
+    //        from check-in onwards. Checkout preview reads this balance and shows
+    //        the correct outstanding amount even when the guest hasn't paid yet.
+    //      • Monthly bookings: only add when collectUpfront=true (billed at renewal cycle).
+    //      • Credit back any DEPOSIT_BOOKING already paid at booking confirmation.
+    //
+    //  3b. COLLECT UPFRONT — only when collectUpfront=true:
+    //      • createInvoiceFromFolio → INV-CI (bills all UNBILLED line items).
+    //      • Mark invoice PAID, create Payment + PaymentAllocation.
+    //      • Sync folio balance via recalculateFolioBalance.
+    //
+    // Why 3a is separated: if a guest checks in without paying, the folio must
+    // still contain the ROOM charge so that GET /api/bookings/[id]/folio returns
+    // a non-zero balance and the checkout dialog shows the correct amount due.
 
     let stayInvoiceId: string | null = existingStayInvoiceRecord?.id ?? null;
-    // Track the actual collected amount (may differ from stayAmount when deposit credited)
+    // Tracks amount actually collected (may differ from stayAmount after deposit credit)
     let ciCollectedAmount: number = stayAmount;
     const folio = await getFolioByBookingId(tx, bookingId);
 
     const isMonthly =
       booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
 
-    if (collectUpfront && upfrontPaymentMethod && folio) {
-      // Check if the Folio already has a non-voided ROOM charge
+    // ── 3a. Add ROOM charge to folio ─────────────────────────────────────────
+    // Daily: always. Monthly: only when paying upfront.
+    const shouldAddRoomCharge = folio && (!isMonthly || (collectUpfront && !!upfrontPaymentMethod));
+
+    if (shouldAddRoomCharge) {
       const existingRoomCharge = await tx.folioLineItem.findFirst({
         where: {
-          folioId: folio.folioId,
+          folioId:    folio.folioId,
           chargeType: 'ROOM' as never,
           billingStatus: { not: 'VOIDED' as never },
         },
@@ -248,7 +255,6 @@ export async function POST(request: Request) {
       });
 
       if (!existingRoomCharge) {
-        // ── Build charge description by type ───────────────────────────────
         const chargeDesc = isMonthly
           ? `ค่าห้องพักเดือนแรก${
               booking.bookingType === 'monthly_short' ? ' (รายเดือนระยะสั้น)' : ' (รายเดือนระยะยาว)'
@@ -262,13 +268,12 @@ export async function POST(request: Request) {
           amount:      stayAmount,
           quantity:    nights ?? 1,
           unitPrice:   Number(booking.rate),
+          serviceDate: new Date(booking.checkIn),   // period start = check-in
           createdBy:   userId,
         });
 
-        // ── Credit back any DEPOSIT_BOOKING already paid at booking ───────
-        // This prevents: INV-BK (deposit) + INV-CI (full room) = overcharge.
-        // The ADJUSTMENT here cancels out the deposit portion on INV-CI so
-        // the net billed is only the remaining balance.
+        // Credit back any DEPOSIT_BOOKING already paid at booking confirmation.
+        // Prevents: INV-BK (deposit paid) + full room charge = overcharge.
         const paidDeposits = await tx.folioLineItem.findMany({
           where: {
             folioId:       folio.folioId,
@@ -289,35 +294,34 @@ export async function POST(request: Request) {
             });
           }
         }
-
-        // ── Create INV-CI from all UNBILLED items ──────────────────────────
-        const dueDate = isMonthly
-          ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
-          : new Date(booking.checkOut);
-
-        const invResult = await createInvoiceFromFolio(tx, {
-          folioId:     folio.folioId,
-          guestId:     booking.guestId,
-          bookingId,
-          invoiceType: 'CI',
-          dueDate,
-          notes:       `ชำระค่าห้องพัก ณ เช็คอิน — ห้อง ${booking.room.number}`,
-          createdBy:   userId,
-        });
-
-        if (invResult) {
-          stayInvoiceId    = invResult.invoiceId;
-          ciCollectedAmount = invResult.grandTotal;   // net after deposit credit
-          await tx.invoice.update({
-            where: { id: invResult.invoiceId },
-            data:  { paidAmount: invResult.grandTotal, status: 'paid' },
-          });
-          await markLineItemsPaid(tx, invResult.invoiceId);
-        }
       }
-      // If ROOM charge already exists and stay invoice also exists → stayInvoiceId
-      // was already set from existingStayInvoiceRecord at the top of the function.
-      // The double-payment guard ensures we never charge twice.
+    }
+
+    // ── 3b. Create INV-CI and collect payment (upfront only) ─────────────────
+    if (collectUpfront && upfrontPaymentMethod && folio && !existingStayInvoice) {
+      const dueDate = isMonthly
+        ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
+        : new Date(booking.checkOut);
+
+      const invResult = await createInvoiceFromFolio(tx, {
+        folioId:     folio.folioId,
+        guestId:     booking.guestId,
+        bookingId,
+        invoiceType: 'CI',
+        dueDate,
+        notes:       `ชำระค่าห้องพัก ณ เช็คอิน — ห้อง ${booking.room.number}`,
+        createdBy:   userId,
+      });
+
+      if (invResult) {
+        stayInvoiceId     = invResult.invoiceId;
+        ciCollectedAmount = invResult.grandTotal;   // net after deposit credit
+        await tx.invoice.update({
+          where: { id: invResult.invoiceId },
+          data:  { paidAmount: invResult.grandTotal, status: 'paid' },
+        });
+        await markLineItemsPaid(tx, invResult.invoiceId);
+      }
     }
 
     // ── 4. Create Security Deposit via service (posts liability ledger) ────
@@ -330,7 +334,7 @@ export async function POST(request: Request) {
         amount:        depositAmount,
         paymentMethod: depositPaymentMethod,
         referenceNo:   depositReferenceNo,
-        cashSessionId: depositCashSessionId,
+        // cashSessionId omitted — service resolves it from createdBy for cash
         receivedBy:    userId,
         receivedByName: userName,
         notes:         `เงินมัดจำ ห้อง ${booking.room.number}`,
@@ -394,6 +398,25 @@ export async function POST(request: Request) {
         generatePaymentNumber(tx),
         generateReceiptNumber(tx),
       ]);
+
+      // Sprint 4B: server-resolve cashSessionId + cashBoxId from the
+      // cashier's open shift. Cash payments REQUIRE a shift; non-cash
+      // methods still populate cashBoxId when a shift is open (for
+      // per-counter attribution in reporting).
+      let upfrontCashSessionId: string | null = null;
+      let upfrontCashBoxId:     string | null = null;
+      const upfrontActive = await getActiveSessionForUser(tx, userId);
+      if (upfrontPaymentMethod === 'cash') {
+        if (!upfrontActive) {
+          throw new Error('การรับชำระค่าห้องด้วยเงินสดต้องเปิดกะแคชเชียร์ก่อน');
+        }
+        upfrontCashSessionId = upfrontActive.id;
+        upfrontCashBoxId     = upfrontActive.cashBoxId;
+      } else if (upfrontActive) {
+        upfrontCashSessionId = upfrontActive.id;
+        upfrontCashBoxId     = upfrontActive.cashBoxId;
+      }
+
       const payment = await tx.payment.create({
         data: {
           paymentNumber,
@@ -403,7 +426,8 @@ export async function POST(request: Request) {
           amount:         new Prisma.Decimal(ciCollectedAmount),
           paymentMethod:  upfrontPaymentMethod as never,
           paymentDate:    now,
-          cashSessionId:  cashSessionId ?? null,
+          cashSessionId:  upfrontCashSessionId,
+          cashBoxId:      upfrontCashBoxId,
           status:         'ACTIVE' as never,
           idempotencyKey: `ci-upfront-${bookingId}`,
           receivedBy:     userId,
@@ -421,6 +445,23 @@ export async function POST(request: Request) {
           amount:    new Prisma.Decimal(ciCollectedAmount),
         },
       });
+
+      // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
+      await postPaymentReceived(tx, {
+        paymentMethod: upfrontPaymentMethod,
+        amount:        ciCollectedAmount,
+        paymentId:     payment.id,
+        createdBy:     userId,
+      });
+
+      // ── Sync folio balance after payment ────────────────────────────────
+      // CRITICAL: must call after PaymentAllocation is created so that
+      // folio.totalPayments and folio.balance reflect the actual payment.
+      // Without this, checkout fetches a stale folio.balance (= totalCharges)
+      // and incorrectly shows an outstanding balance.
+      if (folio) {
+        await recalculateFolioBalance(tx, folio.folioId);
+      }
 
       // ── LOG: Upfront payment collected ──────────────────────────────────
       await logActivity(tx, {
@@ -459,7 +500,14 @@ export async function POST(request: Request) {
         bookingType:   booking.bookingType,
         checkIn:       fmtDate(booking.checkIn),
         checkOut:      fmtDate(booking.checkOut),
-        items: [{ description: ciDesc, amount: ciCollectedAmount }],
+        items: nights && nights > 1 && booking.bookingType === 'daily'
+          ? expandNightlyReceiptItems({
+              description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+              startDate:   new Date(booking.checkIn),
+              nights,
+              unitPrice:   Number(booking.rate),
+            })
+          : [{ description: ciDesc, amount: ciCollectedAmount }],
         subtotal:      ciCollectedAmount,
         vatAmount:     0,
         grandTotal:    ciCollectedAmount,

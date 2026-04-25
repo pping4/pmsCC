@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useToast } from '@/components/ui';
 
 interface Task {
   id: string;
@@ -24,10 +25,11 @@ interface TeamPayout {
 }
 
 export default function PayoutsTab() {
+  const toast = useToast();
   const [payouts, setPayouts] = useState<TeamPayout[]>([]);
   const [loading, setLoading] = useState(true);
+  const [paying, setPaying] = useState(false);
 
-  // For payment modal
   const [showModal, setShowModal] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState<TeamPayout | null>(null);
   const [payAmount, setPayAmount] = useState<Record<string, number>>({});
@@ -36,9 +38,10 @@ export default function PayoutsTab() {
     setLoading(true);
     try {
       const res = await fetch('/api/payouts');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       setPayouts(await res.json());
     } catch (e) {
-      console.error(e);
+      toast.error('โหลดรายการจ่ายเงินไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -46,44 +49,53 @@ export default function PayoutsTab() {
 
   useEffect(() => {
     fetchPayouts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const openPayModal = (team: TeamPayout) => {
     setSelectedTeam(team);
-    // Split evenly by default
     const memberCount = team.members.length || 1;
     const splitAmount = team.totalEarned / memberCount;
-    
     const initialAmounts: Record<string, number> = {};
-    team.members.forEach(m => {
-      initialAmounts[m.id] = splitAmount;
-    });
+    team.members.forEach(m => { initialAmounts[m.id] = splitAmount; });
     setPayAmount(initialAmounts);
     setShowModal(true);
   };
 
   const handlePay = async () => {
-    if (!selectedTeam) return;
-    
-    // Call the payout API for each member
-    for (const member of selectedTeam.members) {
-      const amount = payAmount[member.id] || 0;
-      if (amount > 0) {
-        await fetch('/api/payouts', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            maidId: member.id,
-            amount: amount,
-            notes: `จ่ายค่างานทีม ${selectedTeam.teamName} (${selectedTeam.taskCount} ห้อง)`
-          })
-        });
-      }
+    if (paying || !selectedTeam) return;
+    const totalToPay = Object.values(payAmount).reduce((s, v) => s + (v || 0), 0);
+    if (totalToPay <= 0) {
+      toast.warning('กรุณาระบุจำนวนเงินอย่างน้อย 1 คน');
+      return;
     }
-
-    alert('บันทึกการจ่ายเงินสำเร็จ!');
-    setShowModal(false);
-    fetchPayouts();
+    setPaying(true);
+    try {
+      const results = await Promise.all(
+        selectedTeam.members
+          .filter(m => (payAmount[m.id] || 0) > 0)
+          .map(m =>
+            fetch('/api/payouts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                maidId: m.id,
+                amount: payAmount[m.id],
+                notes: `จ่ายค่างานทีม ${selectedTeam.teamName} (${selectedTeam.taskCount} ห้อง)`,
+              }),
+            }),
+          ),
+      );
+      const failed = results.filter(r => !r.ok);
+      if (failed.length > 0) throw new Error(`มี ${failed.length} รายการล้มเหลว`);
+      setShowModal(false);
+      await fetchPayouts();
+      toast.success('บันทึกการจ่ายเงินสำเร็จ', `ยอดรวม ฿${totalToPay.toFixed(2)}`);
+    } catch (e) {
+      toast.error('บันทึกการจ่ายเงินไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setPaying(false);
+    }
   };
 
   const cardStyle = { background: '#fff', borderRadius: 12, padding: 20, boxShadow: '0 1px 3px rgba(0,0,0,0.1)', marginBottom: 16 };
@@ -148,8 +160,8 @@ export default function PayoutsTab() {
             </div>
 
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={() => setShowModal(false)} style={{ flex: 1, padding: 10, background: '#f3f4f6', borderRadius: 8, border: 'none', cursor: 'pointer' }}>ยกเลิก</button>
-              <button onClick={handlePay} style={{ flex: 1, padding: 10, background: '#10b981', color: '#fff', borderRadius: 8, border: 'none', cursor: 'pointer', fontWeight: 'bold' }}>ยืนยันการจ่าย</button>
+              <button onClick={() => setShowModal(false)} disabled={paying} style={{ flex: 1, padding: 10, background: '#f3f4f6', borderRadius: 8, border: 'none', cursor: paying ? 'not-allowed' : 'pointer', opacity: paying ? 0.7 : 1 }}>ยกเลิก</button>
+              <button onClick={handlePay} disabled={paying} style={{ flex: 1, padding: 10, background: '#10b981', color: '#fff', borderRadius: 8, border: 'none', cursor: paying ? 'not-allowed' : 'pointer', fontWeight: 'bold', opacity: paying ? 0.7 : 1 }}>{paying ? 'กำลังบันทึก...' : 'ยืนยันการจ่าย'}</button>
             </div>
           </div>
         </div>

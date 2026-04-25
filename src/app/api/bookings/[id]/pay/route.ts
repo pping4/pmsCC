@@ -44,6 +44,8 @@ import {
   generatePaymentNumber,
   generateReceiptNumber,
 } from '@/services/invoice-number.service';
+import { postPaymentReceived } from '@/services/ledger.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { logActivity }  from '@/services/activityLog.service';
 import { fmtDate }      from '@/lib/date-format';
 import type { ReceiptData } from '@/components/receipt/types';
@@ -53,8 +55,18 @@ import type { ReceiptData } from '@/components/receipt/types';
 const PaySchema = z.object({
   amount:        z.number().positive('ยอดชำระต้องมากกว่า 0'),
   paymentMethod: z.enum(['cash', 'transfer', 'credit_card', 'promptpay', 'ota_collect']),
-  cashSessionId: z.string().uuid().optional(),
   notes:         z.string().max(500).optional(),
+  // Sprint 5 — optional per-method fields (validated further below)
+  receivingAccountId: z.string().uuid().optional(),
+  slipImageUrl:       z.string().url().max(500).optional(),
+  slipRefNo:          z.string().trim().min(3).max(50).optional(),
+  cardBrand:   z.enum(['VISA', 'MASTER', 'JCB', 'UNIONPAY', 'AMEX', 'OTHER']).optional(),
+  cardType:    z.enum(['NORMAL', 'PREMIUM', 'CORPORATE', 'UNKNOWN']).optional(),
+  cardLast4:   z.string().regex(/^\d{4}$/).optional(),
+  authCode:    z.string().trim().max(12).optional(),
+  terminalId:  z.string().uuid().optional(),
+  feeAmount:   z.number().nonnegative().optional(),
+  feeAccountId: z.string().uuid().optional(),
 });
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
@@ -82,16 +94,23 @@ export async function POST(
     );
   }
 
-  const { amount, paymentMethod, cashSessionId, notes } = parsed.data;
-  const bookingId = params.id;
+  const {
+    amount, paymentMethod, notes,
+    receivingAccountId, slipImageUrl, slipRefNo,
+    cardBrand, cardType, cardLast4, authCode, terminalId,
+    feeAmount, feeAccountId,
+  } = parsed.data;
 
-  // ── Validate cash session ─────────────────────────────────────────────────
-  if (paymentMethod === 'cash' && !cashSessionId) {
-    return NextResponse.json(
-      { error: 'ต้องระบุ cashSessionId สำหรับการชำระด้วยเงินสด' },
-      { status: 422 },
-    );
+  // Sprint 5 — per-method guard rails (match payment.schema refines)
+  if ((paymentMethod === 'transfer' || paymentMethod === 'promptpay') && !receivingAccountId) {
+    return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
   }
+  if (paymentMethod === 'credit_card' && (!terminalId || !cardBrand)) {
+    return NextResponse.json({ error: 'กรุณาเลือกเครื่อง EDC และแบรนด์บัตร' }, { status: 422 });
+  }
+  const bookingId = params.id;
+  // Sprint 4B: cashSessionId is resolved server-side inside payment.service
+  // from `createdBy`. We no longer accept it from the client.
 
   // ── 2. Fetch booking ──────────────────────────────────────────────────────
   const booking = await prisma.booking.findUnique({
@@ -263,10 +282,52 @@ export async function POST(
     }
 
     // ── 8. Create Payment + PaymentAllocation ─────────────────────────────
+    // Sprint 4B: for cash, auto-resolve the caller's open shift (cashSessionId
+    // + cashBoxId). Other methods leave both null.
+    let resolvedCashSessionId: string | null = null;
+    let resolvedCashBoxId:     string | null = null;
+    if (paymentMethod === 'cash') {
+      const active = await getActiveSessionForUser(tx, userId);
+      if (!active) {
+        throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
+      }
+      resolvedCashSessionId = active.id;
+      resolvedCashBoxId     = active.cashBoxId;
+    }
+
+    // Sprint 5 — slip uniqueness pre-check
+    if (slipRefNo) {
+      const dup = await tx.payment.findUnique({
+        where: { slipRefNo },
+        select: { paymentNumber: true },
+      });
+      if (dup) {
+        throw new Error(`เลขอ้างอิง slip นี้ถูกใช้แล้วในใบรับเงิน ${dup.paymentNumber}`);
+      }
+    }
+
+    // Sprint 5 — terminal active + brand acceptance
+    if (paymentMethod === 'credit_card' && terminalId) {
+      const term = await tx.edcTerminal.findUnique({
+        where: { id: terminalId },
+        select: { isActive: true, allowedBrands: true, code: true },
+      });
+      if (!term) throw new Error('ไม่พบเครื่อง EDC ที่เลือก');
+      if (!term.isActive) throw new Error(`เครื่อง EDC ${term.code} ถูกปิดการใช้งาน`);
+      if (cardBrand && term.allowedBrands.length > 0 && !term.allowedBrands.includes(cardBrand as never)) {
+        throw new Error(`เครื่อง EDC ${term.code} ไม่รองรับบัตร ${cardBrand}`);
+      }
+    }
+
     const [paymentNumber, receiptNumber] = await Promise.all([
       generatePaymentNumber(tx),
       generateReceiptNumber(tx),
     ]);
+
+    // Sprint 5 — 2-state recon lifecycle
+    const reconStatus = paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED';
+    const clearedAt   = paymentMethod === 'cash' ? now         : null;
+    const clearedBy   = paymentMethod === 'cash' ? userId      : null;
 
     const payment = await tx.payment.create({
       data: {
@@ -277,12 +338,28 @@ export async function POST(
         amount:         new Prisma.Decimal(invResult.grandTotal),
         paymentMethod:  paymentMethod as never,
         paymentDate:    now,
-        cashSessionId:  cashSessionId ?? null,
+        cashSessionId:  resolvedCashSessionId,
+        cashBoxId:      resolvedCashBoxId,
         status:         'ACTIVE' as never,
+        reconStatus:    reconStatus as never,
+        clearedAt,
+        clearedBy,
         idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
         receivedBy:     userId,
         notes:          notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
         createdBy:      userId,
+        // Sprint 5 — transfer/QR
+        receivingAccountId: receivingAccountId ?? null,
+        slipImageUrl:       slipImageUrl       ?? null,
+        slipRefNo:          slipRefNo          ?? null,
+        // Sprint 5 — card
+        cardBrand:  (cardBrand ?? null) as never,
+        cardType:   (cardType  ?? null) as never,
+        cardLast4:  cardLast4  ?? null,
+        authCode:   authCode   ?? null,
+        terminalId: terminalId ?? null,
+        feeAmount:    feeAmount != null ? new Prisma.Decimal(feeAmount) : null,
+        feeAccountId: feeAccountId ?? null,
       },
       select: { id: true },
     });
@@ -293,6 +370,14 @@ export async function POST(
         invoiceId: invResult.invoiceId,
         amount:    new Prisma.Decimal(invResult.grandTotal),
       },
+    });
+
+    // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
+    await postPaymentReceived(tx, {
+      paymentMethod: paymentMethod,
+      amount:        invResult.grandTotal,
+      paymentId:     payment.id,
+      createdBy:     userId,
     });
 
     // ── 9. Mark invoice + line items PAID ─────────────────────────────────

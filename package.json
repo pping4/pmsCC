@@ -12,7 +12,8 @@
     "db:seed": "dotenv -e .env.local -- tsx prisma/seed.ts",
     "db:studio": "dotenv -e .env.local -- prisma studio",
     "postinstall": "prisma generate",
-    "test:e2e": "node scripts/test-http.mjs"
+    "test:e2e": "node scripts/test-http.mjs",
+    "db:wipe": "dotenv -e .env.local -- node scripts/wipe-test-data.mjs"
   },
   "dependencies": {
     "@prisma/client": "^5.14.0",
@@ -20,6 +21,7 @@
     "bcryptjs": "^2.4.3",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
+    "exceljs": "^4.4.0",
     "lucide-react": "^0.400.0",
     "next": "14.2.3",
     "next-auth": "^4.24.7",

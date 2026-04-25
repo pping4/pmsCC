@@ -327,6 +327,16 @@ export default function InvoiceDocument({ document: doc, printRef, isReprint = f
               <td style={{ ...tdStyle, textAlign: 'center', color: '#6b7280' }}>{idx + 1}</td>
               <td style={tdStyle}>
                 <div>{item.description}</div>
+                {item.periodStart && item.periodEnd && (
+                  <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2, fontStyle: 'italic' }}>
+                    📅 {item.periodStart} – {item.periodEnd}
+                  </div>
+                )}
+                {item.periodStart && !item.periodEnd && (
+                  <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2, fontStyle: 'italic' }}>
+                    📅 {item.periodStart}
+                  </div>
+                )}
                 {item.taxType === 'no_tax' && (
                   <div style={{ fontSize: 10, color: '#9ca3af' }}>ไม่มี VAT</div>
                 )}

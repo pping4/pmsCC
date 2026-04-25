@@ -3,6 +3,10 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logActivity } from '@/services/activityLog.service';
+import { createPendingRefund } from '@/services/refund.service';
+import { transitionRoom, canTransition, RoomTransitionError } from '@/services/roomStatus.service';
+import { createCheckoutCleaningTask } from '@/services/housekeeping.service';
+import { Prisma, PaymentStatus, RefundSource } from '@prisma/client';
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -85,9 +89,14 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
           metadata: { before: { status: 'confirmed' }, after: { status: 'checked_in' }, roomNumber: booking.room.number },
         });
 
-        await tx.room.update({
-          where: { id: booking.roomId },
-          data: { status: 'occupied', currentBookingId: params.id },
+        await transitionRoom(tx, {
+          roomId:           booking.roomId,
+          to:               'occupied',
+          reason:           'quick check-in',
+          userId:           session.user?.email ?? 'system',
+          userName:         session.user?.name ?? undefined,
+          bookingId:        params.id,
+          currentBookingId: params.id,
         });
 
         // ★ Create unpaid stay invoice so it shows in Collection Center
@@ -184,9 +193,22 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
         });
 
         // 2. Free up the room
-        await tx.room.update({
-          where: { id: booking.roomId },
-          data: { status: 'cleaning', currentBookingId: null },
+        await transitionRoom(tx, {
+          roomId:           booking.roomId,
+          to:               'cleaning',
+          reason:           'quick check-out',
+          userId:           session.user?.email ?? 'system',
+          userName:         session.user?.name ?? undefined,
+          bookingId:        params.id,
+          currentBookingId: null,
+        });
+
+        // 2b. Auto-create checkout cleaning task (deduped)
+        await createCheckoutCleaningTask(tx, {
+          roomId:    booking.roomId,
+          bookingId: params.id,
+          createdBy: session.user?.email ?? 'system',
+          notes:     `Auto-created on quick checkout (ห้อง ${booking.room.number})`,
         });
 
         // 3. Create unpaid invoice for remaining balance (shows in Collection Center)
@@ -253,29 +275,133 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
       });
       if (!booking) return NextResponse.json({ error: 'ไม่พบข้อมูลการจอง' }, { status: 404 });
 
-      const updated = await prisma.booking.update({
-        where: { id: params.id },
-        data: { status: 'cancelled' },
+      // Guard: checked_in bookings must shorten via resize / checkout — not raw cancel
+      if (booking.status === 'checked_in') {
+        return NextResponse.json(
+          {
+            error: 'ไม่สามารถยกเลิกการจองที่เช็คอินแล้ว',
+            message: 'กรุณาใช้ "เช็คเอาท์" หรือย่นวันพัก (ลากขอบใน tape chart) แทน',
+          },
+          { status: 409 },
+        );
+      }
+
+      if (booking.status === 'cancelled' || booking.status === 'checked_out') {
+        return NextResponse.json({ error: 'การจองนี้ปิดไปแล้ว' }, { status: 409 });
+      }
+
+      // Compute total paid by summing ACTIVE payments for this booking
+      const paidAgg = await prisma.payment.aggregate({
+        where: { bookingId: params.id, status: PaymentStatus.ACTIVE },
+        _sum: { amount: true },
       });
-      await prisma.room.update({
-        where: { id: booking.roomId },
-        data: { status: 'available', currentBookingId: null },
+      const totalPaid = paidAgg._sum?.amount ?? new Prisma.Decimal(0);
+
+      // Cancellation policy: caller decides the refund amount.
+      // - undefined / null  → default to full totalPaid (back-compat)
+      // - 0                 → forfeit (no refund)
+      // - N (0 < N ≤ paid)  → partial refund
+      const requestedRefund =
+        data.refundAmount === undefined || data.refundAmount === null
+          ? totalPaid
+          : new Prisma.Decimal(data.refundAmount);
+
+      if (requestedRefund.isNegative()) {
+        return NextResponse.json(
+          { error: 'จำนวนเงินคืนต้องไม่ติดลบ' },
+          { status: 400 },
+        );
+      }
+      if (requestedRefund.greaterThan(totalPaid)) {
+        return NextResponse.json(
+          {
+            error: 'จำนวนเงินคืนเกินยอดที่จ่ายแล้ว',
+            message: `ยอดที่จ่ายแล้วคือ ฿${totalPaid.toString()}`,
+          },
+          { status: 400 },
+        );
+      }
+
+      const reason: string =
+        typeof data.reason === 'string' && data.reason.trim()
+          ? data.reason.trim()
+          : `ยกเลิกการจอง ${booking.bookingNumber}`;
+
+      const result = await prisma.$transaction(async (tx) => {
+        const updated = await tx.booking.update({
+          where: { id: params.id },
+          data: { status: 'cancelled' },
+          select: { id: true, bookingNumber: true, status: true, guestId: true },
+        });
+        // Only free the room if it was actually held by this booking.
+        // A cancellation shouldn't override a room currently occupied by a
+        // different guest (edge case: future-dated booking cancelled while
+        // room is in use).
+        const liveRoom = await tx.room.findUniqueOrThrow({
+          where: { id: booking.roomId },
+          select: { status: true, currentBookingId: true },
+        });
+        if (
+          liveRoom.currentBookingId === params.id &&
+          canTransition(liveRoom.status, 'available')
+        ) {
+          await transitionRoom(tx, {
+            roomId:           booking.roomId,
+            to:               'available',
+            reason:           'booking cancelled',
+            userId:           session.user?.email ?? 'system',
+            userName:         session.user?.name ?? undefined,
+            bookingId:        params.id,
+            currentBookingId: null,
+          });
+        }
+
+        let refundNumber: string | null = null;
+        if (requestedRefund.greaterThan(0)) {
+          const refund = await createPendingRefund(tx, {
+            bookingId: params.id,
+            guestId:   booking.guestId,
+            amount:    requestedRefund,
+            source:    RefundSource.cancellation,
+            reason,
+            referenceType: 'Booking',
+            referenceId:   params.id,
+            createdBy: session.user?.email ?? 'system',
+          });
+          refundNumber = refund.refundNumber;
+        }
+
+        return { updated, refundNumber };
       });
 
       await logActivity(prisma as any, {
         session,
         action: 'booking.cancelled',
         category: 'booking',
-        description: `ยกเลิกการจอง ${booking.bookingNumber}`,
+        description: `ยกเลิกการจอง ${booking.bookingNumber}${result.refundNumber ? ` (สร้าง refund ${result.refundNumber})` : ''}`,
         bookingId: params.id,
         roomId: booking.roomId,
         guestId: booking.guestId,
         icon: '❌',
         severity: 'warning',
-        metadata: { before: { status: booking.status }, after: { status: 'cancelled' } },
+        metadata: {
+          before: { status: booking.status },
+          after:  { status: 'cancelled' },
+          refundNumber: result.refundNumber,
+          refundAmount: result.refundNumber ? requestedRefund.toString() : null,
+          totalPaid:    totalPaid.toString(),
+          forfeit:      totalPaid.greaterThan(0) && requestedRefund.equals(0),
+          reason,
+        },
       });
 
-      return NextResponse.json({ success: true, booking: updated });
+      return NextResponse.json({
+        success: true,
+        booking: result.updated,
+        refund:  result.refundNumber
+          ? { refundNumber: result.refundNumber, amount: requestedRefund.toString() }
+          : null,
+      });
     }
 
     // ── General field update ───────────────────────────────────────────────
@@ -294,6 +420,12 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
 
     return NextResponse.json({ success: true, booking });
   } catch (error: unknown) {
+    if (error instanceof RoomTransitionError) {
+      return NextResponse.json(
+        { error: `ไม่สามารถเปลี่ยนสถานะห้องจาก ${error.from} → ${error.to}` },
+        { status: 409 },
+      );
+    }
     if (
       error &&
       typeof error === 'object' &&
@@ -303,10 +435,8 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
       return NextResponse.json({ error: 'ไม่พบข้อมูลการจอง' }, { status: 404 });
     }
     console.error('PATCH/PUT /api/bookings/[id] error:', error);
-    return NextResponse.json(
-      { error: 'เกิดข้อผิดพลาดภายในระบบ กรุณาลองใหม่อีกครั้ง' },
-      { status: 500 }
-    );
+    const msg = error instanceof Error ? error.message : 'เกิดข้อผิดพลาดภายในระบบ';
+    return NextResponse.json({ error: msg }, { status: 500 });
   }
 }
 

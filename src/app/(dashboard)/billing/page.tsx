@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { calcTax, formatCurrency, formatDate } from '@/lib/tax';
 import { INVOICE_STATUS_MAP } from '@/lib/constants';
+import { useToast } from '@/components/ui';
 
 interface Guest { id: string; firstName: string; lastName: string; companyName?: string; companyTaxId?: string; }
 interface InvoiceItem { id: string; description: string; amount: number; taxType: 'included' | 'excluded' | 'no_tax'; }
@@ -20,6 +21,7 @@ interface Invoice {
 const PAYMENT_LABELS: Record<string, string> = { cash: '💵 เงินสด', transfer: '🏦 โอนเงิน', credit_card: '💳 บัตรเครดิต' };
 
 export default function BillingPage() {
+  const toast = useToast();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [guests, setGuests] = useState<Guest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,6 +29,7 @@ export default function BillingPage() {
   const [selectedInv, setSelectedInv] = useState<Invoice | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [paying, setPaying] = useState(false);
   const [payingMethod, setPayingMethod] = useState('');
 
   // New invoice form
@@ -39,13 +42,19 @@ export default function BillingPage() {
   });
 
   const fetchInvoices = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (tab !== 'all') params.set('status', tab);
-    const res = await fetch(`/api/invoices?${params}`);
-    const data = await res.json();
-    setInvoices(data);
-    setLoading(false);
-  }, [tab]);
+    try {
+      const params = new URLSearchParams();
+      if (tab !== 'all') params.set('status', tab);
+      const res = await fetch(`/api/invoices?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setInvoices(data);
+    } catch (e) {
+      toast.error('โหลดข้อมูลไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [tab, toast]);
 
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
@@ -54,28 +63,59 @@ export default function BillingPage() {
   }, []);
 
   const payInvoice = async (id: string, method: string) => {
-    await fetch(`/api/invoices/${id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'pay', paymentMethod: method }),
-    });
-    await fetchInvoices();
-    setSelectedInv(null);
-    setPayingMethod('');
+    if (paying) return;
+    setPaying(true);
+    try {
+      const res = await fetch(`/api/invoices/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'pay', paymentMethod: method }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchInvoices();
+      setSelectedInv(null);
+      setPayingMethod('');
+      toast.success('บันทึกการชำระเงินสำเร็จ');
+    } catch (e) {
+      toast.error('ชำระเงินไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setPaying(false);
+    }
   };
 
   const createInvoice = async () => {
-    if (!newForm.guestId || newForm.items.every(i => !i.description)) return;
+    if (saving) return;
+    if (!newForm.guestId) {
+      toast.warning('กรุณาเลือกลูกค้า');
+      return;
+    }
+    if (newForm.items.every(i => !i.description)) {
+      toast.warning('กรุณาระบุรายการอย่างน้อย 1 รายการ');
+      return;
+    }
     setSaving(true);
-    await fetch('/api/invoices', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newForm),
-    });
-    await fetchInvoices();
-    setShowNew(false);
-    setSaving(false);
-    setNewForm({ guestId: '', issueDate: new Date().toISOString().split('T')[0], dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], notes: '', items: [{ description: '', amount: 0, taxType: 'included' }] });
+    try {
+      const res = await fetch('/api/invoices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newForm),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchInvoices();
+      setShowNew(false);
+      setNewForm({ guestId: '', issueDate: new Date().toISOString().split('T')[0], dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], notes: '', items: [{ description: '', amount: 0, taxType: 'included' }] });
+      toast.success('สร้างใบแจ้งหนี้สำเร็จ');
+    } catch (e) {
+      toast.error('สร้างใบแจ้งหนี้ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const addItem = () => setNewForm(p => ({ ...p, items: [...p.items, { description: '', amount: 0, taxType: 'included' as const }] }));

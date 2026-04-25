@@ -16,7 +16,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { fmtDate } from '@/lib/date-format';
-import type { InvoiceDocumentData } from '@/components/invoice/types';
+import { expandNightlyItems } from '@/lib/invoice-utils';
+import type { InvoiceDocumentData, InvoiceLineItem } from '@/components/invoice/types';
 
 export async function GET(
   _request: NextRequest,
@@ -119,17 +120,21 @@ export async function GET(
     checkIn:       fmtDate(checkIn),
     checkOut:      fmtDate(checkOut),
 
-    items: [
-      {
-        description: nights
-          ? `ค่าห้องพัก ${nights} คืน — ห้อง ${booking.room.number}`
-          : `ค่าห้องพัก — ห้อง ${booking.room.number}`,
-        quantity:  nights ?? 1,
-        unitPrice: rate,
-        amount:    expectedTotal,
-        taxType:   'no_tax',
-      },
-    ],
+    items: (nights && nights > 1
+      ? expandNightlyItems({
+          description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+          startDate:   checkIn,
+          nights,
+          unitPrice:   rate,
+          taxType:     'no_tax',
+        })
+      : [{
+          description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+          quantity:    nights ?? 1,
+          unitPrice:   rate,
+          amount:      expectedTotal,
+          taxType:     'no_tax',
+        }] satisfies InvoiceLineItem[]),
 
     subtotal:       expectedTotal,
     discountAmount: 0,

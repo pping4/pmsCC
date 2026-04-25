@@ -13,3 +13,7 @@ dist
 .idea
 *.traineddata
 tsconfig.tsbuildinfo
+
+# Sprint 5 Phase 2 — uploaded user files (keep directory, ignore contents)
+public/uploads/*
+!public/uploads/.gitkeep

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { fmtDate as fmtDateUtil, fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -210,8 +211,13 @@ function AddCompanionForm({ bookingId, onAdded, onCancel }: AddFormProps) {
     }
   };
 
+  const toast = useToast();
   const handleSubmit = async () => {
-    if (!firstName.trim() && !firstNameTH.trim()) return;
+    if (saving) return;
+    if (!firstName.trim() && !firstNameTH.trim()) {
+      toast.warning('กรุณาระบุชื่อ');
+      return;
+    }
     setSaving(true);
     const fd = new FormData();
     fd.append('firstName',   firstName.trim() || firstNameTH.trim() || 'Unknown');
@@ -228,11 +234,18 @@ function AddCompanionForm({ bookingId, onAdded, onCancel }: AddFormProps) {
     });
 
     try {
-      await fetch(`/api/bookings/${bookingId}/companions`, {
+      const res = await fetch(`/api/bookings/${bookingId}/companions`, {
         method: 'POST',
         body: fd,
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      toast.success('เพิ่มผู้ติดตามสำเร็จ');
       onAdded();
+    } catch (e) {
+      toast.error('เพิ่มผู้ติดตามไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setSaving(false);
     }
@@ -434,6 +447,7 @@ function CompanionCard({ c, onDelete, onPhotoDelete }: {
 // ─── Booking Card ────────────────────────────────────────────────────────────
 
 function BookingCard({ b, onUpdate }: { b: BookingHistory; onUpdate: () => void }) {
+  const toast = useToast();
   const [showAddForm, setShowAddForm] = useState(false);
   const isPast  = b.status === 'checked_out' || b.status === 'cancelled';
   const stCfg   = STATUS_LABELS[b.status] || STATUS_LABELS.confirmed;
@@ -441,13 +455,25 @@ function BookingCard({ b, onUpdate }: { b: BookingHistory; onUpdate: () => void 
 
   const deleteCompanion = async (id: string) => {
     if (!confirm('ลบผู้ติดตามนี้?')) return;
-    await fetch(`/api/bookings/companions/${id}`, { method: 'DELETE' });
-    onUpdate();
+    try {
+      const res = await fetch(`/api/bookings/companions/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success('ลบผู้ติดตามสำเร็จ');
+      onUpdate();
+    } catch (e) {
+      toast.error('ลบผู้ติดตามไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   const deletePhoto = async (photoId: string) => {
-    await fetch(`/api/bookings/companions/photo/${photoId}`, { method: 'DELETE' });
-    onUpdate();
+    try {
+      const res = await fetch(`/api/bookings/companions/photo/${photoId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success('ลบรูปภาพสำเร็จ');
+      onUpdate();
+    } catch (e) {
+      toast.error('ลบรูปภาพไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   return (
@@ -561,6 +587,7 @@ function BookingCard({ b, onUpdate }: { b: BookingHistory; onUpdate: () => void 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function RoomHistoryTab({ roomId, roomNumber }: Props) {
+  const toast = useToast();
   const [bookings, setBookings]   = useState<BookingHistory[]>([]);
   const [loading, setLoading]     = useState(true);
   const [error, setError]         = useState('');
@@ -569,15 +596,16 @@ export default function RoomHistoryTab({ roomId, roomNumber }: Props) {
     setLoading(true);
     try {
       const res = await fetch(`/api/rooms/${roomId}/history`);
-      if (!res.ok) throw new Error('Failed to load');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setBookings(data.bookings);
-    } catch {
+    } catch (e) {
       setError('ไม่สามารถโหลดประวัติได้');
+      toast.error('โหลดประวัติห้องไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
-  }, [roomId]);
+  }, [roomId, toast]);
 
   useEffect(() => { load(); }, [load]);
 

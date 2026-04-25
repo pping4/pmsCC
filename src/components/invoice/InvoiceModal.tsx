@@ -64,6 +64,11 @@ function buildThermalHtml(doc: InvoiceDocumentData, widthMM: number): string {
   const rows = doc.items.map(item => `
     <div style="margin-bottom:4px;">
       <div style="word-break:break-word;">${item.description}</div>
+      ${item.periodStart && item.periodEnd
+        ? `<div style="font-size:9px;color:#1e40af;padding-left:4px;font-style:italic;">${item.periodStart} – ${item.periodEnd}</div>`
+        : item.periodStart
+          ? `<div style="font-size:9px;color:#1e40af;padding-left:4px;font-style:italic;">${item.periodStart}</div>`
+          : ''}
       <div style="display:flex;justify-content:space-between;font-size:10px;color:#444;padding-left:8px;">
         <span>${item.quantity} × ${fmtAmt(item.unitPrice)}</span>
         <span style="font-weight:700;">${fmtAmt(item.amount)}</span>

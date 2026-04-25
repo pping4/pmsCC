@@ -2,15 +2,7 @@
 
 import React from 'react';
 import { FONT } from '../lib/constants';
-
-const SCENARIO_LABELS: Record<string, string> = {
-  A: 'ปรับวันพัก (ไม่มีผลทางการเงิน)',
-  B: 'ปรับ Invoice ที่ยังไม่ชำระ',
-  C: 'ปรับยอดค้างชำระ',
-  D: 'สร้าง Invoice เพิ่มเติม',
-  E: 'ไม่สามารถแก้ไข (เช็คเอาท์แล้ว)',
-  F: 'ไม่สามารถแก้ไข (ยกเลิกแล้ว)',
-};
+import { fmtBaht } from '@/lib/date-format';
 
 interface PreviewData {
   scenario: string;
@@ -42,21 +34,19 @@ export default function ResizeConfirmDialog({
 }: ResizeConfirmDialogProps) {
   if (!isOpen || !preview) return null;
 
-  const formatCurrency = (value: number): string => {
-    return new Intl.NumberFormat('th-TH', {
-      style: 'currency',
-      currency: 'THB',
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 2,
-    }).format(value);
-  };
+  const formatCurrency = (value: number): string => `฿${fmtBaht(value)}`;
 
   const isDiffPositive = preview.rateDiff >= 0;
   const diffLabel = isDiffPositive ? 'เพิ่มขึ้น' : 'คืนเงิน';
   const diffColor = isDiffPositive ? '#dc2626' : '#16a34a';
 
-  // Scenario D (สร้าง Invoice เพิ่มเติม) gets a warning
   const isScenarioD = preview.scenario === 'D';
+  const isRefund = !isDiffPositive;
+  const warningText = isScenarioD
+    ? '⚠️ ระบบจะสร้าง Invoice เพิ่มเติมสำหรับค่าใช้สอยที่เพิ่มขึ้น หากหดวันพัก ระบบจะบันทึกรายการคืนเงิน (pending) ให้ฝ่ายการเงินดำเนินการ'
+    : isRefund
+    ? '💰 ระบบจะบันทึกรายการคืนเงิน (สถานะ pending) — ฝ่ายการเงินจะดำเนินการจ่ายคืนภายหลัง'
+    : null;
 
   return (
     <div
@@ -112,21 +102,21 @@ export default function ResizeConfirmDialog({
           </div>
         </div>
 
-        {/* ──── Scenario D Warning (Yellow Box) ──── */}
-        {isScenarioD && (
+        {/* ──── Scenario / Refund Warning Box ──── */}
+        {warningText && (
           <div
             style={{
-              background: '#fef08a',
-              border: '1px solid #eab308',
+              background: isRefund ? '#dcfce7' : '#fef08a',
+              border: `1px solid ${isRefund ? '#86efac' : '#eab308'}`,
               borderRadius: 8,
               padding: 12,
               marginBottom: 16,
               fontSize: 13,
-              color: '#713f12',
+              color: isRefund ? '#166534' : '#713f12',
               lineHeight: 1.5,
             }}
           >
-            ⚠️ ระบบจะสร้าง Invoice เพิ่มเติมสำหรับค่าใช้สอยเพิ่มขึ้น หากหดวันพัก จะต้องคืนเงินให้ผู้เข้าพัก
+            {warningText}
           </div>
         )}
 

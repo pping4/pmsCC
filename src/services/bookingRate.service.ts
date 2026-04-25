@@ -172,8 +172,12 @@ export async function recalculateRate(
   const newNights = calculateNights(context.newCheckIn, context.newCheckOut);
   const nightsDifference = newNights - oldNights;
 
-  // Scenario A: Confirmed + No invoices yet
-  if (context.bookingStatus === 'confirmed' && paymentStatus.totalCharged.equals(0)) {
+  // Scenario A: Confirmed + No invoices at all (deposit-only or nothing charged)
+  if (
+    context.bookingStatus === 'confirmed' &&
+    paymentStatus.paidInvoices.length === 0 &&
+    paymentStatus.unpaidInvoices.length === 0
+  ) {
     const newRate = new Decimal(newNights).times(dailyRate);
     return {
       scenario: 'A',
@@ -185,18 +189,21 @@ export async function recalculateRate(
     };
   }
 
-  // Scenario B: Confirmed + Has deposit only (or unpaid invoices)
-  if (context.bookingStatus === 'confirmed') {
+  // Scenario B: Confirmed + has unpaid invoices only (no paid invoices yet)
+  // Unpaid invoices can be regenerated; we recompute the full rate.
+  if (
+    context.bookingStatus === 'confirmed' &&
+    paymentStatus.paidInvoices.length === 0
+  ) {
     const newRate = new Decimal(newNights).times(dailyRate);
     const outstandingBalance = newRate.minus(context.currentDeposit);
 
-    // Check if new rate is less than deposit
     let warning: string | undefined;
     let refundDue: Decimal | undefined;
 
     if (outstandingBalance.lessThan(0)) {
-      warning = `เงินมัดจำเกินกว่าอัตราใหม่ คงเหลือ ฿${refundDue}`;
       refundDue = context.currentDeposit.minus(newRate);
+      warning = `เงินมัดจำเกินกว่าอัตราใหม่ คงเหลือ ฿${refundDue.toFixed(2)}`;
     }
 
     return {
@@ -209,6 +216,46 @@ export async function recalculateRate(
       userMessage: 'อัตราการจองได้รับการอัปเดตแล้ว',
       refundDue,
     };
+  }
+
+  // Confirmed + has at least one paid invoice — treat incrementally like Scenario C
+  // (paid invoices are immutable; only charge/refund the delta).
+  if (context.bookingStatus === 'confirmed') {
+    if (nightsDifference > 0) {
+      const additionalCharge = new Decimal(nightsDifference).times(dailyRate);
+      const newRate = context.currentRate.plus(additionalCharge);
+      return {
+        scenario: 'C',
+        isAllowed: true,
+        newRate,
+        rateChange: additionalCharge,
+        requiresConfirmation: true,
+        userMessage: `ขยายการพัก ${nightsDifference} คืน เพิ่มเติม ฿${additionalCharge.toFixed(2)}`,
+        additionalCharge,
+      };
+    } else if (nightsDifference < 0) {
+      const refundDue = new Decimal(Math.abs(nightsDifference)).times(dailyRate);
+      const newRate = context.currentRate.minus(refundDue);
+      return {
+        scenario: 'C',
+        isAllowed: true,
+        newRate,
+        rateChange: refundDue.negated(),
+        requiresConfirmation: true,
+        warning: `ลดการพัก ${Math.abs(nightsDifference)} คืน คืนเงิน ฿${refundDue.toFixed(2)}`,
+        userMessage: 'ต้องดำเนินการคืนเงิน',
+        refundDue,
+      };
+    } else {
+      return {
+        scenario: 'C',
+        isAllowed: true,
+        newRate: context.currentRate,
+        rateChange: new Decimal(0),
+        requiresConfirmation: false,
+        userMessage: 'ไม่มีการเปลี่ยนแปลงจำนวนคืน',
+      };
+    }
   }
 
   // Scenario C & D: Checked-in

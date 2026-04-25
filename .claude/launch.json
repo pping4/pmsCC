@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pms-dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["dotenv", "-e", ".env.local", "--", "next", "dev"],
+      "port": 3000
+    }
+  ]
+}

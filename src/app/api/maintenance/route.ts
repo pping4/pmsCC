@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
+import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 
 export async function GET(request: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -53,12 +54,24 @@ export async function POST(request: NextRequest) {
     include: { room: { include: { roomType: true } } },
   });
 
-  // If urgent/high priority, update room status to maintenance
+  // If urgent/high priority, update room status to maintenance — only if the
+  // current status allows it (don't evict a checked-in guest).
   if (data.priority === 'urgent' || data.priority === 'high') {
-    await prisma.room.update({
+    const live = await prisma.room.findUniqueOrThrow({
       where: { id: room.id },
-      data: { status: 'maintenance' },
+      select: { status: true },
     });
+    if (canTransition(live.status, 'maintenance')) {
+      await prisma.$transaction(async (tx) => {
+        await transitionRoom(tx, {
+          roomId:   room.id,
+          to:       'maintenance',
+          reason:   `maintenance task ${taskNumber} (${data.priority})`,
+          userId:   session.user?.email ?? 'system',
+          userName: session.user?.name ?? undefined,
+        });
+      });
+    }
   }
 
   return NextResponse.json(task, { status: 201 });

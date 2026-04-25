@@ -17,6 +17,10 @@ interface PreviewData {
   rateDiff: number;
   requiresConfirmation: boolean;
   currentVersion: number;
+  warning?: string;
+  userMessage?: string;
+  refundDue?: number;
+  additionalCharge?: number;
 }
 
 interface ConfirmState {
@@ -308,6 +312,14 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
         rateDiff,
         requiresConfirmation: previewData.financial.requiresConfirmation,
         currentVersion: previewData.currentVersion,
+        warning: previewData.financial.warning,
+        userMessage: previewData.financial.userMessage,
+        refundDue: previewData.financial.refundDue
+          ? parseFloat(previewData.financial.refundDue)
+          : undefined,
+        additionalCharge: previewData.financial.additionalCharge
+          ? parseFloat(previewData.financial.additionalCharge)
+          : undefined,
       };
 
       // Check if auto-proceed (Scenario A with no confirmation required)

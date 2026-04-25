@@ -21,6 +21,7 @@ import {
   generateReceiptNumber,
   generateDepositNumber,
 } from './invoice-number.service';
+import { getActiveSessionForUser } from './cashSession.service';
 
 // For Prisma JSON null handling
 const JsonNull = Prisma.JsonNull;
@@ -49,6 +50,38 @@ export interface CreateDepositInput {
 
 export async function createSecurityDeposit(tx: TxClient, input: CreateDepositInput) {
   const depositNumber = await generateDepositNumber(tx);
+
+  // Sprint 4B: auto-resolve session for cash deposits. The caller never
+  // trusts a client-supplied cashSessionId — we look up the open shift for
+  // `createdBy` and denormalize cashBoxId onto the Payment row.
+  let resolvedCashSessionId: string | null = input.cashSessionId ?? null;
+  let resolvedCashBoxId:     string | null = null;
+
+  if (input.paymentMethod === 'cash') {
+    if (!resolvedCashSessionId) {
+      const active = await getActiveSessionForUser(tx, input.createdBy);
+      if (!active) {
+        throw new Error('การรับเงินมัดจำด้วยเงินสดต้องเปิดกะแคชเชียร์ก่อน');
+      }
+      resolvedCashSessionId = active.id;
+      resolvedCashBoxId     = active.cashBoxId;
+    } else {
+      const sess = await tx.cashSession.findUnique({
+        where:  { id: resolvedCashSessionId },
+        select: { status: true, cashBoxId: true },
+      });
+      if (!sess || sess.status !== 'OPEN') {
+        throw new Error('Cash session ไม่เปิดใช้งาน');
+      }
+      resolvedCashBoxId = sess.cashBoxId;
+    }
+  } else if (resolvedCashSessionId) {
+    const sess = await tx.cashSession.findUnique({
+      where:  { id: resolvedCashSessionId },
+      select: { cashBoxId: true },
+    });
+    resolvedCashBoxId = sess?.cashBoxId ?? null;
+  }
 
   const deposit = await tx.securityDeposit.create({
     data: {
@@ -93,7 +126,8 @@ export async function createSecurityDeposit(tx: TxClient, input: CreateDepositIn
       amount:         new Prisma.Decimal(input.amount),
       paymentMethod:  input.paymentMethod as never,
       paymentDate:    new Date(),
-      cashSessionId:  input.cashSessionId ?? null,
+      cashSessionId:  resolvedCashSessionId,
+      cashBoxId:      resolvedCashBoxId,
       status:         'ACTIVE' as never,
       idempotencyKey: `dep-${deposit.id}`,
       receivedBy:     input.receivedBy ?? null,

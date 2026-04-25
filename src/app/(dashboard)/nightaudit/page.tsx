@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useToast } from '@/components/ui';
 
 interface AuditData {
   date: string;
@@ -31,6 +32,7 @@ const formatCurrency = (n: number) => `฿${n.toLocaleString('th-TH', { minimumF
 const formatDate = (d: string) => new Date(d).toLocaleDateString('th-TH', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
 export default function NightAuditPage() {
+  const toast = useToast();
   const [data, setData] = useState<AuditData | null>(null);
   const [loading, setLoading] = useState(true);
   const [auditDate, setAuditDate] = useState(new Date().toISOString().split('T')[0]);
@@ -39,19 +41,32 @@ export default function NightAuditPage() {
 
   const fetchAudit = useCallback(async () => {
     setLoading(true);
-    const res = await fetch(`/api/nightaudit?date=${auditDate}`);
-    const d = await res.json();
-    setData(d);
-    setLoading(false);
-  }, [auditDate]);
+    try {
+      const res = await fetch(`/api/nightaudit?date=${auditDate}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const d = await res.json();
+      setData(d);
+    } catch (e) {
+      toast.error('โหลดข้อมูล Night Audit ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [auditDate, toast]);
 
   useEffect(() => { fetchAudit(); }, [fetchAudit]);
 
   const closeDay = async () => {
+    if (closing) return;
     setClosing(true);
-    await new Promise(r => setTimeout(r, 1500)); // simulate processing
-    setClosed(true);
-    setClosing(false);
+    try {
+      await new Promise(r => setTimeout(r, 1500)); // simulate processing
+      setClosed(true);
+      toast.success('ปิดบัญชีประจำวันสำเร็จ', `Night Audit วันที่ ${formatDate(auditDate)} เสร็จสิ้น`);
+    } catch (e) {
+      toast.error('ปิดบัญชีไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setClosing(false);
+    }
   };
 
   const now = new Date();

@@ -27,62 +27,74 @@ const STATUS_BADGE_DEFS: StatusBadgeDef[] = [
   { key: 'maintenance', dot: '#ef4444', icon: '🚧', labelTH: 'ปิดซ่อม',               labelEN: 'Blocked'    },
 ];
 
-function RoomStatusBadge({ def, count }: { def: StatusBadgeDef; count: number }) {
-  const [hovered, setHovered] = useState(false);
-  if (count === 0) return null;
-
+/**
+ * StatusSummaryStrip — compact single-line summary of room states for today.
+ *
+ * Replaces the previous 6 individual hover-tooltip pills with a denser
+ * inline strip that shows on BOTH desktop and mobile. On mobile we drop the
+ * Thai label and keep only the icon + count to fit in the narrow viewport.
+ *
+ * Counts come pre-computed from page.tsx (derived from today's bookings),
+ * NOT from the stored `room.status` field which is stale.
+ */
+function StatusSummaryStrip({
+  counts,
+  isMobile,
+}: {
+  counts: Partial<Record<RoomStatus, number>>;
+  isMobile: boolean;
+}) {
   return (
     <div
-      style={{ position: 'relative', display: 'inline-flex' }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      role="group"
+      aria-label="สรุปสถานะห้องวันนี้"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: isMobile ? 4 : 6,
+        flexWrap: isMobile ? 'wrap' : 'nowrap',
+        // On mobile let the strip scroll horizontally if it overflows rather
+        // than wrap to a 2nd line that pushes everything down.
+        overflowX: isMobile ? 'auto' : 'visible',
+        minWidth: 0,
+      }}
     >
-      {/* Badge pill */}
-      <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 3,
-        padding: '2px 6px', borderRadius: 10,
-        background: def.dot + '18', border: `1px solid ${def.dot}55`,
-        cursor: 'default', userSelect: 'none',
-      }}>
-        <span style={{ fontSize: 12, lineHeight: 1, flexShrink: 0 }}>{def.icon}</span>
-        <span style={{ fontSize: 11, fontWeight: 700, color: def.dot, lineHeight: 1 }}>{count}</span>
-      </div>
-
-      {/* Hover tooltip */}
-      {hovered && (
-        <div style={{
-          position: 'absolute', top: 'calc(100% + 6px)', left: '50%',
-          transform: 'translateX(-50%)',
-          background: '#1f2937', color: '#fff',
-          borderRadius: 6, padding: '5px 9px',
-          whiteSpace: 'nowrap', zIndex: 100,
-          boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-          pointerEvents: 'none',
-        }}>
-          {/* arrow */}
-          <div style={{
-            position: 'absolute', top: -5, left: '50%', transform: 'translateX(-50%)',
-            width: 0, height: 0,
-            borderLeft: '5px solid transparent', borderRight: '5px solid transparent',
-            borderBottom: '5px solid #1f2937',
-          }} />
-          <div style={{ fontSize: 11, fontWeight: 700, lineHeight: 1.4 }}>{def.labelTH}</div>
-          <div style={{ fontSize: 10, opacity: 0.7, lineHeight: 1.4 }}>{def.labelEN}</div>
-        </div>
-      )}
+      {STATUS_BADGE_DEFS.map(def => {
+        const c = counts[def.key] ?? 0;
+        const dim = c === 0;
+        return (
+          <span
+            key={def.key}
+            title={`${def.labelTH} (${def.labelEN}): ${c}`}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 3,
+              padding: isMobile ? '2px 6px' : '3px 8px',
+              borderRadius: 999,
+              background: dim ? 'var(--surface-muted)' : def.dot + '1a',
+              border: `1px solid ${dim ? 'var(--border-light)' : def.dot + '55'}`,
+              fontSize: 11,
+              lineHeight: 1,
+              color: dim ? 'var(--text-faint)' : def.dot,
+              fontWeight: 700,
+              whiteSpace: 'nowrap',
+              opacity: dim ? 0.55 : 1,
+              flexShrink: 0,
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 12 }}>{def.icon}</span>
+            <span>{c}</span>
+            {!isMobile && (
+              <span style={{ fontWeight: 500, color: dim ? 'var(--text-faint)' : 'var(--text-secondary)' }}>
+                {def.labelTH}
+              </span>
+            )}
+          </span>
+        );
+      })}
     </div>
   );
-}
-
-/** Count rooms per status across all room types */
-function countRoomStatuses(roomTypes: RoomTypeItem[]): Record<RoomStatus, number> {
-  const counts: Record<string, number> = {};
-  for (const rt of roomTypes) {
-    for (const room of rt.rooms) {
-      counts[room.status] = (counts[room.status] ?? 0) + 1;
-    }
-  }
-  return counts as Record<RoomStatus, number>;
 }
 
 interface TapeHeaderProps {
@@ -114,6 +126,9 @@ interface TapeHeaderProps {
 
   // Responsive
   isMobile?: boolean;  // < 768px — stacks rows, shrinks padding, compacts toolbar
+
+  // Room status counts for TODAY (derived in page.tsx from live bookings)
+  statusCountsToday?: Partial<Record<RoomStatus, number>>;
 }
 
 const TapeHeader: React.FC<TapeHeaderProps> = ({
@@ -132,6 +147,7 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
   onNewBooking,
   onRefresh,
   isMobile = false,
+  statusCountsToday = {},
 }) => {
   // ─── Mini Calendar State ──────────────────────────────────────────────────────
   const [isMiniCalendarOpen, setIsMiniCalendarOpen] = useState(false);
@@ -517,19 +533,6 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
             </div>
           )}
 
-          {/* Room status icon badges — hidden on mobile (no hover, and they
-              eat precious horizontal space). Users can still see room status
-              via the individual room cells. */}
-          {!isMobile && (() => {
-            const counts = countRoomStatuses(roomTypes);
-            return (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 8 }}>
-                {STATUS_BADGE_DEFS.map(def => (
-                  <RoomStatusBadge key={def.key} def={def} count={counts[def.key] ?? 0} />
-                ))}
-              </div>
-            );
-          })()}
         </div>
 
         {/* Right: View toggle, Occupancy, New Booking, Refresh */}
@@ -614,6 +617,30 @@ const TapeHeader: React.FC<TapeHeaderProps> = ({
             ↻
           </button>
         </div>
+      </div>
+
+      {/* Row 1.5: Live room-status summary strip — compact, single-line,
+          visible on both desktop AND mobile. Counts come from page.tsx and
+          are derived from today's actual bookings (not the stale stored
+          room.status field). */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: isMobile ? '6px 10px' : '6px 16px',
+        borderBottom: '1px solid var(--border-default)',
+        background: 'var(--surface-subtle, var(--surface-card))',
+        overflowX: 'auto',
+      }}>
+        {!isMobile && (
+          <span style={{
+            fontSize: 10, fontWeight: 700, color: 'var(--text-faint)',
+            textTransform: 'uppercase', letterSpacing: 0.5, flexShrink: 0,
+          }}>
+            วันนี้
+          </span>
+        )}
+        <StatusSummaryStrip counts={statusCountsToday} isMobile={isMobile} />
       </div>
 
       {/* Row 2: Filters bar */}

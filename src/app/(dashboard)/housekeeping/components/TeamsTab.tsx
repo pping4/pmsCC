@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useToast } from '@/components/ui';
 
 interface Maid {
   id: string;
@@ -16,14 +17,16 @@ interface MaidTeam {
 }
 
 export default function TeamsTab() {
+  const toast = useToast();
   const [maids, setMaids] = useState<Maid[]>([]);
   const [teams, setTeams] = useState<MaidTeam[]>([]);
   const [loading, setLoading] = useState(true);
+  const [savingMaid, setSavingMaid] = useState(false);
+  const [savingTeam, setSavingTeam] = useState(false);
 
-  // Form states
   const [newMaidName, setNewMaidName] = useState('');
   const [newMaidPhone, setNewMaidPhone] = useState('');
-  
+
   const [newTeamName, setNewTeamName] = useState('');
   const [selectedMaidsForTeam, setSelectedMaidsForTeam] = useState<string[]>([]);
 
@@ -32,12 +35,13 @@ export default function TeamsTab() {
     try {
       const [maidsRes, teamsRes] = await Promise.all([
         fetch('/api/maids'),
-        fetch('/api/maid-teams')
+        fetch('/api/maid-teams'),
       ]);
+      if (!maidsRes.ok || !teamsRes.ok) throw new Error('โหลดข้อมูลไม่สำเร็จ');
       setMaids(await maidsRes.json());
       setTeams(await teamsRes.json());
     } catch (e) {
-      console.error(e);
+      toast.error('โหลดข้อมูลไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
@@ -45,30 +49,67 @@ export default function TeamsTab() {
 
   useEffect(() => {
     fetchData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const createMaid = async () => {
-    if (!newMaidName) return;
-    await fetch('/api/maids', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newMaidName, phone: newMaidPhone })
-    });
-    setNewMaidName('');
-    setNewMaidPhone('');
-    fetchData();
+    if (savingMaid) return;
+    if (!newMaidName.trim()) {
+      toast.warning('กรุณาระบุชื่อแม่บ้าน');
+      return;
+    }
+    setSavingMaid(true);
+    try {
+      const res = await fetch('/api/maids', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newMaidName, phone: newMaidPhone }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      setNewMaidName('');
+      setNewMaidPhone('');
+      await fetchData();
+      toast.success('เพิ่มแม่บ้านสำเร็จ');
+    } catch (e) {
+      toast.error('เพิ่มแม่บ้านไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSavingMaid(false);
+    }
   };
 
   const createTeam = async () => {
-    if (!newTeamName) return;
-    await fetch('/api/maid-teams', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newTeamName, memberIds: selectedMaidsForTeam })
-    });
-    setNewTeamName('');
-    setSelectedMaidsForTeam([]);
-    fetchData();
+    if (savingTeam) return;
+    if (!newTeamName.trim()) {
+      toast.warning('กรุณาระบุชื่อทีม');
+      return;
+    }
+    if (selectedMaidsForTeam.length === 0) {
+      toast.warning('กรุณาเลือกสมาชิกอย่างน้อย 1 คน');
+      return;
+    }
+    setSavingTeam(true);
+    try {
+      const res = await fetch('/api/maid-teams', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newTeamName, memberIds: selectedMaidsForTeam }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      setNewTeamName('');
+      setSelectedMaidsForTeam([]);
+      await fetchData();
+      toast.success('สร้างทีมสำเร็จ');
+    } catch (e) {
+      toast.error('สร้างทีมไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSavingTeam(false);
+    }
   };
 
   const toggleMaidSelection = (id: string) => {
@@ -101,7 +142,7 @@ export default function TeamsTab() {
             onChange={e => setNewMaidPhone(e.target.value)} 
             style={inputStyle} 
           />
-          <button onClick={createMaid} style={{ ...btnStyle, whiteSpace: 'nowrap', height: 42 }}>เพิ่ม</button>
+          <button onClick={createMaid} disabled={savingMaid} style={{ ...btnStyle, whiteSpace: 'nowrap', height: 42, opacity: savingMaid ? 0.7 : 1, cursor: savingMaid ? 'not-allowed' : 'pointer' }}>{savingMaid ? 'กำลังเพิ่ม...' : 'เพิ่ม'}</button>
         </div>
 
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
@@ -141,7 +182,7 @@ export default function TeamsTab() {
               </label>
             ))}
           </div>
-          <button onClick={createTeam} style={{ ...btnStyle, width: '100%' }}>สร้างทีมย่อย</button>
+          <button onClick={createTeam} disabled={savingTeam} style={{ ...btnStyle, width: '100%', opacity: savingTeam ? 0.7 : 1, cursor: savingTeam ? 'not-allowed' : 'pointer' }}>{savingTeam ? 'กำลังสร้าง...' : 'สร้างทีมย่อย'}</button>
         </div>
 
         <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>

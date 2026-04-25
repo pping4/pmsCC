@@ -1,7 +1,9 @@
 'use client';
 
+import { useState } from 'react';
 import { signOut } from 'next-auth/react';
 import { useTheme } from '@/lib/theme';
+import { ChangePasswordDialog } from './ChangePasswordDialog';
 
 interface HeaderProps {
   user: { name?: string | null; email?: string | null; role?: string };
@@ -10,6 +12,7 @@ interface HeaderProps {
 export function Header({ user }: HeaderProps) {
   const { theme, toggle } = useTheme();
   const isDark = theme === 'dark';
+  const [pwOpen, setPwOpen] = useState(false);
 
   return (
     <header
@@ -31,7 +34,7 @@ export function Header({ user }: HeaderProps) {
       }}
     >
       {/* Mobile Logo */}
-      <div className="lg:hidden" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div className="flex lg:hidden" style={{ alignItems: 'center', gap: 8 }}>
         <div style={{
           width: 32, height: 32, borderRadius: 8,
           background: 'linear-gradient(135deg, #1e40af, #3b82f6)',
@@ -40,8 +43,41 @@ export function Header({ user }: HeaderProps) {
         <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--text-primary)' }}>PMS</span>
       </div>
 
-      {/* Desktop spacer */}
-      <div className="hidden lg:block" />
+      {/* Desktop: Command palette trigger */}
+      <button
+        onClick={() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))}
+        className="hidden lg:flex"
+        title="เปิดเมนูค้นหา (Ctrl+K)"
+        aria-label="open command palette"
+        style={{
+          alignItems: 'center',
+          gap: 8,
+          padding: '6px 12px',
+          borderRadius: 8,
+          border: '1px solid var(--border-default)',
+          background: 'var(--surface-muted)',
+          color: 'var(--text-muted)',
+          fontSize: 13,
+          cursor: 'pointer',
+          minWidth: 260,
+          justifyContent: 'space-between',
+        }}
+      >
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <span>🔍</span>
+          <span>ค้นหาเมนู...</span>
+        </span>
+        <span style={{
+          fontSize: 10,
+          fontFamily: 'ui-monospace, monospace',
+          padding: '2px 6px',
+          borderRadius: 4,
+          background: 'var(--surface-card)',
+          border: '1px solid var(--border-default)',
+        }}>
+          Ctrl+K
+        </span>
+      </button>
 
       {/* Right side */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -89,6 +125,26 @@ export function Header({ user }: HeaderProps) {
           </div>
         </div>
 
+        {/* Change password */}
+        <button
+          onClick={() => setPwOpen(true)}
+          title="เปลี่ยนรหัสผ่านของคุณ"
+          aria-label="เปลี่ยนรหัสผ่าน"
+          style={{
+            background:   'var(--surface-muted)',
+            border:       '1px solid var(--border-default)',
+            borderRadius: 8,
+            padding:      '6px 10px',
+            fontSize:     12,
+            cursor:       'pointer',
+            color:        'var(--text-secondary)',
+            fontWeight:   600,
+            transition:   'background 0.15s',
+          }}
+        >
+          🔑 รหัสผ่าน
+        </button>
+
         {/* Sign out */}
         <button
           onClick={() => signOut({ callbackUrl: '/login' })}
@@ -107,6 +163,8 @@ export function Header({ user }: HeaderProps) {
           ออกจากระบบ
         </button>
       </div>
+
+      <ChangePasswordDialog open={pwOpen} onClose={() => setPwOpen(false)} />
     </header>
   );
 }

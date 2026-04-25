@@ -19,6 +19,7 @@
 
 import React, { useEffect, useState, useCallback } from 'react';
 import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
+import { useToast, ConfirmDialog } from '@/components/ui';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,21 @@ interface FolioInvoice {
   dueDate: string;
 }
 
+interface FolioPayment {
+  id: string;
+  paymentNumber: string;
+  receiptNumber: string;
+  amount: number;
+  paymentMethod: string;
+  paymentDate: string;
+  referenceNo: string | null;
+  notes: string | null;
+  status: 'ACTIVE' | 'VOIDED';
+  voidReason: string | null;
+  voidedAt: string | null;
+  createdAt: string;
+}
+
 interface FolioData {
   id: string;
   folioNumber: string;
@@ -58,6 +74,7 @@ interface FolioData {
   closedAt: string | null;
   lineItems: FolioLineItem[];
   invoices: FolioInvoice[];
+  payments: FolioPayment[];
   booking: {
     bookingNumber: string;
     bookingType: string;
@@ -71,6 +88,7 @@ interface FolioData {
 interface FolioLedgerProps {
   bookingId: string;
   onRefresh?: () => void;
+  onVoidInvoice?: (invoiceId: string, invoiceNumber: string) => void;
   compact?: boolean;
 }
 
@@ -96,6 +114,16 @@ const BILLING_STATUS_CONFIG: Record<
   BILLED:   { label: 'ออกบิลแล้ว',   bg: 'bg-blue-100',   text: 'text-blue-800'   },
   PAID:     { label: 'ชำระแล้ว',      bg: 'bg-green-100',  text: 'text-green-800'  },
   VOIDED:   { label: 'ยกเลิก',        bg: 'bg-gray-100',   text: 'text-gray-500'   },
+};
+
+const PAYMENT_METHOD_LABEL: Record<string, string> = {
+  cash:        '💵 เงินสด',
+  transfer:    '🏦 โอนเงิน',
+  credit_card: '💳 บัตรเครดิต',
+  debit_card:  '💳 บัตรเดบิต',
+  qr:          '📱 QR Code',
+  cheque:      '📄 เช็ค',
+  city_ledger: '🏢 City Ledger',
 };
 
 const INVOICE_STATUS_CONFIG: Record<
@@ -129,10 +157,40 @@ function StatusBadge({
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function FolioLedger({ bookingId, onRefresh, compact = false }: FolioLedgerProps) {
+export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compact = false }: FolioLedgerProps) {
+  const toast = useToast();
   const [folio, setFolio] = useState<FolioData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // ─── Refund (void payment) state ──────────────────────────────────────────
+  const [refundTarget, setRefundTarget] = useState<FolioPayment | null>(null);
+  const [refunding, setRefunding] = useState(false);
+
+  const handleRefund = useCallback(async () => {
+    if (!refundTarget || refunding) return;
+    setRefunding(true);
+    try {
+      const res = await fetch(`/api/payments/${refundTarget.id}/void`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voidReason: 'คืนเงินโดย staff ผ่าน Folio Ledger' }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || `HTTP ${res.status}`);
+      }
+      toast.success('คืนเงินสำเร็จ', `${refundTarget.paymentNumber} — ฿${fmtBaht(Number(refundTarget.amount))}`);
+      setRefundTarget(null);
+      load();
+      onRefresh?.();
+    } catch (e) {
+      toast.error('คืนเงินไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setRefunding(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refundTarget, refunding, onRefresh]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -341,6 +399,91 @@ export default function FolioLedger({ bookingId, onRefresh, compact = false }: F
         </div>
       </div>
 
+      {/* ── Payments ── */}
+      {!compact && folio.payments.length > 0 && (
+        <div>
+          <h4 className="text-sm font-medium text-gray-700 mb-2">
+            รายการชำระเงิน ({folio.payments.filter(p => p.status === 'ACTIVE').length} รายการ)
+          </h4>
+          <div className="rounded-lg border border-gray-200 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-gray-50 text-xs text-gray-500 uppercase">
+                <tr>
+                  <th className="px-3 py-2 text-left">เลขที่ใบเสร็จ</th>
+                  <th className="px-3 py-2 text-left">ช่องทาง</th>
+                  <th className="px-3 py-2 text-left">วันที่</th>
+                  <th className="px-3 py-2 text-right">จำนวน</th>
+                  <th className="px-3 py-2 text-center">สถานะ</th>
+                  <th className="px-3 py-2 text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {folio.payments.map((pmt) => (
+                  <tr
+                    key={pmt.id}
+                    className={pmt.status === 'VOIDED' ? 'opacity-40 bg-gray-50' : 'hover:bg-gray-50'}
+                  >
+                    <td className="px-3 py-2">
+                      <p className="font-mono text-xs text-blue-700">{pmt.receiptNumber}</p>
+                      <p className="text-xs text-gray-400">{pmt.paymentNumber}</p>
+                      {pmt.referenceNo && (
+                        <p className="text-xs text-gray-400">Ref: {pmt.referenceNo}</p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-600">
+                      {PAYMENT_METHOD_LABEL[pmt.paymentMethod] ?? pmt.paymentMethod}
+                    </td>
+                    <td className="px-3 py-2 text-xs text-gray-500 whitespace-nowrap">
+                      {fmtDate(new Date(pmt.paymentDate))}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono font-semibold text-green-700">
+                      ฿{fmtBaht(Number(pmt.amount))}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {pmt.status === 'ACTIVE' ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          ชำระแล้ว
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                          คืนเงินแล้ว
+                        </span>
+                      )}
+                      {pmt.voidReason && (
+                        <p className="text-xs text-gray-400 mt-0.5">{pmt.voidReason}</p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      {pmt.status === 'ACTIVE' && (
+                        <button
+                          onClick={() => setRefundTarget(pmt)}
+                          className="text-xs px-2 py-1 rounded-md border border-red-300 text-red-600 hover:bg-red-50 transition-colors"
+                        >
+                          คืนเงิน
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="bg-gray-50">
+                <tr>
+                  <td colSpan={3} className="px-3 py-2 text-sm font-semibold text-gray-700">
+                    รวมที่ชำระแล้ว
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold text-green-700 font-mono">
+                    ฿{fmtBaht(folio.payments
+                      .filter(p => p.status === 'ACTIVE')
+                      .reduce((s, p) => s + Number(p.amount), 0))}
+                  </td>
+                  <td colSpan={2} />
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
       {/* ── Invoices ── */}
       {!compact && folio.invoices.length > 0 && (
         <div>
@@ -356,6 +499,7 @@ export default function FolioLedger({ bookingId, onRefresh, compact = false }: F
                   <th className="px-3 py-2 text-right">ยอดรวม</th>
                   <th className="px-3 py-2 text-right">ชำระแล้ว</th>
                   <th className="px-3 py-2 text-center">สถานะ</th>
+                  {onVoidInvoice && <th className="px-3 py-2 text-center">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -379,6 +523,18 @@ export default function FolioLedger({ bookingId, onRefresh, compact = false }: F
                         config={INVOICE_STATUS_CONFIG}
                       />
                     </td>
+                    {onVoidInvoice && (
+                      <td className="px-3 py-2 text-center">
+                        {!['voided', 'cancelled'].includes(inv.status) && (
+                          <button
+                            onClick={() => onVoidInvoice(inv.id, inv.invoiceNumber)}
+                            className="text-xs px-2 py-1 rounded-md border border-orange-300 text-orange-600 hover:bg-orange-50 transition-colors"
+                          >
+                            Void
+                          </button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -394,12 +550,27 @@ export default function FolioLedger({ bookingId, onRefresh, compact = false }: F
                     ฿{fmtBaht(folio.invoices.reduce((s, i) => s + Number(i.paidAmount), 0))}
                   </td>
                   <td />
+                  {onVoidInvoice && <td />}
                 </tr>
               </tfoot>
             </table>
           </div>
         </div>
       )}
+      {/* ── Refund Confirm Dialog ── */}
+      <ConfirmDialog
+        open={!!refundTarget}
+        title="ยืนยันการคืนเงิน"
+        description={refundTarget
+          ? `คืนเงิน ฿${fmtBaht(Number(refundTarget.amount))} (${refundTarget.receiptNumber}) — การดำเนินการนี้จะยกเลิกการชำระเงินและไม่สามารถกู้คืนได้`
+          : undefined}
+        confirmText="คืนเงิน"
+        cancelText="ยกเลิก"
+        variant="danger"
+        loading={refunding}
+        onConfirm={handleRefund}
+        onCancel={() => setRefundTarget(null)}
+      />
     </div>
   );
 }

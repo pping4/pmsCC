@@ -4,7 +4,11 @@
  * Returns the Folio for a specific booking, including all line items,
  * invoices, and balance summary.
  *
- * Used by the FolioLedger component in the frontend.
+ * Balance is ALWAYS computed live from PaymentAllocation records so that
+ * the response is never stale — even if recalculateFolioBalance() was not
+ * called after a previous payment (e.g. legacy check-in data).
+ *
+ * Used by the FolioLedger component and the checkout balance check.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -28,9 +32,6 @@ export async function GET(
       folioNumber: true,
       bookingId: true,
       guestId: true,
-      totalCharges: true,
-      totalPayments: true,
-      balance: true,
       closedAt: true,
       createdAt: true,
       booking: {
@@ -94,5 +95,61 @@ export async function GET(
     return NextResponse.json(null); // 200 with null = no folio yet
   }
 
-  return NextResponse.json(folio);
+  // ── Compute balance LIVE from source records ──────────────────────────────
+  // Never trust the stored folio.totalCharges / folio.totalPayments / folio.balance
+  // fields because they may be stale if recalculateFolioBalance() was skipped
+  // (e.g. legacy check-in payments, direct DB edits, etc.).
+
+  const [chargesAgg, paymentsAgg] = await Promise.all([
+    // Sum all non-voided folio line items
+    prisma.folioLineItem.aggregate({
+      where: {
+        folioId: folio.id,
+        billingStatus: { not: 'VOIDED' as never },
+      },
+      _sum: { amount: true },
+    }),
+    // Sum all active payment allocations linked to this folio's invoices
+    prisma.paymentAllocation.aggregate({
+      where: {
+        invoice: { folioId: folio.id },
+        payment: { status: 'ACTIVE' as never },
+      },
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const totalCharges  = Number(chargesAgg._sum.amount   ?? 0);
+  const totalPayments = Number(paymentsAgg._sum.amount  ?? 0);
+  const balance       = totalCharges - totalPayments;
+
+  // Payments linked to this folio's invoices (both ACTIVE and VOIDED for history)
+  const payments = await prisma.payment.findMany({
+    where: {
+      allocations: { some: { invoice: { folioId: folio.id } } },
+    },
+    select: {
+      id: true,
+      paymentNumber: true,
+      receiptNumber: true,
+      amount: true,
+      paymentMethod: true,
+      paymentDate: true,
+      referenceNo: true,
+      notes: true,
+      status: true,
+      voidReason: true,
+      voidedAt: true,
+      createdAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return NextResponse.json({
+    ...folio,
+    totalCharges,
+    totalPayments,
+    balance,
+    payments,
+  });
 }

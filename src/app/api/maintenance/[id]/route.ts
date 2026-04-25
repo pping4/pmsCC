@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logActivity } from '@/services/activityLog.service';
+import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 
 export async function PUT(request: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -15,13 +16,30 @@ export async function PUT(request: NextRequest, { params }: { params: { id: stri
 
     if (data.status) {
       updateData.status = data.status;
-      if (data.status === 'resolved') {
-        updateData.resolvedDate = new Date();
-        const existingTask = await tx.maintenanceTask.findUnique({ where: { id: params.id } });
-        if (existingTask) {
-          await tx.room.update({
-            where: { id: existingTask.roomId },
-            data: { status: 'available' },
+      if (data.status === 'resolved') updateData.resolvedDate = new Date();
+
+      const existingTask = await tx.maintenanceTask.findUnique({ where: { id: params.id } });
+      if (existingTask) {
+        const live = await tx.room.findUniqueOrThrow({
+          where: { id: existingTask.roomId },
+          select: { status: true },
+        });
+        const userId   = session.user?.email ?? 'system';
+        const userName = session.user?.name ?? undefined;
+
+        if (data.status === 'in_progress' && canTransition(live.status, 'maintenance')) {
+          await transitionRoom(tx, {
+            roomId: existingTask.roomId,
+            to:     'maintenance',
+            reason: 'maintenance started',
+            userId, userName,
+          });
+        } else if (data.status === 'resolved' && canTransition(live.status, 'available')) {
+          await transitionRoom(tx, {
+            roomId: existingTask.roomId,
+            to:     'available',
+            reason: 'maintenance resolved',
+            userId, userName,
           });
         }
       }

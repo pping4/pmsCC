@@ -333,8 +333,32 @@ async function main() {
       },
     });
     bookings.push(record);
+
+    // Mirror the prod booking-creation path: every booking gets a
+    // BookingRoomSegment covering [checkIn, checkOut) in its starting room.
+    // Segments are the authoritative source of room placement / availability
+    // (see src/services/roomChange.service.ts). Without this, the dev tape
+    // chart, SHUFFLE/MOVE candidate lists, and overlap checks would silently
+    // disagree with the booking table.
+    const hasSegment = await prisma.bookingRoomSegment.findFirst({
+      where:  { bookingId: record.id },
+      select: { id: true },
+    });
+    if (!hasSegment) {
+      await prisma.bookingRoomSegment.create({
+        data: {
+          bookingId:   record.id,
+          roomId:      record.roomId,
+          fromDate:    record.checkIn,
+          toDate:      record.checkOut,
+          rate:        record.rate,
+          bookingType: record.bookingType,
+          createdBy:   'seed',
+        },
+      });
+    }
   }
-  console.log(`✅ ${bookings.length} bookings created`);
+  console.log(`✅ ${bookings.length} bookings created (with room segments)`);
 
   // Update room statuses for checked_in bookings
   await prisma.room.update({
@@ -409,6 +433,272 @@ async function main() {
   });
 
   console.log('✅ 2 invoices created for checked_in guests');
+
+  // ─── City Ledger Test Accounts ─────────────────────────────────────────────
+  console.log('🏢 Seeding City Ledger accounts...');
+
+  const clAccounts = await Promise.all([
+    prisma.cityLedgerAccount.upsert({
+      where: { accountCode: 'CL-0001' },
+      update: {},
+      create: {
+        accountCode:     'CL-0001',
+        companyName:     'บริษัท เอบีซี จำกัด',
+        companyTaxId:    '0105560012345',
+        contactName:     'คุณสมชาย ใจดี',
+        contactPhone:    '02-123-4567',
+        contactEmail:    'accounting@abc.co.th',
+        companyAddress:  '123 ถ.สุขุมวิท แขวงคลองเตย เขตคลองเตย กทม. 10110',
+        creditLimit:     150000,
+        creditTermsDays: 30,
+        currentBalance:  0,
+        status:          'active',
+        notes:           'ลูกค้า VIP — ส่วนลด 10%',
+      },
+    }),
+    prisma.cityLedgerAccount.upsert({
+      where: { accountCode: 'CL-0002' },
+      update: {},
+      create: {
+        accountCode:     'CL-0002',
+        companyName:     'บริษัท ไทยอินเตอร์เนชั่นแนล จำกัด (มหาชน)',
+        companyTaxId:    '0107550098765',
+        contactName:     'คุณนภา รักษ์ดี',
+        contactPhone:    '02-987-6543',
+        contactEmail:    'finance@thai-inter.co.th',
+        companyAddress:  '456 ถ.พระราม 4 แขวงสีลม เขตบางรัก กทม. 10500',
+        creditLimit:     500000,
+        creditTermsDays: 60,
+        currentBalance:  0,
+        status:          'active',
+        notes:           'Corporate rate — ตกลงราคาพิเศษ 2,200/คืน',
+      },
+    }),
+    prisma.cityLedgerAccount.upsert({
+      where: { accountCode: 'CL-0003' },
+      update: {},
+      create: {
+        accountCode:     'CL-0003',
+        companyName:     'สถานทูต XYZ',
+        companyTaxId:    null,
+        contactName:     'Mr. John Smith',
+        contactPhone:    '02-254-0000',
+        contactEmail:    'admin@xyz-embassy.org',
+        companyAddress:  '789 Wireless Road, Lumpini, Pathumwan, Bangkok 10330',
+        creditLimit:     300000,
+        creditTermsDays: 90,
+        currentBalance:  0,
+        status:          'active',
+        notes:           'Diplomatic — ไม่เก็บ VAT',
+      },
+    }),
+    prisma.cityLedgerAccount.upsert({
+      where: { accountCode: 'CL-0004' },
+      update: {},
+      create: {
+        accountCode:     'CL-0004',
+        companyName:     'ห้างหุ้นส่วนจำกัด เก่าแก่ (เครดิตเต็ม)',
+        companyTaxId:    '0303550011111',
+        contactName:     'คุณแดง มีหนี้',
+        contactPhone:    '043-111-222',
+        contactEmail:    'old@partner.com',
+        companyAddress:  '999 ถ.มิตรภาพ อ.เมือง จ.ขอนแก่น 40000',
+        creditLimit:     50000,
+        creditTermsDays: 30,
+        currentBalance:  48500,   // ใกล้เต็ม credit limit
+        status:          'suspended',
+        notes:           'ระงับชั่วคราว — ยอดค้างชำระเกิน 90 วัน',
+      },
+    }),
+  ]);
+
+  console.log(`✅ ${clAccounts.length} City Ledger accounts created`);
+  clAccounts.forEach(a => console.log(`   ${a.accountCode} — ${a.companyName}`));
+
+  // ── Phase A: Chart of Accounts (FinancialAccount) ────────────────────────
+  console.log('📘 Seeding Chart of Accounts...');
+  const defaultAccounts: Array<{
+    code: string; name: string; nameEN: string;
+    kind: 'ASSET' | 'LIABILITY' | 'EQUITY' | 'REVENUE' | 'EXPENSE';
+    subKind:
+      | 'CASH' | 'BANK' | 'UNDEPOSITED_FUNDS' | 'CARD_CLEARING'
+      | 'AR' | 'AR_CORPORATE' | 'DEPOSIT_LIABILITY' | 'AGENT_PAYABLE'
+      | 'VAT_OUTPUT' | 'VAT_INPUT' | 'SERVICE_CHARGE_PAYABLE'
+      | 'ROOM_REVENUE' | 'FB_REVENUE' | 'PENALTY_REVENUE'
+      | 'DISCOUNT_GIVEN' | 'CARD_FEE' | 'BANK_FEE' | 'CASH_OVER_SHORT'
+      | 'OTHER_REVENUE' | 'OTHER_EXPENSE' | 'EQUITY_OPENING';
+  }> = [
+    { code: '1110-01', name: 'เงินสด-ลิ้นชักหลัก',      nameEN: 'Cash - Main Drawer',        kind: 'ASSET',     subKind: 'CASH' },
+    { code: '1120-01', name: 'ธนาคาร-บัญชีหลัก',         nameEN: 'Bank - Default',            kind: 'ASSET',     subKind: 'BANK' },
+    { code: '1130-01', name: 'เงินฝากระหว่างทาง',        nameEN: 'Undeposited Funds',         kind: 'ASSET',     subKind: 'UNDEPOSITED_FUNDS' },
+    { code: '1131-01', name: 'พักบัตรเครดิต',            nameEN: 'Card Clearing',             kind: 'ASSET',     subKind: 'CARD_CLEARING' },
+    { code: '1140-01', name: 'ลูกหนี้-แขกผู้เข้าพัก',      nameEN: 'AR - Guest',                kind: 'ASSET',     subKind: 'AR' },
+    { code: '1141-01', name: 'ลูกหนี้-บริษัท',            nameEN: 'AR - Corporate',            kind: 'ASSET',     subKind: 'AR_CORPORATE' },
+    { code: '2110-01', name: 'เงินมัดจำลูกค้า',           nameEN: 'Guest Deposits',            kind: 'LIABILITY', subKind: 'DEPOSIT_LIABILITY' },
+    { code: '2120-01', name: 'ค่าคอมมิชชั่น OTA ค้างจ่าย', nameEN: 'OTA Commission Payable',    kind: 'LIABILITY', subKind: 'AGENT_PAYABLE' },
+    { code: '2130-01', name: 'ภาษีขาย 7%',                nameEN: 'VAT Output',                kind: 'LIABILITY', subKind: 'VAT_OUTPUT' },
+    { code: '2131-01', name: 'ค่าบริการ 10% ค้างจ่าย',    nameEN: 'Service Charge Payable',    kind: 'LIABILITY', subKind: 'SERVICE_CHARGE_PAYABLE' },
+    { code: '4110-01', name: 'รายได้ค่าห้องพัก',          nameEN: 'Room Revenue',              kind: 'REVENUE',   subKind: 'ROOM_REVENUE' },
+    { code: '4120-01', name: 'รายได้อาหารและเครื่องดื่ม',   nameEN: 'F&B Revenue',               kind: 'REVENUE',   subKind: 'FB_REVENUE' },
+    { code: '4130-01', name: 'รายได้ค่าปรับ',             nameEN: 'Penalty Revenue',           kind: 'REVENUE',   subKind: 'PENALTY_REVENUE' },
+    { code: '4900-01', name: 'รายได้อื่น',                nameEN: 'Other Revenue',             kind: 'REVENUE',   subKind: 'OTHER_REVENUE' },
+    { code: '5110-01', name: 'ส่วนลดให้ลูกค้า',           nameEN: 'Discount Given',            kind: 'EXPENSE',   subKind: 'DISCOUNT_GIVEN' },
+    { code: '5210-01', name: 'ค่าธรรมเนียมบัตรเครดิต',     nameEN: 'Card Fee',                  kind: 'EXPENSE',   subKind: 'CARD_FEE' },
+    { code: '5220-01', name: 'ค่าธรรมเนียมธนาคาร',         nameEN: 'Bank Fee',                  kind: 'EXPENSE',   subKind: 'BANK_FEE' },
+    { code: '5310-01', name: 'เงินสดเกิน/ขาดบัญชี',        nameEN: 'Cash Over/Short',           kind: 'EXPENSE',   subKind: 'CASH_OVER_SHORT' },
+    { code: '5900-01', name: 'ค่าใช้จ่ายอื่น',            nameEN: 'Other Expense',             kind: 'EXPENSE',   subKind: 'OTHER_EXPENSE' },
+  ];
+  for (const a of defaultAccounts) {
+    await prisma.financialAccount.upsert({
+      where: { code: a.code },
+      update: {},
+      create: {
+        code: a.code, name: a.name, nameEN: a.nameEN,
+        kind: a.kind, subKind: a.subKind,
+        isActive: true, isSystem: true, isDefault: true,
+      },
+    });
+  }
+  console.log(`✅ ${defaultAccounts.length} financial accounts seeded`);
+
+  // ── Phase B: default CashBox (Counter 1) ─────────────────────────────────
+  const cashAcc = await prisma.financialAccount.findUnique({ where: { code: '1110-01' } });
+  if (cashAcc) {
+    await prisma.cashBox.upsert({
+      where: { code: 'COUNTER-1' },
+      update: {},
+      create: {
+        code: 'COUNTER-1',
+        name: 'เคาน์เตอร์ 1',
+        location: 'เคาน์เตอร์ต้อนรับหลัก',
+        displayOrder: 1,
+        financialAccountId: cashAcc.id,
+        isActive: true,
+      },
+    });
+    console.log('✅ default CashBox "COUNTER-1" seeded');
+  }
+
+  // ── Sprint 5: Payment & Finance v2 ───────────────────────────────────────
+  // D4: 3 bank accounts (2 บริษัท + 1 ส่วนตัว). Placeholders for account names
+  // — real values editable in /settings/accounts (Q1).
+  await prisma.financialAccount.upsert({
+    where: { code: '1120-01' },
+    update: {
+      ownerType: 'COMPANY',
+      bankName: 'BBL',
+      bankAccountName: 'บริษัท (placeholder)',
+      isActive: true,
+    },
+    create: {
+      code: '1120-01', name: 'BBL บริษัท', nameEN: 'BBL - Company',
+      kind: 'ASSET', subKind: 'BANK',
+      bankName: 'BBL', bankAccountName: 'บริษัท (placeholder)',
+      ownerType: 'COMPANY', isSystem: false, isDefault: true,
+    },
+  });
+  await prisma.financialAccount.upsert({
+    where: { code: '1120-02' },
+    update: {
+      ownerType: 'COMPANY',
+      bankName: 'KBank',
+      bankAccountName: 'บริษัท (placeholder)',
+      isActive: true,
+    },
+    create: {
+      code: '1120-02', name: 'KBank บริษัท', nameEN: 'KBank - Company',
+      kind: 'ASSET', subKind: 'BANK',
+      bankName: 'KBank', bankAccountName: 'บริษัท (placeholder)',
+      ownerType: 'COMPANY',
+    },
+  });
+  await prisma.financialAccount.upsert({
+    where: { code: '1120-03' },
+    update: {
+      ownerType: 'PERSONAL',
+      bankName: 'BBL',
+      bankAccountName: 'กรรมการ (ส่วนตัว)',
+      isActive: true,
+    },
+    create: {
+      code: '1120-03', name: 'BBL กรรมการ (ส่วนตัว)', nameEN: 'BBL - Personal',
+      kind: 'ASSET', subKind: 'BANK',
+      bankName: 'BBL', bankAccountName: 'กรรมการ (ส่วนตัว)',
+      ownerType: 'PERSONAL',
+    },
+  });
+  console.log('✅ 3 bank accounts seeded (2 COMPANY + 1 PERSONAL)');
+
+  // Clearing accounts — 1131-01 for BBL, create 1131-02 for KBank
+  const bblClearingAcct = await prisma.financialAccount.upsert({
+    where: { code: '1131-01' },
+    update: {},
+    create: {
+      code: '1131-01', name: 'พักบัตรเครดิต BBL', nameEN: 'Card Clearing - BBL',
+      kind: 'ASSET', subKind: 'CARD_CLEARING', isSystem: true, isDefault: true,
+    },
+  });
+  const kbankClearingAcct = await prisma.financialAccount.upsert({
+    where: { code: '1131-02' },
+    update: {},
+    create: {
+      code: '1131-02', name: 'พักบัตรเครดิต KBank', nameEN: 'Card Clearing - KBank',
+      kind: 'ASSET', subKind: 'CARD_CLEARING', isSystem: true,
+    },
+  });
+
+  // D3: 2 EDC terminals
+  await prisma.edcTerminal.upsert({
+    where: { code: 'BBL-01' },
+    update: {},
+    create: {
+      code: 'BBL-01', name: 'เครื่องรูดบัตร BBL', acquirerBank: 'BBL',
+      clearingAccountId: bblClearingAcct.id, allowedBrands: [],
+    },
+  });
+  await prisma.edcTerminal.upsert({
+    where: { code: 'KBANK-01' },
+    update: {},
+    create: {
+      code: 'KBANK-01', name: 'เครื่องรูดบัตร KBank', acquirerBank: 'KBANK',
+      clearingAccountId: kbankClearingAcct.id, allowedBrands: [],
+    },
+  });
+  console.log('✅ 2 EDC terminals seeded (BBL-01, KBANK-01)');
+
+  // D2: default MDR rates (global, brand-level, any cardType) — Q3 defaults
+  const defaultMDR: Array<{ brand: 'VISA' | 'MASTER' | 'JCB' | 'UNIONPAY' | 'AMEX'; rate: number }> = [
+    { brand: 'VISA',     rate: 1.75 },
+    { brand: 'MASTER',   rate: 1.75 },
+    { brand: 'JCB',      rate: 2.00 },
+    { brand: 'UNIONPAY', rate: 1.60 },
+    { brand: 'AMEX',     rate: 3.00 },
+  ];
+  for (const f of defaultMDR) {
+    const existing = await prisma.cardFeeRate.findFirst({
+      where: { terminalId: null, brand: f.brand, cardType: null, effectiveTo: null },
+      select: { id: true },
+    });
+    if (!existing) {
+      await prisma.cardFeeRate.create({
+        data: { terminalId: null, brand: f.brand, cardType: null, ratePercent: f.rate },
+      });
+    }
+  }
+  console.log(`✅ ${defaultMDR.length} default MDR rates seeded`);
+
+  // D5/D6: running-number sequences for receipts + tax invoices
+  await prisma.numberSequence.upsert({
+    where: { kind: 'TAX_INVOICE' },
+    update: {},
+    create: { kind: 'TAX_INVOICE', prefix: 'TI', resetEvery: 'MONTHLY' },
+  });
+  await prisma.numberSequence.upsert({
+    where: { kind: 'RECEIPT' },
+    update: {},
+    create: { kind: 'RECEIPT', prefix: 'RC', resetEvery: 'YEARLY' },
+  });
+  console.log('✅ 2 number sequences seeded (TAX_INVOICE, RECEIPT)');
 
   console.log('🎉 Seed complete!');
 }

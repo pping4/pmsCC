@@ -4,11 +4,15 @@
  */
 
 export interface InvoiceLineItem {
-  description: string;
-  quantity:    number;
-  unitPrice:   number;
-  amount:      number;
-  taxType:     string; // 'included' | 'excluded' | 'no_tax'
+  description:  string;
+  quantity:     number;
+  unitPrice:    number;
+  amount:       number;
+  taxType:      string; // 'included' | 'excluded' | 'no_tax'
+  /** Billing period start date — shown under description, e.g. "2026-04-18" */
+  periodStart?: string;
+  /** Billing period end date — shown under description, e.g. "2026-04-27" */
+  periodEnd?:   string;
 }
 
 export interface InvoicePaymentRecord {

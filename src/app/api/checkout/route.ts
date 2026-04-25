@@ -23,7 +23,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
-import { postBadDebt } from '@/services/ledger.service';
+import { postBadDebt, postPaymentReceived } from '@/services/ledger.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { postInvoiceToCityLedger } from '@/services/cityLedger.service';
 import { z } from 'zod';
 import {
@@ -34,7 +35,10 @@ import {
   generateInvoiceNumber, generatePaymentNumber, generateReceiptNumber,
 } from '@/services/invoice-number.service';
 import { logActivity } from '@/services/activityLog.service';
+import { transitionRoom, RoomTransitionError } from '@/services/roomStatus.service';
+import { createCheckoutCleaningTask } from '@/services/housekeeping.service';
 import { fmtDate } from '@/lib/date-format';
+import { expandNightlyReceiptItems } from '@/lib/invoice-utils';
 import type { ReceiptData } from '@/components/receipt/types';
 
 const CheckoutSchema = z.object({
@@ -44,7 +48,8 @@ const CheckoutSchema = z.object({
   badDebtNote:     z.string().max(500).optional(),
   // ── Optional: collect outstanding at checkout ──────────────────────────
   paymentMethod:   z.enum(['cash', 'transfer', 'credit_card']).optional(),
-  cashSessionId:   z.string().optional(),
+  // Sprint 4B: cashSessionId removed from schema — server resolves it from
+  // the authenticated user's open shift via getActiveSessionForUser.
 }).refine(
   (d) => !d.badDebt || (d.badDebt && d.badDebtNote && d.badDebtNote.length > 0),
   { message: 'ต้องระบุเหตุผลของหนี้เสีย', path: ['badDebtNote'] }
@@ -58,6 +63,7 @@ function calcNights(checkIn: Date, checkOut: Date): number {
 }
 
 export async function POST(request: Request) {
+  try {
   const authSession = await getServerSession(authOptions);
   if (!authSession?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -76,23 +82,18 @@ export async function POST(request: Request) {
     );
   }
 
-  const { bookingId, notes, badDebt, badDebtNote, paymentMethod, cashSessionId } = parsed.data;
+  const { bookingId, notes, badDebt, badDebtNote, paymentMethod } = parsed.data;
   const userId   = authSession.user.id ?? authSession.user.email ?? 'system';
 
-  // ── Validate cash session when payment method = cash ──────────────────────
-  if (paymentMethod === 'cash' && !cashSessionId) {
-    return NextResponse.json(
-      { error: 'ต้องระบุกะแคชเชียร์ที่เปิดอยู่สำหรับการชำระด้วยเงินสด' },
-      { status: 422 }
-    );
-  }
+  // Sprint 4B: cashSessionId is resolved server-side inside the transaction.
+  // The $transaction below will throw if cash is requested but no shift is open.
 
   // ── Fetch booking with invoices and security deposits ──────────────────────
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
     include: {
-      room:    { select: { id: true, number: true } },
-      guest:   { select: { id: true, firstName: true, lastName: true } },
+      room:             { select: { id: true, number: true } },
+      guest:            { select: { id: true, firstName: true, lastName: true } },
       cityLedgerAccount: { select: { id: true, companyName: true, accountCode: true } },
       invoices: {
         select: {
@@ -130,6 +131,7 @@ export async function POST(request: Request) {
   let checkoutSummary = { totalInvoiced: 0, totalPaid: 0, outstanding: 0, newInvoiceNumber: null as string | null };
   let checkoutReceipt: ReceiptData | null = null;
 
+  try {
   await prisma.$transaction(async (tx) => {
     // ── 1. Update booking → checked_out ───────────────────────────────────
     await tx.booking.update({
@@ -141,10 +143,26 @@ export async function POST(request: Request) {
       },
     });
 
-    // ── 2. Update room → checkout ─────────────────────────────────────────
-    await tx.room.update({
-      where: { id: booking.roomId },
-      data:  { status: 'checkout', currentBookingId: null },
+    // ── 2. Update room → checkout (via chokepoint) ────────────────────────
+    await transitionRoom(tx, {
+      roomId:           booking.roomId,
+      to:               'checkout',
+      reason:           'check-out',
+      userId,
+      userName:         authSession.user.name ?? undefined,
+      bookingId,
+      currentBookingId: null,
+    });
+
+    // ── 2b. Auto-create checkout cleaning task ────────────────────────────
+    // Housekeeping needs an actionable task to pick up; previously the task
+    // was only created if staff remembered to open the HK page. Dedup via
+    // the service so rapid checkouts don't create duplicates.
+    await createCheckoutCleaningTask(tx, {
+      roomId:    booking.roomId,
+      bookingId,
+      createdBy: userId,
+      notes:     `Auto-created on checkout (ห้อง ${booking.room.number})`,
     });
 
     // ── LOG: Checkout event ────────────────────────────────────────────────
@@ -297,13 +315,14 @@ export async function POST(request: Request) {
           const actualNights = calcNights(checkInTime, now);
 
           await addCharge(tx, {
-            folioId: folio.folioId,
-            chargeType: 'ROOM',
+            folioId:     folio.folioId,
+            chargeType:  'ROOM',
             description: `ค่าห้องพัก ${actualNights} คืน — ห้อง ${booking.room.number}`,
-            amount: Number(booking.rate) * actualNights,
-            quantity: actualNights,
-            unitPrice: Number(booking.rate),
-            createdBy: userId,
+            amount:      Number(booking.rate) * actualNights,
+            quantity:    actualNights,
+            unitPrice:   Number(booking.rate),
+            serviceDate: new Date(booking.actualCheckIn ?? booking.checkIn),  // period start
+            createdBy:   userId,
           });
 
           // B: For each PAID DEPOSIT_BOOKING, add a matching negative ADJUSTMENT
@@ -371,6 +390,23 @@ export async function POST(request: Request) {
             generateReceiptNumber(tx),
           ]);
 
+          // Sprint 4B: auto-resolve cashSession + cashBox from the cashier's
+          // open shift. Cash REQUIRES a shift; non-cash attributes to shift
+          // when one exists (for per-counter reporting).
+          let coCashSessionId: string | null = null;
+          let coCashBoxId:     string | null = null;
+          const coActive = await getActiveSessionForUser(tx, userId);
+          if (paymentMethod === 'cash') {
+            if (!coActive) {
+              throw new Error('ต้องเปิดกะแคชเชียร์ก่อนรับชำระด้วยเงินสด');
+            }
+            coCashSessionId = coActive.id;
+            coCashBoxId     = coActive.cashBoxId;
+          } else if (coActive) {
+            coCashSessionId = coActive.id;
+            coCashBoxId     = coActive.cashBoxId;
+          }
+
           const coPayment = await tx.payment.create({
             data: {
               paymentNumber:  payNum,
@@ -382,9 +418,8 @@ export async function POST(request: Request) {
               paymentDate:    now,
               status:         'ACTIVE',
               idempotencyKey: `co-${bookingId}`,
-              ...(paymentMethod === 'cash' && cashSessionId
-                ? { cashSessionId }
-                : {}),
+              cashSessionId:  coCashSessionId,
+              cashBoxId:      coCashBoxId,
               createdBy: userId,
             },
             select: { id: true },
@@ -396,6 +431,14 @@ export async function POST(request: Request) {
               invoiceId:  coResult.invoiceId,
               amount:     new Prisma.Decimal(coResult.grandTotal),
             },
+          });
+
+          // Post ledger: DEBIT Cash/Bank/CardClearing | CREDIT Revenue
+          await postPaymentReceived(tx, {
+            paymentMethod,
+            amount:    coResult.grandTotal,
+            paymentId: coPayment.id,
+            createdBy: userId,
           });
 
           // Mark line items PAID + update invoice status
@@ -431,10 +474,16 @@ export async function POST(request: Request) {
 
           // ── Build checkout receipt ────────────────────────────────────
           const guestName = `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();
-          // Re-fetch the INV-CO items for detailed receipt line items
+          // Re-fetch the INV-CO items with folio period dates
           const coItems = await tx.invoiceItem.findMany({
             where: { invoiceId: coResult.invoiceId },
-            select: { description: true, amount: true },
+            select: {
+              description:   true,
+              amount:        true,
+              folioLineItem: {
+                select: { quantity: true, unitPrice: true, chargeType: true, serviceDate: true },
+              },
+            },
           });
           checkoutReceipt = {
             receiptType:   'checkout',
@@ -447,10 +496,46 @@ export async function POST(request: Request) {
             bookingType:   booking.bookingType,
             checkIn:       fmtDate(booking.checkIn),
             checkOut:      fmtDate(booking.checkOut),
-            items: coItems.map(i => ({
-              description: i.description,
-              amount:      Number(i.amount),
-            })),
+            items: coItems.flatMap(i => {
+              const fl        = i.folioLineItem;
+              const unitPrice = fl?.unitPrice ? Number(fl.unitPrice) : undefined;
+              const qty       = fl?.quantity ?? 1;
+
+              // ROOM charge with serviceDate + multiple nights → expand per night
+              if (
+                fl?.chargeType === 'ROOM' &&
+                fl.serviceDate &&
+                qty > 1 &&
+                unitPrice !== undefined
+              ) {
+                return expandNightlyReceiptItems({
+                  description: i.description,
+                  startDate:   new Date(fl.serviceDate),
+                  nights:      qty,
+                  unitPrice,
+                });
+              }
+
+              // Single-night or non-ROOM: show as-is
+              let periodStart: string | undefined;
+              let periodEnd:   string | undefined;
+              if (fl?.serviceDate) {
+                periodStart = fmtDate(new Date(fl.serviceDate));
+                if (fl.chargeType === 'ROOM' && qty > 0) {
+                  const end = new Date(fl.serviceDate);
+                  end.setUTCDate(end.getUTCDate() + qty);
+                  periodEnd = fmtDate(end);
+                }
+              }
+              return [{
+                description: i.description,
+                amount:      Number(i.amount),
+                quantity:    unitPrice !== undefined ? qty : undefined,
+                unitPrice,
+                periodStart,
+                periodEnd,
+              }];
+            }),
             subtotal:      coResult.grandTotal,
             vatAmount:     0,
             grandTotal:    coResult.grandTotal,
@@ -468,6 +553,17 @@ export async function POST(request: Request) {
       await closeFolio(tx, folio.folioId);
     }
   });
+  } catch (e) {
+    console.error('POST /api/checkout error:', e);
+    if (e instanceof RoomTransitionError) {
+      return NextResponse.json(
+        { error: `ไม่สามารถเปลี่ยนสถานะห้องจาก ${e.from} → ${e.to}` },
+        { status: 409 },
+      );
+    }
+    const msg = e instanceof Error ? e.message : 'เช็คเอาท์ไม่สำเร็จ';
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 
   // Re-query post-transaction for accurate summary (pre-tx vars are stale)
   const postTxInvoices = await prisma.invoice.findMany({
@@ -491,4 +587,15 @@ export async function POST(request: Request) {
     },
     receipt: checkoutReceipt,   // null if no payment collected at checkout
   });
+  } catch (e) {
+    console.error('POST /api/checkout top-level error:', e);
+    if (e instanceof RoomTransitionError) {
+      return NextResponse.json(
+        { error: `ไม่สามารถเปลี่ยนสถานะห้องจาก ${e.from} → ${e.to}` },
+        { status: 409 },
+      );
+    }
+    const msg = e instanceof Error ? e.message : 'เช็คเอาท์ไม่สำเร็จ';
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
 }

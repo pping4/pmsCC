@@ -4,14 +4,18 @@ import { useState, useEffect } from 'react';
 import type { BookingItem, RoomItem } from '../lib/types';
 import { STATUS_STYLE, BOOKING_TYPE_LABEL, SOURCE_LABEL, FONT } from '../lib/constants';
 import { fmtThaiLong, fmtCurrency, guestDisplayName, diffDays, parseUTCDate } from '../lib/date-utils';
-import { fmtDateTime, fmtBaht } from '@/lib/date-format';
+import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
 import InvoiceModal from '@/components/invoice/InvoiceModal';
 import MoveRoomDialog from './MoveRoomDialog';
 import SplitSegmentDialog from './SplitSegmentDialog';
 import type { InvoiceDocumentData } from '@/components/invoice/types';
-import { useToast } from '@/components/ui';
+import { useToast, ConfirmDialog } from '@/components/ui';
+import CancelBookingDialog, { CancelConfirmInput } from './CancelBookingDialog';
+import RequestCleaningDialog from '../../housekeeping/components/RequestCleaningDialog';
+import ScheduleDialog from '../../housekeeping/components/ScheduleDialog';
+import CheckoutContractGuard from './CheckoutContractGuard';
 
 interface DetailPanelProps {
   booking: BookingItem | null;
@@ -47,6 +51,62 @@ interface BillingInvoice {
   // Proforma-only fields — set when no real invoices exist yet
   isProforma?:   boolean;
   bookingId?:    string;
+}
+
+// Minimal shapes for the HK section — only fields we actually render.
+interface HkTaskLite {
+  id:             string;
+  taskNumber:     string;
+  taskType:       string;
+  status:         string;
+  scheduledAt:    string;
+  chargeable:     boolean;
+  fee:            number | string | null;
+  requestSource:  string;
+  requestChannel: string | null;
+}
+
+interface HkScheduleLite {
+  id:          string;
+  cadenceDays: number | null;
+  weekdays:    number | null;
+  timeOfDay:   string | null;
+  activeFrom:  string;
+  activeUntil: string | null;
+  fee:         number | string | null;
+  chargeable:  boolean;
+  isActive:    boolean;
+}
+
+const HK_STATUS_STYLE: Record<string, { label: string; color: string; bg: string }> = {
+  pending:     { label: 'รอทำ',     color: '#f59e0b', bg: '#fef3c7' },
+  in_progress: { label: 'กำลังทำ',  color: '#3b82f6', bg: '#dbeafe' },
+  completed:   { label: 'เสร็จแล้ว', color: '#22c55e', bg: '#dcfce7' },
+  inspected:   { label: 'ตรวจแล้ว', color: '#8b5cf6', bg: '#ede9fe' },
+  cancelled:   { label: 'ยกเลิก',   color: '#64748b', bg: '#f1f5f9' },
+};
+
+const HK_CHANNEL_ICON: Record<string, string> = {
+  door_sign:  '🏷️',
+  phone:      '📞',
+  guest_app:  '📱',
+  front_desk: '🛎️',
+  system:     '🤖',
+};
+
+const HK_WEEKDAY_BITS: Array<{ bit: number; short: string }> = [
+  { bit: 1, short: 'จ.' }, { bit: 2,  short: 'อ.' }, { bit: 4,  short: 'พ.' },
+  { bit: 8, short: 'พฤ.' }, { bit: 16, short: 'ศ.' }, { bit: 32, short: 'ส.' },
+  { bit: 64, short: 'อา.' },
+];
+
+function hkScheduleLabel(s: HkScheduleLite): string {
+  if (s.cadenceDays) return `ทุก ${s.cadenceDays} วัน`;
+  if (s.weekdays) {
+    const days = HK_WEEKDAY_BITS.filter(w => (s.weekdays! & w.bit) !== 0).map(w => w.short).join(', ');
+    return days || '—';
+  }
+  return '—';
 }
 
 const INVOICE_TYPE_TH: Record<string, string> = {
@@ -99,6 +159,16 @@ export default function DetailPanel({
   // ── Billing tab: invoice list ─────────────────────────────────────────────
   const [moveDialogOpen, setMoveDialogOpen]   = useState(false);
   const [splitDialogOpen, setSplitDialogOpen] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+
+  // ── Housekeeping (Sprint 2b) ──────────────────────────────────────────────
+  const [hkTasks,          setHkTasks]          = useState<HkTaskLite[]>([]);
+  const [hkSchedules,      setHkSchedules]      = useState<HkScheduleLite[]>([]);
+  const [hkLoading,        setHkLoading]        = useState(false);
+  const [hkRequestOpen,    setHkRequestOpen]    = useState(false);
+  const [hkScheduleOpen,   setHkScheduleOpen]   = useState(false);
+  const [hkDeclineTaskId,  setHkDeclineTaskId]  = useState<string | null>(null);
+  const [hkDeclineBusy,    setHkDeclineBusy]    = useState(false);
   const [billingInvoices, setBillingInvoices] = useState<BillingInvoice[]>([]);
   const [billingLoading, setBillingLoading]   = useState(false);
   const [reprintData,  setReprintData]        = useState<ReceiptData | null>(null);
@@ -134,6 +204,10 @@ export default function DetailPanel({
   const [checkoutFolioBalance,  setCheckoutFolioBalance]  = useState<number | null>(null);
   // Separate loading flag so we can distinguish "still fetching" vs "fetched but no folio"
   const [folioBalanceLoading,   setFolioBalanceLoading]   = useState<boolean>(false);
+  // T14: true when an active contract blocks checkout until it's terminated.
+  // Set by <CheckoutContractGuard/> via onBlockingChange. Daily bookings never
+  // reach this branch because the guard is not mounted for bookingType='daily'.
+  const [contractBlockingCheckout, setContractBlockingCheckout] = useState<boolean>(false);
 
   // ── Extend booking step ───────────────────────────────────────────────────
   // 'idle'    → normal action buttons
@@ -193,6 +267,7 @@ export default function DetailPanel({
     setCheckoutCashSessionId(null);
     setCheckoutFolioBalance(null);
     setFolioBalanceLoading(false);
+    setContractBlockingCheckout(false);
     setBadDebtNote('');
     setExtendStep('idle');
     setExtendNewCheckOut('');
@@ -320,7 +395,72 @@ export default function DetailPanel({
     if (booking?.id && activeTab === 'billing') {
       loadBillingInvoices(booking.id);
     }
+    if (booking?.id && activeTab === 'details') {
+      loadHkForBooking(booking.id);
+    }
   }, [booking?.id, activeTab]);
+
+  const loadHkForBooking = async (bookingId: string) => {
+    setHkLoading(true);
+    try {
+      const [tasksRes, schedRes] = await Promise.all([
+        fetch(`/api/housekeeping?bookingId=${encodeURIComponent(bookingId)}`),
+        fetch(`/api/housekeeping/schedule?bookingId=${encodeURIComponent(bookingId)}&includeInactive=true`),
+      ]);
+      if (tasksRes.ok) {
+        const tasks = await tasksRes.json() as HkTaskLite[];
+        setHkTasks(Array.isArray(tasks) ? tasks.slice(0, 5) : []);
+      } else {
+        setHkTasks([]);
+      }
+      if (schedRes.ok) {
+        const schedules = await schedRes.json() as HkScheduleLite[];
+        setHkSchedules(Array.isArray(schedules) ? schedules : []);
+      } else {
+        setHkSchedules([]);
+      }
+    } catch {
+      /* non-fatal — keep existing state */
+    } finally {
+      setHkLoading(false);
+    }
+  };
+
+  const declineHkTask = async (taskId: string) => {
+    if (hkDeclineBusy) return;
+    setHkDeclineBusy(true);
+    try {
+      const res = await fetch(`/api/housekeeping/${taskId}/decline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: 'front_desk' }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+      toast.success('บันทึกว่าแขกไม่ต้องการทำความสะอาดแล้ว');
+      setHkDeclineTaskId(null);
+      if (booking?.id) await loadHkForBooking(booking.id);
+    } catch (e) {
+      toast.error('ยกเลิกงานไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setHkDeclineBusy(false);
+    }
+  };
+
+  const toggleScheduleActive = async (scheduleId: string, nextActive: boolean) => {
+    try {
+      const res = await fetch(`/api/housekeeping/schedule/${scheduleId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: nextActive }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success(nextActive ? 'เปิดรอบทำความสะอาดแล้ว' : 'ปิดรอบทำความสะอาดแล้ว');
+      if (booking?.id) await loadHkForBooking(booking.id);
+    } catch (e) {
+      toast.error('ปรับสถานะรอบไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
+  };
 
   const loadBillingInvoices = async (bookingId: string) => {
     setBillingLoading(true);
@@ -386,10 +526,8 @@ export default function DetailPanel({
                 (1000 * 60 * 60 * 24),
             ),
           ),
+          // Sprint 4B: cashSessionId resolved server-side from caller's shift.
           paymentMethod: billingPayMethod,
-          ...(billingPayMethod === 'cash' && billingCashSessId
-            ? { cashSessionId: billingCashSessId }
-            : {}),
         }),
       });
       const data = await res.json() as { success?: boolean; error?: string; receipt?: ReceiptData };
@@ -457,19 +595,14 @@ export default function DetailPanel({
     try {
       const payload: Record<string, unknown> = { bookingId: booking.id };
 
+      // Sprint 4B: cashSessionId / depositCashSessionId resolved server-side.
       if (depositAmount > 0) {
         payload.depositAmount = depositAmount;
         payload.depositPaymentMethod = depositMethod;
-        if (depositMethod === 'cash' && cashSessionId) {
-          payload.depositCashSessionId = cashSessionId;
-        }
       }
       if (collectUpfront && booking.bookingType === 'daily') {
         payload.collectUpfront = true;
         payload.upfrontPaymentMethod = upfrontMethod;
-        if (upfrontMethod === 'cash' && cashSessionId) {
-          payload.cashSessionId = cashSessionId;
-        }
       }
 
       const res = await fetch('/api/checkin', {
@@ -518,8 +651,8 @@ export default function DetailPanel({
         notes:       extendNotes || undefined,
       };
       if (extendCollectNow && extraDays * effectiveRate > 0) {
+        // Sprint 4B: cashSessionId resolved server-side.
         payload.paymentMethod = extendPayMethod;
-        if (extendPayMethod === 'cash') payload.cashSessionId = extendCashSessId;
       }
 
       const res = await fetch(`/api/bookings/${booking.id}/extend`, {
@@ -557,9 +690,9 @@ export default function DetailPanel({
             quantity:    c.qty,
             unitPrice:   c.unitPrice,
           })),
+          // Sprint 4B: cashSessionId resolved server-side.
           collectNow:    svcCollectNow,
           paymentMethod: svcCollectNow ? svcPayMethod : undefined,
-          cashSessionId: svcCollectNow && svcPayMethod === 'cash' ? svcCashSessId : undefined,
           notes: svcNotes || undefined,
         }),
       });
@@ -629,12 +762,10 @@ export default function DetailPanel({
     try {
       const payload: Record<string, unknown> = { bookingId: booking.id };
 
-      // Only add payment info when there's an outstanding balance
+      // Only add payment info when there's an outstanding balance.
+      // Sprint 4B: cashSessionId is resolved server-side from the caller's shift.
       if (checkoutOutstanding > 0) {
         payload.paymentMethod = checkoutPayMethod;
-        if (checkoutPayMethod === 'cash' && checkoutCashSessionId) {
-          payload.cashSessionId = checkoutCashSessionId;
-        }
       }
 
       const res = await fetch('/api/checkout', {
@@ -695,14 +826,64 @@ export default function DetailPanel({
     }
   };
 
-  const handleCancel = async (): Promise<void> => {
-    if (!window.confirm('ยืนยันการยกเลิกการจอง?')) return;
-    await handleApiAction('cancel');
+  const handleCancelClick = (): void => {
+    if (!booking) return;
+    if (booking.status === 'checked_in') {
+      toast.info(
+        'ไม่สามารถยกเลิกการจองที่เช็คอินแล้ว',
+        'กรุณาใช้ "เช็คเอาท์" หรือลากขอบขวาในตารางเพื่อย่นวันพัก',
+      );
+      return;
+    }
+    setCancelConfirmOpen(true);
+  };
+
+  const handleCancelConfirm = async (input: CancelConfirmInput): Promise<void> => {
+    if (!booking || loading) return;
+    setCancelConfirmOpen(false);
+    setLoading(true);
+    setError('');
+    try {
+      const response = await fetch(`/api/bookings/${booking.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'cancel',
+          refundAmount: input.refundAmount,
+          reason: input.reason,
+        }),
+      });
+      if (!response.ok) {
+        let errMsg = `ข้อผิดพลาด HTTP ${response.status}`;
+        try {
+          const data: ApiError = await response.json();
+          errMsg = data.message || errMsg;
+        } catch { /* non-JSON */ }
+        throw new Error(errMsg);
+      }
+      setLoading(false);
+      onClose();
+      onRefresh();
+      toast.success(
+        'ยกเลิกการจองสำเร็จ',
+        input.refundAmount > 0
+          ? `สร้างรายการคืนเงิน ฿${fmtBaht(input.refundAmount)} รอดำเนินการ`
+          : undefined,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error occurred';
+      setError(msg);
+      toast.error('ยกเลิกไม่สำเร็จ', msg);
+      setLoading(false);
+    }
   };
 
   const handleEdit = (): void => {
     if (!booking) return;
-    window.open(`/checkin?bookingId=${booking.id}`, '_blank');
+    toast.info(
+      'แก้ไขวันพัก / ราคา',
+      'ลากขอบซ้าย-ขวาของการจองในตารางเพื่อปรับวันพัก ระบบจะคำนวณค่าใช้จ่ายและคืนเงินให้อัตโนมัติ',
+    );
   };
 
   const nights    = booking ? diffDays(parseUTCDate(booking.checkIn), parseUTCDate(booking.checkOut)) : 0;
@@ -1111,6 +1292,16 @@ export default function DetailPanel({
               {/* ─── CHECKOUT COLLECT STEP ───────────────────────────────────── */}
               {checkoutStep === 'collect' && (
                 <div>
+                  {/* T14: Early-termination guard. Mounted only for non-daily
+                      bookings — `disabled` short-circuits the fetch and keeps
+                      `blocking=false` so the confirm button stays enabled for
+                      walk-in/daily checkouts. */}
+                  <CheckoutContractGuard
+                    bookingId={booking.id}
+                    disabled={booking.bookingType === 'daily'}
+                    onBlockingChange={setContractBlockingCheckout}
+                    onTerminated={onRefresh}
+                  />
                   {/* Outstanding summary */}
                   <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 10, padding: '14px 16px', marginBottom: 16 }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: '#1e40af', marginBottom: 10, textTransform: 'uppercase', letterSpacing: 0.5 }}>
@@ -1206,16 +1397,18 @@ export default function DetailPanel({
                       ยกเลิก
                     </button>
                     <button
+                      type="button"
                       onClick={handleCheckoutConfirm}
-                      disabled={loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)}
+                      disabled={loading || folioBalanceLoading || contractBlockingCheckout || (!booking.cityLedgerAccountId && checkoutCashMissing)}
+                      title={contractBlockingCheckout ? 'ต้องยกเลิกสัญญาที่ยังมีผลอยู่ก่อน' : undefined}
                       style={{
                         flex: 2, padding: '10px', borderRadius: 6,
                         background: booking.cityLedgerAccountId
                           ? '#7c3aed'
-                          : (!booking.cityLedgerAccountId && checkoutCashMissing) ? '#93c5fd' : '#3b82f6',
+                          : (contractBlockingCheckout || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? '#93c5fd' : '#3b82f6',
                         color: '#fff', border: 'none', fontSize: 13, fontWeight: 700,
-                        cursor: (loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 'not-allowed' : 'pointer',
-                        opacity: (loading || folioBalanceLoading || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 0.6 : 1,
+                        cursor: (loading || folioBalanceLoading || contractBlockingCheckout || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 'not-allowed' : 'pointer',
+                        opacity: (loading || folioBalanceLoading || contractBlockingCheckout || (!booking.cityLedgerAccountId && checkoutCashMissing)) ? 0.6 : 1,
                         fontFamily: FONT,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                       }}
@@ -1224,9 +1417,11 @@ export default function DetailPanel({
                         ? '⏳ กำลังดำเนินการ...'
                         : folioBalanceLoading
                           ? '⏳ กำลังตรวจสอบยอด...'
-                          : booking.cityLedgerAccountId
-                            ? '🏢 บันทึกเข้า City Ledger และเช็คเอาท์'
-                            : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
+                          : contractBlockingCheckout
+                            ? '🔒 ยกเลิกสัญญาก่อน'
+                            : booking.cityLedgerAccountId
+                              ? '🏢 บันทึกเข้า City Ledger และเช็คเอาท์'
+                              : `🧳 ยืนยันเช็คเอาท์${checkoutOutstanding > 0 ? ` & รับ ${fmtCurrency(checkoutOutstanding)}` : ''}`}
                     </button>
                   </div>
 
@@ -2050,6 +2245,171 @@ export default function DetailPanel({
                     </div>
                   )}
 
+                  {/* ── Housekeeping (Sprint 2b) ─────────────────────────── */}
+                  <div style={{ marginBottom: 24 }}>
+                    <div style={{
+                      fontSize: 12, fontWeight: 700, color: '#6b7280',
+                      marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5,
+                    }}>
+                      🧹 งานแม่บ้าน
+                    </div>
+
+                    {/* Action buttons */}
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+                      <button
+                        type="button"
+                        onClick={() => setHkRequestOpen(true)}
+                        className="pms-transition"
+                        style={{
+                          padding: '8px 12px', borderRadius: 6, border: 'none',
+                          background: '#0284c7', color: '#fff', fontSize: 12,
+                          fontWeight: 600, cursor: 'pointer', fontFamily: FONT,
+                        }}
+                      >
+                        ➕ สั่งทำความสะอาด
+                      </button>
+                      {booking.bookingType !== 'daily' && (
+                        <button
+                          type="button"
+                          onClick={() => setHkScheduleOpen(true)}
+                          className="pms-transition"
+                          style={{
+                            padding: '8px 12px', borderRadius: 6, border: 'none',
+                            background: '#7c3aed', color: '#fff', fontSize: 12,
+                            fontWeight: 600, cursor: 'pointer', fontFamily: FONT,
+                          }}
+                        >
+                          📅 ตั้งรอบประจำ
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Task list */}
+                    {hkLoading ? (
+                      <div style={{ fontSize: 12, color: 'var(--text-faint)', padding: 10 }}>
+                        กำลังโหลด...
+                      </div>
+                    ) : hkTasks.length === 0 ? (
+                      <div style={{
+                        fontSize: 12, color: 'var(--text-faint)',
+                        padding: 10, background: 'var(--surface-subtle)',
+                        borderRadius: 6,
+                      }}>
+                        ยังไม่มีงานแม่บ้านสำหรับ booking นี้
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {hkTasks.map(t => {
+                          const st = HK_STATUS_STYLE[t.status] ?? { label: t.status, color: '#64748b', bg: '#f1f5f9' };
+                          const canDecline = t.status === 'pending' && t.requestSource === 'daily_auto';
+                          return (
+                            <div key={t.id} style={{
+                              display: 'flex', alignItems: 'center', gap: 10,
+                              padding: '8px 10px', borderRadius: 8,
+                              border: '1px solid var(--border-light)',
+                              background: 'var(--surface-card)',
+                              fontSize: 12,
+                            }}>
+                              <span style={{
+                                display: 'inline-flex', padding: '2px 8px', borderRadius: 10,
+                                fontSize: 10, fontWeight: 700,
+                                color: st.color, background: st.bg, minWidth: 64,
+                                justifyContent: 'center',
+                              }}>
+                                {st.label}
+                              </span>
+                              <span style={{ fontFamily: 'monospace', color: 'var(--text-muted)', fontSize: 11 }}>
+                                {t.taskNumber}
+                              </span>
+                              <span style={{ color: 'var(--text-primary)', flex: 1 }}>
+                                {fmtDate(t.scheduledAt)} · {t.taskType}
+                                {t.requestChannel && (
+                                  <span title={t.requestChannel} style={{ marginLeft: 6 }}>
+                                    {HK_CHANNEL_ICON[t.requestChannel] ?? ''}
+                                  </span>
+                                )}
+                              </span>
+                              <span style={{ color: t.chargeable && t.fee ? '#0284c7' : 'var(--text-faint)', fontWeight: 600 }}>
+                                {t.chargeable && t.fee ? `฿${fmtBaht(Number(t.fee))}` : '—'}
+                              </span>
+                              {canDecline && (
+                                <button
+                                  type="button"
+                                  onClick={() => setHkDeclineTaskId(t.id)}
+                                  style={{
+                                    padding: '3px 8px', borderRadius: 6,
+                                    border: '1px solid #fecaca', background: '#fff',
+                                    color: '#dc2626', fontSize: 11, fontWeight: 600,
+                                    cursor: 'pointer', fontFamily: FONT,
+                                  }}
+                                  title="บันทึกว่าแขกไม่ต้องการทำความสะอาดวันนี้"
+                                >
+                                  🚫 ลูกค้าไม่ต้องการ
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Active schedules */}
+                    {hkSchedules.length > 0 && (
+                      <div style={{ marginTop: 14 }}>
+                        <div style={{
+                          fontSize: 11, fontWeight: 700, color: 'var(--text-muted)',
+                          marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5,
+                        }}>
+                          รอบประจำ
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {hkSchedules.map(s => (
+                            <div key={s.id} style={{
+                              display: 'flex', alignItems: 'center', gap: 10,
+                              padding: '8px 10px', borderRadius: 8,
+                              border: '1px solid var(--border-light)',
+                              background: s.isActive ? 'var(--surface-card)' : 'var(--surface-muted)',
+                              fontSize: 12, opacity: s.isActive ? 1 : 0.7,
+                            }}>
+                              <span style={{
+                                display: 'inline-flex', padding: '2px 8px', borderRadius: 10,
+                                fontSize: 10, fontWeight: 700,
+                                color: s.isActive ? '#7c3aed' : '#64748b',
+                                background: s.isActive ? '#ede9fe' : '#f1f5f9',
+                                minWidth: 56, justifyContent: 'center',
+                              }}>
+                                {s.isActive ? 'active' : 'paused'}
+                              </span>
+                              <span style={{ color: 'var(--text-primary)', flex: 1 }}>
+                                {hkScheduleLabel(s)}
+                                {s.timeOfDay && ` · ${s.timeOfDay}`}
+                                {' · '}
+                                {fmtDate(s.activeFrom)}
+                                {s.activeUntil ? ` → ${fmtDate(s.activeUntil)}` : ''}
+                              </span>
+                              <span style={{ color: s.chargeable && s.fee ? '#0284c7' : 'var(--text-faint)', fontWeight: 600 }}>
+                                {s.chargeable && s.fee ? `฿${fmtBaht(Number(s.fee))}` : '—'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => toggleScheduleActive(s.id, !s.isActive)}
+                                style={{
+                                  padding: '3px 8px', borderRadius: 6,
+                                  border: '1px solid var(--border-default)',
+                                  background: '#fff', color: 'var(--text-primary)',
+                                  fontSize: 11, fontWeight: 600,
+                                  cursor: 'pointer', fontFamily: FONT,
+                                }}
+                              >
+                                {s.isActive ? '⏸ หยุด' : '▶ เปิด'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Error */}
                   {error && (
                     <div style={{ marginBottom: 16, padding: 12, backgroundColor: '#fee2e2', color: '#991b1b', borderRadius: 6, fontSize: 12, lineHeight: 1.4 }}>
@@ -2364,7 +2724,7 @@ export default function DetailPanel({
 
             {booking.status !== 'cancelled' && booking.status !== 'checked_out' && (
               <button
-                onClick={handleCancel}
+                onClick={handleCancelClick}
                 disabled={loading}
                 style={{ padding: '10px 12px', backgroundColor: '#fff', color: '#dc2626', border: '2px solid #dc2626', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer', opacity: loading ? 0.6 : 1, fontFamily: FONT }}
               >
@@ -2418,6 +2778,53 @@ export default function DetailPanel({
         booking={booking}
         onClose={() => setSplitDialogOpen(false)}
         onSplit={onRefresh}
+      />
+
+      {/* Cancel booking — with cancellation-policy selector */}
+      <CancelBookingDialog
+        open={cancelConfirmOpen}
+        bookingNumber={booking?.bookingNumber ?? ''}
+        totalPaid={booking?.totalPaid ?? 0}
+        loading={loading}
+        onConfirm={handleCancelConfirm}
+        onCancel={() => setCancelConfirmOpen(false)}
+      />
+
+      {/* ── Housekeeping dialogs (Sprint 2b) ─────────────────────────────── */}
+      {booking && room && (
+        <RequestCleaningDialog
+          open={hkRequestOpen}
+          onClose={() => setHkRequestOpen(false)}
+          roomId={room.id}
+          roomNumber={room.number}
+          bookingId={booking.id}
+          bookingType={booking.bookingType}
+          onCreated={() => { if (booking?.id) void loadHkForBooking(booking.id); }}
+        />
+      )}
+
+      {booking && room && booking.bookingType !== 'daily' && (
+        <ScheduleDialog
+          open={hkScheduleOpen}
+          onClose={() => setHkScheduleOpen(false)}
+          roomId={room.id}
+          roomNumber={room.number}
+          bookingId={booking.id}
+          guestName={guestDisplayName(booking.guest)}
+          onCreated={() => { if (booking?.id) void loadHkForBooking(booking.id); }}
+        />
+      )}
+
+      <ConfirmDialog
+        open={hkDeclineTaskId !== null}
+        title="ยืนยันการยกเลิกงานแม่บ้าน"
+        description="บันทึกว่าแขกไม่ต้องการทำความสะอาดวันนี้? ระบบจะยกเลิก task ที่ pending"
+        confirmText="🚫 ยืนยันยกเลิก"
+        cancelText="ไม่"
+        variant="danger"
+        loading={hkDeclineBusy}
+        onConfirm={() => { if (hkDeclineTaskId) void declineHkTask(hkDeclineTaskId); }}
+        onCancel={() => setHkDeclineTaskId(null)}
       />
     </>
   );

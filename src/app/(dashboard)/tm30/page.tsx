@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useToast } from '@/components/ui';
 
 interface Booking {
   id: string;
@@ -56,6 +57,7 @@ const DeadlineBadge = ({ checkIn, reported }: { checkIn: string; reported: boole
 };
 
 export default function TM30Page() {
+  const toast = useToast();
   const [guests, setGuests] = useState<Guest[]>([]);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<'pending' | 'overdue' | 'reported' | 'all'>('pending');
@@ -65,22 +67,39 @@ export default function TM30Page() {
 
   const fetchGuests = useCallback(async () => {
     setLoading(true);
-    const res = await fetch('/api/tm30');
-    const data = await res.json();
-    setGuests(Array.isArray(data) ? data : []);
-    setLoading(false);
-  }, []);
+    try {
+      const res = await fetch('/api/tm30');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setGuests(Array.isArray(data) ? data : []);
+    } catch (e) {
+      toast.error('โหลดข้อมูล ตม.30 ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
 
   useEffect(() => { fetchGuests(); }, [fetchGuests]);
 
   const markReported = async (guestId: string) => {
+    if (marking) return;
     setMarking(guestId);
-    await fetch(`/api/guests/${guestId}/tm30`, { method: 'POST' });
-    await fetchGuests();
-    if (selectedGuest?.id === guestId) {
-      setSelectedGuest(g => g ? { ...g, tm30Reported: true, tm30ReportDate: new Date().toISOString() } : null);
+    try {
+      const res = await fetch(`/api/guests/${guestId}/tm30`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchGuests();
+      if (selectedGuest?.id === guestId) {
+        setSelectedGuest(g => g ? { ...g, tm30Reported: true, tm30ReportDate: new Date().toISOString() } : null);
+      }
+      toast.success('บันทึกการแจ้ง ตม.30 สำเร็จ');
+    } catch (e) {
+      toast.error('บันทึก ตม.30 ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setMarking(null);
     }
-    setMarking(null);
   };
 
   const foreignGuests = guests; // API already filters to foreign guests

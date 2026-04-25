@@ -6,6 +6,9 @@ import { Prisma } from '@prisma/client';
 import { logActivity } from '@/services/activityLog.service';
 import { createFolio, addCharge, createInvoiceFromFolio, markLineItemsPaid, recalculateFolioBalance } from '@/services/folio.service';
 import { generateBookingNumber, generatePaymentNumber, generateReceiptNumber } from '@/services/invoice-number.service';
+import { postPaymentReceived } from '@/services/ledger.service';
+import { transitionRoom, canTransition } from '@/services/roomStatus.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { fmtDate } from '@/lib/date-format';
 import type { ReceiptData } from '@/components/receipt/types';
 
@@ -146,6 +149,10 @@ export async function POST(request: NextRequest) {
     const depositAmount   = Number(data.deposit) || 0;
     const now = new Date();
 
+    // Sprint 4B: resolve userId (id takes priority over email — cashSession.openedBy stores id)
+    const userId   = (session?.user as { id?: string })?.id ?? session?.user?.email ?? 'system';
+    const userName = session?.user?.name ?? undefined;
+
     // Calculate expected stay amount for invoicing
     let expectedStayAmount = Number(data.rate);
     if (data.bookingType === 'daily') {
@@ -220,11 +227,25 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      // Update room status to reserved
-      await tx.room.update({
+      // Update room status to reserved (via chokepoint).
+      // Only transition if current status permits — future-dated bookings may
+      // reference a room that is currently occupied by another guest; in that
+      // case we leave the live status untouched.
+      const liveRoom = await tx.room.findUniqueOrThrow({
         where: { id: room.id },
-        data:  { status: 'reserved', currentBookingId: created.id },
+        select: { status: true },
       });
+      if (canTransition(liveRoom.status, 'reserved')) {
+        await transitionRoom(tx, {
+          roomId:           room.id,
+          to:               'reserved',
+          reason:           'new booking',
+          userId:           session?.user?.email ?? 'system',
+          userName:         session?.user?.name ?? undefined,
+          bookingId:        created.id,
+          currentBookingId: created.id,
+        });
+      }
 
       // ★ Create Folio for this booking (1 Booking = 1 Folio) ★
       const { folioId } = await createFolio(tx, {
@@ -232,6 +253,19 @@ export async function POST(request: NextRequest) {
         guestId:   data.guestId,
         notes:     `Folio for ${bookingNumber} — ห้อง ${data.roomNumber}`,
       });
+
+      // ★ Sprint 4B: resolve cashSessionId server-side (never from client) ★
+      // Must happen inside the transaction so we can atomically link payment → session.
+      let bkCashSessionId: string | null = null;
+      let bkCashBoxId:     string | null = null;
+      if (paymentMethod === 'cash') {
+        const active = await getActiveSessionForUser(tx, userId);
+        if (!active) {
+          throw new Error('การรับเงินสดต้องเปิดกะแคชเชียร์ก่อน');
+        }
+        bkCashSessionId = active.id;
+        bkCashBoxId     = active.cashBoxId;
+      }
 
       // ★ Create invoice if payment is provided at booking time ★
       if (paymentMethod) {
@@ -249,7 +283,7 @@ export async function POST(request: NextRequest) {
             chargeType: 'ROOM',
             description: desc,
             amount: expectedStayAmount,
-            createdBy: session?.user?.email ?? 'system',
+            createdBy: userId,
           });
 
           const invResult = await createInvoiceFromFolio(tx, {
@@ -259,7 +293,7 @@ export async function POST(request: NextRequest) {
             invoiceType: 'BK',
             dueDate: checkOutDate,
             notes: `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
-            createdBy: session?.user?.email ?? 'system',
+            createdBy: userId,
           });
 
           // Mark as paid immediately since payment is collected at booking
@@ -276,17 +310,24 @@ export async function POST(request: NextRequest) {
             ]);
             const bkPayment = await tx.payment.create({
               data: {
-                paymentNumber: payNum,
-                receiptNumber: rcpNum,
-                bookingId: created.id,
-                guestId: data.guestId,
-                amount: new Prisma.Decimal(invResult.grandTotal),
-                paymentMethod: paymentMethod as never,
-                paymentDate: now,
-                status: 'ACTIVE' as never,
+                paymentNumber:  payNum,
+                receiptNumber:  rcpNum,
+                bookingId:      created.id,
+                guestId:        data.guestId,
+                amount:         new Prisma.Decimal(invResult.grandTotal),
+                paymentMethod:  paymentMethod as never,
+                paymentDate:    now,
+                status:         'ACTIVE' as never,
+                // Sprint 5 — cash clears immediately; others await reconciliation
+                reconStatus:    (paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED') as never,
+                clearedAt:      paymentMethod === 'cash' ? now    : null,
+                clearedBy:      paymentMethod === 'cash' ? userId : null,
                 idempotencyKey: `bk-full-${created.id}`,
-                notes: `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
-                createdBy: session?.user?.email ?? 'system',
+                notes:          `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
+                createdBy:      userId,
+                // Sprint 4B: link to open cash session (null for non-cash)
+                cashSessionId:  bkCashSessionId,
+                cashBoxId:      bkCashBoxId,
               },
               select: { id: true },
             });
@@ -296,6 +337,12 @@ export async function POST(request: NextRequest) {
                 invoiceId: invResult.invoiceId,
                 amount: new Prisma.Decimal(invResult.grandTotal),
               },
+            });
+            await postPaymentReceived(tx, {
+              paymentMethod: paymentMethod!,
+              amount:        invResult.grandTotal,
+              paymentId:     bkPayment.id,
+              createdBy:     session?.user?.email ?? 'system',
             });
             await recalculateFolioBalance(tx, folioId);
 
@@ -355,7 +402,7 @@ export async function POST(request: NextRequest) {
             chargeType: 'DEPOSIT_BOOKING',
             description: `เงินมัดจำ ห้อง ${data.roomNumber}`,
             amount: depositAmount,
-            createdBy: session?.user?.email ?? 'system',
+            createdBy: userId,
           });
 
           const invResult = await createInvoiceFromFolio(tx, {
@@ -365,7 +412,7 @@ export async function POST(request: NextRequest) {
             invoiceType: 'BK',
             dueDate: now,
             notes: `เงินมัดจำ — ห้อง ${data.roomNumber}`,
-            createdBy: session?.user?.email ?? 'system',
+            createdBy: userId,
           });
 
           if (invResult) {
@@ -381,17 +428,24 @@ export async function POST(request: NextRequest) {
             ]);
             const depPayment = await tx.payment.create({
               data: {
-                paymentNumber: payNum,
-                receiptNumber: rcpNum,
-                bookingId: created.id,
-                guestId: data.guestId,
-                amount: new Prisma.Decimal(depositAmount),
-                paymentMethod: paymentMethod as never,
-                paymentDate: now,
-                status: 'ACTIVE' as never,
+                paymentNumber:  payNum,
+                receiptNumber:  rcpNum,
+                bookingId:      created.id,
+                guestId:        data.guestId,
+                amount:         new Prisma.Decimal(depositAmount),
+                paymentMethod:  paymentMethod as never,
+                paymentDate:    now,
+                status:         'ACTIVE' as never,
+                // Sprint 5 — cash clears immediately; others await reconciliation
+                reconStatus:    (paymentMethod === 'cash' ? 'CLEARED' : 'RECEIVED') as never,
+                clearedAt:      paymentMethod === 'cash' ? now    : null,
+                clearedBy:      paymentMethod === 'cash' ? userId : null,
                 idempotencyKey: `bk-deposit-${created.id}`,
-                notes: `เงินมัดจำ ห้อง ${data.roomNumber}`,
-                createdBy: session?.user?.email ?? 'system',
+                notes:          `เงินมัดจำ ห้อง ${data.roomNumber}`,
+                createdBy:      userId,
+                // Sprint 4B: link to open cash session (null for non-cash)
+                cashSessionId:  bkCashSessionId,
+                cashBoxId:      bkCashBoxId,
               },
               select: { id: true },
             });
@@ -401,6 +455,12 @@ export async function POST(request: NextRequest) {
                 invoiceId: invResult.invoiceId,
                 amount: new Prisma.Decimal(depositAmount),
               },
+            });
+            await postPaymentReceived(tx, {
+              paymentMethod: paymentMethod!,
+              amount:        depositAmount,
+              paymentId:     depPayment.id,
+              createdBy:     session?.user?.email ?? 'system',
             });
             await recalculateFolioBalance(tx, folioId);
 

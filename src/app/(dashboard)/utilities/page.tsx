@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { formatCurrency } from '@/lib/tax';
+import { useToast } from '@/components/ui';
 
 interface Room { id: string; number: string; floor: number; roomType: { name: string }; }
 interface UtilityReading {
@@ -19,6 +20,7 @@ interface UtilityReading {
 }
 
 export default function UtilitiesPage() {
+  const toast = useToast();
   const [readings, setReadings] = useState<UtilityReading[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7));
@@ -31,25 +33,46 @@ export default function UtilitiesPage() {
   });
 
   const fetchReadings = useCallback(async () => {
-    const params = new URLSearchParams({ month: selectedMonth });
-    const res = await fetch(`/api/utilities?${params}`);
-    const data = await res.json();
-    setReadings(data);
-    setLoading(false);
-  }, [selectedMonth]);
+    try {
+      const params = new URLSearchParams({ month: selectedMonth });
+      const res = await fetch(`/api/utilities?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setReadings(data);
+    } catch (e) {
+      toast.error('โหลดข้อมูลมิเตอร์ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedMonth, toast]);
 
   useEffect(() => { fetchReadings(); }, [fetchReadings]);
 
   const save = async () => {
+    if (saving) return;
+    if (!form.roomNumber) {
+      toast.warning('กรุณาระบุหมายเลขห้อง');
+      return;
+    }
     setSaving(true);
-    await fetch('/api/utilities', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form),
-    });
-    await fetchReadings();
-    setShowForm(false);
-    setSaving(false);
+    try {
+      const res = await fetch('/api/utilities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchReadings();
+      setShowForm(false);
+      toast.success(`บันทึกมิเตอร์ห้อง ${form.roomNumber} สำเร็จ`);
+    } catch (e) {
+      toast.error('บันทึกมิเตอร์ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const upd = (k: string, v: unknown) => setForm(p => ({ ...p, [k]: v }));

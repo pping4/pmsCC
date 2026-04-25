@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { BOOKING_TYPES, BOOKING_STATUS_MAP, SOURCE_LABELS } from '@/lib/constants';
 import { formatCurrency, formatDate } from '@/lib/tax';
+import { useToast } from '@/components/ui';
 
 interface Guest { id: string; firstName: string; lastName: string; nationality: string; phone?: string; email?: string; }
 interface RoomType { id: string; code: string; name: string; baseDaily: number; baseMonthly: number; }
@@ -25,6 +26,7 @@ const ROOM_TYPES_LIST = [
 ];
 
 export default function BookingsPage() {
+  const toast = useToast();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [guests, setGuests] = useState<Guest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -41,18 +43,29 @@ export default function BookingsPage() {
   });
 
   const fetchBookings = useCallback(async () => {
-    const params = new URLSearchParams();
-    if (tabType !== 'all') params.set('type', tabType);
-    if (search) params.set('search', search);
-    const res = await fetch(`/api/bookings?${params}`);
-    const data = await res.json();
-    setBookings(data);
-    setLoading(false);
-  }, [tabType, search]);
+    try {
+      const params = new URLSearchParams();
+      if (tabType !== 'all') params.set('type', tabType);
+      if (search) params.set('search', search);
+      const res = await fetch(`/api/bookings?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setBookings(data);
+    } catch (e) {
+      toast.error('โหลดรายการจองไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setLoading(false);
+    }
+  }, [tabType, search, toast]);
 
   const fetchGuests = async () => {
-    const res = await fetch('/api/guests');
-    setGuests(await res.json());
+    try {
+      const res = await fetch('/api/guests');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setGuests(await res.json());
+    } catch (e) {
+      toast.error('โหลดรายชื่อลูกค้าไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   useEffect(() => {
@@ -65,26 +78,49 @@ export default function BookingsPage() {
   const upd = (k: string, v: unknown) => setForm(p => ({ ...p, [k]: v }));
 
   const saveBooking = async () => {
-    if (!form.guestId || !form.roomNumber || !form.checkIn || !form.checkOut) return;
+    if (saving) return;
+    if (!form.guestId || !form.roomNumber || !form.checkIn || !form.checkOut) {
+      toast.warning('กรุณาระบุข้อมูลให้ครบ');
+      return;
+    }
     setSaving(true);
-    await fetch('/api/bookings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(form),
-    });
-    await fetchBookings();
-    setShowForm(false);
-    setSaving(false);
+    try {
+      const res = await fetch('/api/bookings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchBookings();
+      setShowForm(false);
+      toast.success('สร้างการจองสำเร็จ');
+    } catch (e) {
+      toast.error('สร้างการจองไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleAction = async (bookingId: string, action: string) => {
-    await fetch(`/api/bookings/${bookingId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-    await fetchBookings();
-    setSelectedBooking(null);
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.message || `HTTP ${res.status}`);
+      }
+      await fetchBookings();
+      setSelectedBooking(null);
+      toast.success(action === 'checkin' ? 'เช็คอินสำเร็จ' : action === 'checkout' ? 'เช็คเอาท์สำเร็จ' : 'ดำเนินการสำเร็จ');
+    } catch (e) {
+      toast.error('ดำเนินการไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    }
   };
 
   const inputStyle = { width: '100%', padding: '10px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 14, outline: 'none', boxSizing: 'border-box' as const, background: '#fff' };

@@ -12,7 +12,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { fmtDate } from '@/lib/date-format';
-import type { InvoiceDocumentData } from '@/components/invoice/types';
+import type { InvoiceDocumentData, InvoiceLineItem } from '@/components/invoice/types';
+import { expandNightlyItems, computePeriod } from '@/lib/invoice-utils';
 
 export async function GET(
   _request: NextRequest,
@@ -76,7 +77,7 @@ export async function GET(
           amount:      true,
           taxType:     true,
           folioLineItem: {
-            select: { quantity: true, unitPrice: true, chargeType: true },
+            select: { quantity: true, unitPrice: true, chargeType: true, serviceDate: true },
           },
         },
       },
@@ -153,16 +154,42 @@ export async function GET(
     checkIn:        safeDate(invoice.booking?.checkIn  ? new Date(invoice.booking.checkIn)  : null),
     checkOut:       safeDate(invoice.booking?.checkOut ? new Date(invoice.booking.checkOut) : null),
 
-    // Line items
-    items: invoice.items.map((item) => ({
-      description: item.description,
-      quantity:    item.folioLineItem?.quantity ?? 1,
-      unitPrice:   item.folioLineItem?.unitPrice
-        ? Number(item.folioLineItem.unitPrice)
-        : Number(item.amount),
-      amount:  Number(item.amount),
-      taxType: item.taxType,
-    })),
+    // Line items — ROOM charges expanded per night; others shown as-is with period
+    items: invoice.items.flatMap((item): InvoiceLineItem[] => {
+      const fl        = item.folioLineItem;
+      const unitPrice = fl?.unitPrice ? Number(fl.unitPrice) : Number(item.amount);
+      const qty       = fl?.quantity ?? 1;
+
+      // ── ROOM charge with serviceDate + multiple nights → expand per night ──
+      if (
+        fl?.chargeType === 'ROOM' &&
+        fl.serviceDate &&
+        qty > 1
+      ) {
+        return expandNightlyItems({
+          description: item.description,
+          startDate:   new Date(fl.serviceDate),
+          nights:      qty,
+          unitPrice,
+          taxType:     item.taxType,
+        });
+      }
+
+      // ── Single-night ROOM or non-ROOM charge: show with period if available ─
+      const { periodStart, periodEnd } = computePeriod(
+        fl?.serviceDate, fl?.quantity, fl?.chargeType, safeDate
+      );
+
+      return [{
+        description: item.description,
+        quantity:    qty,
+        unitPrice,
+        amount:      Number(item.amount),
+        taxType:     item.taxType,
+        periodStart,
+        periodEnd,
+      }];
+    }),
 
     // Totals
     subtotal:       Number(invoice.subtotal),

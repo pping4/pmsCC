@@ -48,6 +48,12 @@ export async function GET(request: NextRequest) {
         select: { id: true },
         take: 1,
       },
+      housekeepingTasks: {
+        where: { status: { in: ['pending', 'in_progress', 'completed'] } },
+        select: { id: true, status: true, priority: true, taskType: true },
+        orderBy: { createdAt: 'desc' },
+        take: 1,
+      },
     },
     orderBy: [{ floor: 'asc' }, { number: 'asc' }],
   });
@@ -94,6 +100,7 @@ export async function GET(request: NextRequest) {
     const currentBooking = room.bookings[0] ?? null;
     const nextBookingRaw = nextBookingMap.get(room.id) ?? null;
     const hasMaintenance = room.maintenanceTasks.length > 0;
+    const openHkTask = room.housekeepingTasks[0] ?? null;
 
     return {
       id:               room.id,
@@ -105,6 +112,9 @@ export async function GET(request: NextRequest) {
       roomType:         room.roomType,
       rate:             rateMap[room.id] ?? null,
       hasMaintenance,
+      housekeepingTask: openHkTask
+        ? { id: openHkTask.id, status: openHkTask.status, priority: openHkTask.priority, taskType: openHkTask.taskType }
+        : null,
 
       currentBooking: currentBooking
         ? {

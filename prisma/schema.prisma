@@ -70,7 +70,7 @@ enum InvoiceType {
   extra_service
   deposit_receipt
   checkout_balance
-  city_ledger_summary  // ใบแจ้งหนี้รวม City Ledger รายเดือน
+  city_ledger_summary // ใบแจ้งหนี้รวม City Ledger รายเดือน
 }
 
 enum DiscountCategory {
@@ -93,6 +93,47 @@ enum PaymentStatus {
   VOIDED
 }
 
+// ── Sprint 5: Payment & Finance v2 ─────────────────────────────────
+enum CardBrand {
+  VISA
+  MASTER
+  JCB
+  UNIONPAY
+  AMEX
+  OTHER
+}
+
+enum CardType {
+  NORMAL
+  PREMIUM
+  CORPORATE
+  UNKNOWN
+}
+
+enum ReconStatus {
+  RECEIVED
+  CLEARED
+  DISPUTED
+  VOIDED
+}
+
+enum BankAccountOwner {
+  COMPANY
+  PERSONAL
+}
+
+enum ResetPeriod {
+  NEVER
+  YEARLY
+  MONTHLY
+  DAILY
+}
+
+enum TaxInvoiceStatus {
+  ISSUED
+  VOIDED
+}
+
 enum LedgerType {
   DEBIT
   CREDIT
@@ -102,24 +143,63 @@ enum LedgerAccount {
   CASH
   BANK
   AR
-  AR_CORPORATE       // City Ledger — ลูกหนี้องค์กร
+  AR_CORPORATE // City Ledger — ลูกหนี้องค์กร
   REVENUE
   DEPOSIT_LIABILITY
   PENALTY_REVENUE
   EXPENSE
   DISCOUNT_GIVEN
+  VAT_OUTPUT             // Phase H1 — ภาษีขาย (liability)
+  SERVICE_CHARGE_PAYABLE // Phase H1 — ค่าบริการค้างจ่าย (liability)
+}
+
+// ── Chart of Accounts (Phase A) ──────────────────────────────────────────────
+// High-level classification per Thai GAAP / IFRS
+enum AccountKind {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+// Functional role — maps to existing LedgerAccount during transition, but
+// allows multiple physical accounts to share the same semantic role
+// (e.g. two BANK accounts, several CASH drawers)
+enum AccountSubKind {
+  CASH
+  BANK
+  UNDEPOSITED_FUNDS      // cash drop in-transit
+  CARD_CLEARING          // credit-card settlement pending
+  AR                     // guest receivable
+  AR_CORPORATE           // city ledger
+  DEPOSIT_LIABILITY      // guest deposits held
+  AGENT_PAYABLE          // OTA commission payable
+  VAT_OUTPUT
+  VAT_INPUT
+  SERVICE_CHARGE_PAYABLE
+  ROOM_REVENUE
+  FB_REVENUE
+  PENALTY_REVENUE
+  DISCOUNT_GIVEN
+  CARD_FEE
+  BANK_FEE
+  CASH_OVER_SHORT
+  OTHER_REVENUE
+  OTHER_EXPENSE
+  EQUITY_OPENING
 }
 
 enum CityLedgerInvoiceStatus {
-  pending    // ตั้งหนี้แล้ว ยังไม่ส่ง
-  sent       // ส่งใบแจ้งหนี้แล้ว
-  settled    // ชำระครบ
-  disputed   // โต้แย้ง
+  pending // ตั้งหนี้แล้ว ยังไม่ส่ง
+  sent // ส่งใบแจ้งหนี้แล้ว
+  settled // ชำระครบ
+  disputed // โต้แย้ง
 }
 
 enum CityLedgerAccountStatus {
   active
-  suspended  // เกิน credit limit
+  suspended // เกิน credit limit
   closed
 }
 
@@ -145,6 +225,11 @@ enum SessionStatus {
   CLOSED
 }
 
+enum FiscalPeriodStatus {
+  OPEN
+  CLOSED
+}
+
 enum BillingStatus {
   UNBILLED
   BILLED
@@ -161,6 +246,7 @@ enum FolioChargeType {
   DISCOUNT
   ADJUSTMENT
   DEPOSIT_BOOKING
+  HOUSEKEEPING
   OTHER
 }
 
@@ -180,6 +266,32 @@ enum HousekeepingStatus {
   in_progress
   completed
   inspected
+  cancelled
+}
+
+enum HKRequestSource {
+  auto_checkout
+  daily_auto
+  guest_request
+  monthly_scheduled
+  recurring_auto
+  manual
+  maintenance_followup
+}
+
+enum HKRequestChannel {
+  door_sign
+  phone
+  guest_app
+  front_desk
+  system
+}
+
+enum HKPriority {
+  low
+  normal
+  high
+  urgent
 }
 
 enum MaintenanceStatus {
@@ -197,18 +309,18 @@ enum MaintenancePriority {
 
 enum IssueCategory {
   housekeeping // ทำความสะอาด
-  maintenance  // ซ่อมบำรุง
-  service      // บริการ
-  complaint    // ร้องเรียน
+  maintenance // ซ่อมบำรุง
+  service // บริการ
+  complaint // ร้องเรียน
   other
 }
 
 enum IssueStatus {
-  pending      // รอดำเนินการ
-  in_progress  // กำลังดำเนินการ
-  resolved     // ทำเสร็จรอหัวหน้าตรวจ
-  closed       // ปิดงาน
-  rejected     // ตีกลับแก้ไข
+  pending // รอดำเนินการ
+  in_progress // กำลังดำเนินการ
+  resolved // ทำเสร็จรอหัวหน้าตรวจ
+  closed // ปิดงาน
+  rejected // ตีกลับแก้ไข
 }
 
 enum IssuePriority {
@@ -221,7 +333,53 @@ enum IssuePriority {
 enum UserRole {
   admin
   manager
-  staff
+  staff // DEPRECATED — kept for backward compat; treated as `front` in RBAC
+  cashier
+  front
+  housekeeping
+  maintenance
+  customer // reserved for customer portal (Phase II)
+}
+
+enum RoomChangeMode {
+  SHUFFLE // ops-driven: pre-arrival swap, same type/rate, no billing impact
+  MOVE // guest-driven or operational change at a point in time
+  SPLIT // explicit multi-room stay: nights 1..N room A, N+1..end room B
+}
+
+// ─── Sprint 3B: Contracts & Lock-in ──────────────────────────────────────────
+
+enum ContractLanguage {
+  th
+  en
+}
+
+enum ContractStatus {
+  draft
+  active
+  terminated
+  expired
+  renewed
+}
+
+enum BillingCycle {
+  rolling
+  calendar
+}
+
+enum TerminationRule {
+  forfeit_full
+  forfeit_percent
+  prorated
+  none
+}
+
+enum ForfeitType {
+  none
+  early_termination
+  damage
+  debt
+  mixed
 }
 
 model User {
@@ -229,22 +387,61 @@ model User {
   email     String   @unique
   name      String
   password  String
-  role      UserRole @default(staff)
+  role      UserRole @default(front)
   active    Boolean  @default(true)
+
+  // Sprint 4A — RBAC permission overrides
+  // Shape: { "add": ["reservation.cancel"], "remove": ["cashier.refund"] }
+  // Effective permissions = ROLE_DEFAULTS[role] ∪ add − remove
+  permissionOverrides Json? @default("{}") @map("permission_overrides")
+
+  // Sprint 4A — audit fields
+  createdBy   String?   @map("created_by")
+  updatedBy   String?   @map("updated_by")
+  lastLoginAt DateTime? @map("last_login_at")
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
+
+  savedViews SavedView[]
 
   @@map("users")
 }
 
+/// Saved DataTable view — (sort, filters, visibleCols) bookmarked by a user
+/// for a specific table (identified by `tableKey`). `shared=true` makes the
+/// view visible to all users; only the owner can edit/delete.
+model SavedView {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  /// Stable DataTable key, e.g. "city-ledger.list.all", "bad-debt.unpaid"
+  tableKey  String   @map("table_key")
+  name      String
+  /// Query-string fragment as stored on the URL (e.g. "s=balance:desc&f.status=active").
+  /// We store the raw query (without the tableKey prefix) so it round-trips
+  /// cleanly via decodeTableState.
+  query     String   @db.Text
+  shared    Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, tableKey])
+  @@index([tableKey, shared])
+  @@map("saved_views")
+}
+
 model RoomType {
-  id           String  @id @default(uuid())
-  code         String  @unique // STD, SUP, DLX, STE
-  name         String
-  icon         String  @default("๐๏ธ")
-  baseDaily    Decimal @map("base_daily") @db.Decimal(10, 2)
-  baseMonthly  Decimal @map("base_monthly") @db.Decimal(10, 2)
-  description  String?
+  id          String  @id @default(uuid())
+  code        String  @unique // STD, SUP, DLX, STE
+  name        String
+  icon        String  @default("๐๏ธ")
+  baseDaily   Decimal @map("base_daily") @db.Decimal(10, 2)
+  baseMonthly Decimal @map("base_monthly") @db.Decimal(10, 2)
+  description String?
+  // Sprint 3B: furniture inventory per room type (markdown bullet list)
+  furnitureList String? @map("furniture_list") @db.Text
 
   rooms Room[]
 
@@ -260,25 +457,29 @@ model Room {
   currentBookingId String?    @map("current_booking_id")
   notes            String?
 
-  roomType         RoomType   @relation(fields: [typeId], references: [id])
-  rate             RoomRate?
-  bookings         Booking[]
+  roomType          RoomType             @relation(fields: [typeId], references: [id])
+  rate              RoomRate?
+  bookings          Booking[]
   utilityReadings   UtilityReading[]
   housekeepingTasks HousekeepingTask[]
   maintenanceTasks  MaintenanceTask[]
   activityLogs      ActivityLog[]
   inspections       RoomInspection[]
+  segments          BookingRoomSegment[]
+  moveHistoryFrom   RoomMoveHistory[]    @relation("roomMoveFrom")
+  moveHistoryTo     RoomMoveHistory[]    @relation("roomMoveTo")
+  cleaningSchedules CleaningSchedule[]
 
   @@map("rooms")
 }
 
 model RoomRate {
-  id        String   @id @default(cuid())
-  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  roomId    String   @unique @map("room_id")
+  id     String @id @default(cuid())
+  room   Room   @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  roomId String @unique @map("room_id")
 
-  dailyEnabled        Boolean  @default(false) @map("daily_enabled")
-  dailyRate           Decimal? @map("daily_rate") @db.Decimal(10, 2)
+  dailyEnabled Boolean  @default(false) @map("daily_enabled")
+  dailyRate    Decimal? @map("daily_rate") @db.Decimal(10, 2)
 
   monthlyShortEnabled   Boolean  @default(false) @map("monthly_short_enabled")
   monthlyShortRate      Decimal? @map("monthly_short_rate") @db.Decimal(10, 2)
@@ -300,35 +501,47 @@ model RoomRate {
 }
 
 model Guest {
-  id                String   @id @default(uuid())
-  title             String   @default("Mr.")
-  firstName         String   @map("first_name")
-  lastName          String   @map("last_name")
-  firstNameTH       String?  @map("first_name_th")
-  lastNameTH        String?  @map("last_name_th")
-  gender            Gender   @default(male)
-  dateOfBirth       DateTime? @map("date_of_birth") @db.Date
-  nationality       String   @default("Thai")
-  idType            IdType   @default(passport) @map("id_type")
-  idNumber          String   @map("id_number")
-  idExpiry          DateTime? @map("id_expiry") @db.Date
-  idPhotoUrl        String?  @map("id_photo_url")
-  facePhotoUrl      String?  @map("face_photo_url")
+  id           String    @id @default(uuid())
+  title        String    @default("Mr.")
+  firstName    String    @map("first_name")
+  lastName     String    @map("last_name")
+  firstNameTH  String?   @map("first_name_th")
+  lastNameTH   String?   @map("last_name_th")
+  gender       Gender    @default(male)
+  dateOfBirth  DateTime? @map("date_of_birth") @db.Date
+  nationality  String    @default("Thai")
+  idType       IdType    @default(passport) @map("id_type")
+  idNumber     String    @map("id_number")
+  idExpiry     DateTime? @map("id_expiry") @db.Date
+  idPhotoUrl   String?   @map("id_photo_url")
+  facePhotoUrl String?   @map("face_photo_url")
 
-  phone             String?
-  email             String?
-  lineId            String?  @map("line_id")
-  address           String?
+  phone   String?
+  email   String?
+  lineId  String? @map("line_id")
+  address String?
+
+  // Sprint 3B: Contract-specific ID + split address fields (all nullable)
+  idIssueDate        DateTime? @map("id_issue_date") @db.Date
+  idIssuePlace       String?   @map("id_issue_place")
+  addressHouseNo     String?   @map("address_house_no")
+  addressMoo         String?   @map("address_moo")
+  addressSoi         String?   @map("address_soi")
+  addressRoad        String?   @map("address_road")
+  addressSubdistrict String?   @map("address_subdistrict")
+  addressDistrict    String?   @map("address_district")
+  addressProvince    String?   @map("address_province")
+  addressPostalCode  String?   @map("address_postal_code")
 
   // TM30 Immigration fields
-  visaType          String?  @map("visa_type")
-  visaNumber        String?  @map("visa_number")
-  arrivalDate       DateTime? @map("arrival_date") @db.Date
-  departureDate     DateTime? @map("departure_date") @db.Date
-  portOfEntry       String?  @map("port_of_entry")
-  flightNumber      String?  @map("flight_number")
-  lastCountry       String?  @map("last_country")
-  purposeOfVisit    String?  @map("purpose_of_visit")
+  visaType       String?   @map("visa_type")
+  visaNumber     String?   @map("visa_number")
+  arrivalDate    DateTime? @map("arrival_date") @db.Date
+  departureDate  DateTime? @map("departure_date") @db.Date
+  portOfEntry    String?   @map("port_of_entry")
+  flightNumber   String?   @map("flight_number")
+  lastCountry    String?   @map("last_country")
+  purposeOfVisit String?   @map("purpose_of_visit")
 
   // Marketing & Service
   preferredLanguage String?  @default("Thai") @map("preferred_language")
@@ -340,127 +553,142 @@ model Guest {
   companyTaxId      String?  @map("company_tax_id")
 
   // Emergency Contact
-  emergencyName     String?  @map("emergency_name")
-  emergencyPhone    String?  @map("emergency_phone")
+  emergencyName  String? @map("emergency_name")
+  emergencyPhone String? @map("emergency_phone")
 
   // TM30 Reporting
-  tm30Reported      Boolean  @default(false) @map("tm30_reported")
-  tm30ReportDate    DateTime? @map("tm30_report_date") @db.Date
+  tm30Reported   Boolean   @default(false) @map("tm30_reported")
+  tm30ReportDate DateTime? @map("tm30_report_date") @db.Date
 
   // Stats
-  totalStays        Int      @default(0) @map("total_stays")
-  totalSpent        Decimal  @default(0) @map("total_spent") @db.Decimal(12, 2)
-  firstStay         DateTime? @map("first_stay") @db.Date
-  lastStay          DateTime? @map("last_stay") @db.Date
+  totalStays Int       @default(0) @map("total_stays")
+  totalSpent Decimal   @default(0) @map("total_spent") @db.Decimal(12, 2)
+  firstStay  DateTime? @map("first_stay") @db.Date
+  lastStay   DateTime? @map("last_stay") @db.Date
 
-  notes             String?
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  bookings          Booking[]
-  invoices          Invoice[]
-  activityLogs      ActivityLog[]
+  bookings     Booking[]
+  invoices     Invoice[]
+  activityLogs ActivityLog[]
+  contracts    Contract[]
 
   @@map("guests")
 }
 
 model Booking {
-  id            String        @id @default(uuid())
-  bookingNumber String        @unique @map("booking_number")
-  guestId       String        @map("guest_id")
-  roomId        String        @map("room_id")
-  bookingType   BookingType   @map("booking_type")
-  source        BookingSource @default(direct)
-  checkIn       DateTime      @map("check_in") @db.Date
-  checkOut      DateTime      @map("check_out") @db.Date
-  actualCheckIn DateTime?     @map("actual_check_in")
-  actualCheckOut DateTime?    @map("actual_check_out")
-  rate          Decimal       @db.Decimal(10, 2)
-  deposit       Decimal       @default(0) @db.Decimal(10, 2)
-  status        BookingStatus @default(confirmed)
-  roomLocked    Boolean       @default(false) @map("room_locked")
-  notes         String?
-  version       Int           @default(1)
+  id             String        @id @default(uuid())
+  bookingNumber  String        @unique @map("booking_number")
+  guestId        String        @map("guest_id")
+  roomId         String        @map("room_id")
+  bookingType    BookingType   @map("booking_type")
+  source         BookingSource @default(direct)
+  checkIn        DateTime      @map("check_in") @db.Date
+  checkOut       DateTime      @map("check_out") @db.Date
+  actualCheckIn  DateTime?     @map("actual_check_in")
+  actualCheckOut DateTime?     @map("actual_check_out")
+  rate           Decimal       @db.Decimal(10, 2)
+  deposit        Decimal       @default(0) @db.Decimal(10, 2)
+  status         BookingStatus @default(confirmed)
+  roomLocked     Boolean       @default(false) @map("room_locked")
+  notes          String?
+  version        Int           @default(1)
 
   // City Ledger — ถ้าบริษัทรับผิดชอบค่าใช้จ่าย
   cityLedgerAccountId String? @map("city_ledger_account_id")
 
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
+  // Phase H2: OTA fields — populated when booking source is OTA
+  otaAgentId       String?  @map("ota_agent_id")
+  otaBookingRef    String?  @map("ota_booking_ref")
+  otaCommissionPct Decimal? @map("ota_commission_pct") @db.Decimal(5, 2)
 
-  guest              Guest              @relation(fields: [guestId], references: [id])
-  room               Room               @relation(fields: [roomId], references: [id])
-  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
-  folio              Folio?
-  invoices           Invoice[]
-  rateAudits         RateAudit[]
-  activityLogs       ActivityLog[]
-  companions         BookingCompanion[]
-  securityDeposits   SecurityDeposit[]
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  guest             Guest                @relation(fields: [guestId], references: [id])
+  room              Room                 @relation(fields: [roomId], references: [id])
+  cityLedgerAccount CityLedgerAccount?   @relation(fields: [cityLedgerAccountId], references: [id])
+  folio             Folio?
+  invoices          Invoice[]
+  rateAudits        RateAudit[]
+  activityLogs      ActivityLog[]
+  companions        BookingCompanion[]
+  securityDeposits  SecurityDeposit[]
+  roomSegments      BookingRoomSegment[]
+  roomMoves         RoomMoveHistory[]    @relation("bookingRoomMoves")
+  triggeredShuffles RoomMoveHistory[]    @relation("triggeredShuffles")
+  refundRecords     RefundRecord[]
+  otaStatementLines OtaStatementLine[]   @relation("OtaStatementBookings")
+  housekeepingTasks HousekeepingTask[]
+  cleaningSchedules CleaningSchedule[]
+  contract          Contract?
 
   @@index([cityLedgerAccountId])
   @@map("bookings")
 }
 
 model Invoice {
-  id            String           @id @default(uuid())
-  invoiceNumber String           @unique @map("invoice_number")
-  bookingId     String?          @map("booking_id")
-  guestId       String           @map("guest_id")
-  issueDate     DateTime         @map("issue_date") @db.Date
-  dueDate       DateTime         @map("due_date") @db.Date
-  invoiceType   InvoiceType      @default(general) @map("invoice_type")
+  id            String      @id @default(uuid())
+  invoiceNumber String      @unique @map("invoice_number")
+  bookingId     String?     @map("booking_id")
+  guestId       String      @map("guest_id")
+  issueDate     DateTime    @map("issue_date") @db.Date
+  dueDate       DateTime    @map("due_date") @db.Date
+  invoiceType   InvoiceType @default(general) @map("invoice_type")
 
   // Financial fields
-  subtotal         Decimal       @db.Decimal(12, 2)
-  discountAmount   Decimal       @default(0) @map("discount_amount") @db.Decimal(12, 2)
+  subtotal         Decimal          @db.Decimal(12, 2)
+  discountAmount   Decimal          @default(0) @map("discount_amount") @db.Decimal(12, 2)
   discountCategory DiscountCategory @default(NONE) @map("discount_category")
-  discountReason   String?       @map("discount_reason")
-  promoId          String?       @map("promo_id")
-  approvedBy       String?       @map("approved_by")  // Manager who approved manual discount
-  vatAmount        Decimal       @default(0) @map("vat_amount") @db.Decimal(12, 2)
-  whtAmount        Decimal       @default(0) @map("wht_amount") @db.Decimal(12, 2)
-  latePenalty      Decimal       @default(0) @map("late_penalty") @db.Decimal(12, 2)
-  grandTotal       Decimal       @map("grand_total") @db.Decimal(12, 2)
+  discountReason   String?          @map("discount_reason")
+  promoId          String?          @map("promo_id")
+  approvedBy       String?          @map("approved_by") // Manager who approved manual discount
+  serviceCharge    Decimal          @default(0) @map("service_charge") @db.Decimal(12, 2)
+  vatAmount        Decimal          @default(0) @map("vat_amount") @db.Decimal(12, 2)
+  whtAmount        Decimal          @default(0) @map("wht_amount") @db.Decimal(12, 2)
+  latePenalty      Decimal          @default(0) @map("late_penalty") @db.Decimal(12, 2)
+  grandTotal       Decimal          @map("grand_total") @db.Decimal(12, 2)
 
   // Payment tracking (derived / cached)
-  paidAmount       Decimal       @default(0) @map("paid_amount") @db.Decimal(12, 2)
+  paidAmount Decimal @default(0) @map("paid_amount") @db.Decimal(12, 2)
 
   // Status & flags
-  status        InvoiceStatus    @default(unpaid)
-  isVatInclusive Boolean         @default(false) @map("is_vat_inclusive")
-  isOtaReceivable Boolean        @default(false) @map("is_ota_receivable")
-  otaSource     String?          @map("ota_source")
-  badDebt       Boolean          @default(false) @map("bad_debt")
-  badDebtNote   String?          @map("bad_debt_note")
+  status          InvoiceStatus @default(unpaid)
+  isVatInclusive  Boolean       @default(false) @map("is_vat_inclusive")
+  isOtaReceivable Boolean       @default(false) @map("is_ota_receivable")
+  otaSource       String?       @map("ota_source")
+  badDebt         Boolean       @default(false) @map("bad_debt")
+  badDebtNote     String?       @map("bad_debt_note")
 
   // City Ledger
   cityLedgerAccountId String?                  @map("city_ledger_account_id")
   cityLedgerStatus    CityLedgerInvoiceStatus? @map("city_ledger_status")
 
   // Billing period (for monthly tenants)
-  billingPeriodStart DateTime?   @map("billing_period_start") @db.Date
-  billingPeriodEnd   DateTime?   @map("billing_period_end") @db.Date
+  billingPeriodStart DateTime? @map("billing_period_start") @db.Date
+  billingPeriodEnd   DateTime? @map("billing_period_end") @db.Date
 
   // Void fields
-  voidedAt      DateTime?        @map("voided_at")
-  voidedBy      String?          @map("voided_by")
+  voidedAt DateTime? @map("voided_at")
+  voidedBy String?   @map("voided_by")
 
-  notes         String?
-  createdAt     DateTime         @default(now()) @map("created_at")
-  createdBy     String?          @map("created_by")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String?  @map("created_by")
 
   // Folio link (optional — for migration compatibility)
-  folioId       String?          @map("folio_id")
+  folioId String? @map("folio_id")
 
-  booking             Booking?              @relation(fields: [bookingId], references: [id])
-  guest               Guest                 @relation(fields: [guestId], references: [id])
-  folio               Folio?                @relation(fields: [folioId], references: [id])
-  cityLedgerAccount   CityLedgerAccount?    @relation(fields: [cityLedgerAccountId], references: [id])
-  items               InvoiceItem[]
-  allocations         PaymentAllocation[]
-  auditLogs           PaymentAuditLog[]     @relation("InvoiceAuditLogs")
-  clAllocations       CityLedgerAllocation[]
+  booking           Booking?               @relation(fields: [bookingId], references: [id])
+  guest             Guest                  @relation(fields: [guestId], references: [id])
+  folio             Folio?                 @relation(fields: [folioId], references: [id])
+  cityLedgerAccount CityLedgerAccount?     @relation(fields: [cityLedgerAccountId], references: [id])
+  items             InvoiceItem[]
+  allocations       PaymentAllocation[]
+  auditLogs         PaymentAuditLog[]      @relation("InvoiceAuditLogs")
+  clAllocations     CityLedgerAllocation[]
 
   @@index([folioId])
   @@index([cityLedgerAccountId])
@@ -468,39 +696,39 @@ model Invoice {
 }
 
 model InvoiceItem {
-  id              String   @id @default(uuid())
-  invoiceId       String   @map("invoice_id")
-  description     String
-  amount          Decimal  @db.Decimal(10, 2)
-  taxType         TaxType  @default(included) @map("tax_type")
-  productId       String?  @map("product_id")
-  sortOrder       Int      @default(0) @map("sort_order")
+  id          String  @id @default(uuid())
+  invoiceId   String  @map("invoice_id")
+  description String
+  amount      Decimal @db.Decimal(10, 2)
+  taxType     TaxType @default(included) @map("tax_type")
+  productId   String? @map("product_id")
+  sortOrder   Int     @default(0) @map("sort_order")
 
   // Anti-double-billing: each folio line item can only appear on ONE invoice item
-  folioLineItemId String?  @unique @map("folio_line_item_id")
+  folioLineItemId String? @unique @map("folio_line_item_id")
 
-  invoice         Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  product         Product?       @relation(fields: [productId], references: [id])
-  folioLineItem   FolioLineItem? @relation(fields: [folioLineItemId], references: [id])
+  invoice       Invoice        @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product       Product?       @relation(fields: [productId], references: [id])
+  folioLineItem FolioLineItem? @relation(fields: [folioLineItemId], references: [id])
 
   @@map("invoice_items")
 }
 
 model UtilityReading {
-  id             String   @id @default(uuid())
-  roomId         String   @map("room_id")
-  month          String   // "2026-03" format
-  prevWater      Decimal  @default(0) @map("prev_water") @db.Decimal(10, 2)
-  currWater      Decimal  @default(0) @map("curr_water") @db.Decimal(10, 2)
-  waterRate      Decimal  @default(18) @map("water_rate") @db.Decimal(10, 2)
-  prevElectric   Decimal  @default(0) @map("prev_electric") @db.Decimal(10, 2)
-  currElectric   Decimal  @default(0) @map("curr_electric") @db.Decimal(10, 2)
-  electricRate   Decimal  @default(8) @map("electric_rate") @db.Decimal(10, 2)
-  recorded       Boolean  @default(false)
-  recordedAt     DateTime? @map("recorded_at")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id           String    @id @default(uuid())
+  roomId       String    @map("room_id")
+  month        String // "2026-03" format
+  prevWater    Decimal   @default(0) @map("prev_water") @db.Decimal(10, 2)
+  currWater    Decimal   @default(0) @map("curr_water") @db.Decimal(10, 2)
+  waterRate    Decimal   @default(18) @map("water_rate") @db.Decimal(10, 2)
+  prevElectric Decimal   @default(0) @map("prev_electric") @db.Decimal(10, 2)
+  currElectric Decimal   @default(0) @map("curr_electric") @db.Decimal(10, 2)
+  electricRate Decimal   @default(8) @map("electric_rate") @db.Decimal(10, 2)
+  recorded     Boolean   @default(false)
+  recordedAt   DateTime? @map("recorded_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
 
-  room           Room     @relation(fields: [roomId], references: [id])
+  room Room @relation(fields: [roomId], references: [id])
 
   @@unique([roomId, month])
   @@map("utility_readings")
@@ -510,10 +738,13 @@ model Product {
   id          String          @id @default(uuid())
   code        String          @unique
   name        String
+  description String?
+  unit        String?         @default("ครั้ง")
   price       Decimal         @db.Decimal(10, 2)
   taxType     TaxType         @default(included) @map("tax_type")
   category    ProductCategory @default(service)
   active      Boolean         @default(true)
+  sortOrder   Int             @default(0) @map("sort_order")
   createdAt   DateTime        @default(now()) @map("created_at")
 
   invoiceItems InvoiceItem[]
@@ -536,10 +767,64 @@ model HousekeepingTask {
   notes        String?
   createdAt    DateTime           @default(now()) @map("created_at")
 
-  room         Room               @relation(fields: [roomId], references: [id])
-  maidTeam     MaidTeam?          @relation(fields: [maidTeamId], references: [id])
+  // Sprint 2b: Request source + chargeable cleaning + recurring schedule link
+  requestSource    HKRequestSource   @default(manual) @map("request_source")
+  chargeable       Boolean           @default(false)
+  fee              Decimal?          @db.Decimal(10, 2)
+  bookingId        String?           @map("booking_id")
+  folioLineItemId  String?           @unique @map("folio_line_item_id")
+  scheduleId       String?           @map("schedule_id")
+  requestedAt      DateTime?         @map("requested_at")
+  requestedBy      String?           @map("requested_by")
+  requestChannel   HKRequestChannel? @map("request_channel")
+  // Idempotency key for night-audit daily creation
+  // Format: "hk-daily-{bookingId}-{YYYY-MM-DD}"
+  idempotencyKey   String?           @unique @map("idempotency_key")
+  // Decline log
+  declinedAt       DateTime?         @map("declined_at")
+  declinedBy       String?           @map("declined_by")
+  declineChannel   HKRequestChannel? @map("decline_channel")
+  declineNotes     String?           @map("decline_notes")
 
+  room          Room              @relation(fields: [roomId], references: [id])
+  maidTeam      MaidTeam?         @relation(fields: [maidTeamId], references: [id])
+  booking       Booking?          @relation(fields: [bookingId], references: [id])
+  folioLineItem FolioLineItem?    @relation(fields: [folioLineItemId], references: [id])
+  schedule      CleaningSchedule? @relation(fields: [scheduleId], references: [id])
+
+  @@index([bookingId])
+  @@index([scheduleId])
+  @@index([requestSource, status])
   @@map("housekeeping_tasks")
+}
+
+/// Recurring cleaning schedule — monthly-stay scope.
+/// Night audit cron generates `recurring_auto` tasks from active schedules.
+model CleaningSchedule {
+  id           String     @id @default(cuid())
+  roomId       String     @map("room_id")
+  bookingId    String?    @map("booking_id")
+  // Recurrence: either cadenceDays OR weekdays bitmask (Mon=1 .. Sun=64)
+  cadenceDays  Int?       @map("cadence_days")
+  weekdays     Int?
+  timeOfDay    String?    @map("time_of_day")
+  activeFrom   DateTime   @map("active_from")
+  activeUntil  DateTime?  @map("active_until")
+  fee          Decimal?   @db.Decimal(10, 2)
+  chargeable   Boolean    @default(true)
+  notes        String?
+  priority     HKPriority @default(normal)
+  createdBy    String?    @map("created_by")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  isActive     Boolean    @default(true) @map("is_active")
+
+  room    Room               @relation(fields: [roomId], references: [id])
+  booking Booking?           @relation(fields: [bookingId], references: [id])
+  tasks   HousekeepingTask[]
+
+  @@index([roomId, isActive])
+  @@index([bookingId])
+  @@map("cleaning_schedules")
 }
 
 model MaintenanceTask {
@@ -556,62 +841,62 @@ model MaintenanceTask {
   notes        String?
   createdAt    DateTime            @default(now()) @map("created_at")
 
-  room         Room                @relation(fields: [roomId], references: [id])
+  room Room @relation(fields: [roomId], references: [id])
 
   @@map("maintenance_tasks")
 }
 
 model RateAudit {
-  id              String   @id @default(cuid())
-  bookingId       String   @map("booking_id")
-  booking         Booking  @relation(fields: [bookingId], references: [id])
-  changedBy       String   @map("changed_by")
-  changeType      String   @map("change_type")
-  previousRate    Decimal  @map("previous_rate") @db.Decimal(10, 2)
-  newRate         Decimal  @map("new_rate") @db.Decimal(10, 2)
-  previousNights  Int      @map("previous_nights")
-  newNights       Int      @map("new_nights")
-  previousTotal   Decimal  @map("previous_total") @db.Decimal(10, 2)
-  newTotal        Decimal  @map("new_total") @db.Decimal(10, 2)
-  scenario        String
-  notes           String?
-  createdAt       DateTime @default(now()) @map("created_at")
+  id             String   @id @default(cuid())
+  bookingId      String   @map("booking_id")
+  booking        Booking  @relation(fields: [bookingId], references: [id])
+  changedBy      String   @map("changed_by")
+  changeType     String   @map("change_type")
+  previousRate   Decimal  @map("previous_rate") @db.Decimal(10, 2)
+  newRate        Decimal  @map("new_rate") @db.Decimal(10, 2)
+  previousNights Int      @map("previous_nights")
+  newNights      Int      @map("new_nights")
+  previousTotal  Decimal  @map("previous_total") @db.Decimal(10, 2)
+  newTotal       Decimal  @map("new_total") @db.Decimal(10, 2)
+  scenario       String
+  notes          String?
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@map("rate_audits")
 }
 
 model IdempotencyRecord {
-  id          String   @id @default(cuid())
-  key         String   @unique
-  result      Json
-  createdAt   DateTime @default(now()) @map("created_at")
-  expiresAt   DateTime @map("expires_at")
+  id        String   @id @default(cuid())
+  key       String   @unique
+  result    Json
+  createdAt DateTime @default(now()) @map("created_at")
+  expiresAt DateTime @map("expires_at")
 
   @@map("idempotency_records")
 }
 
 model Maid {
-  id        String           @id @default(uuid())
+  id        String   @id @default(uuid())
   name      String
   phone     String?
-  active    Boolean          @default(true)
-  createdAt DateTime         @default(now()) @map("created_at")
-  updatedAt DateTime         @updatedAt @map("updated_at")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  teams     MaidTeamMember[]
-  payouts   MaidPayout[]
+  teams   MaidTeamMember[]
+  payouts MaidPayout[]
 
   @@map("maids")
 }
 
 model MaidTeam {
-  id        String           @id @default(uuid())
+  id        String   @id @default(uuid())
   name      String
-  createdAt DateTime         @default(now()) @map("created_at")
-  updatedAt DateTime         @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  members   MaidTeamMember[]
-  tasks     HousekeepingTask[]
+  members MaidTeamMember[]
+  tasks   HousekeepingTask[]
 
   @@map("maid_teams")
 }
@@ -621,57 +906,57 @@ model MaidTeamMember {
   maidTeamId String   @map("maid_team_id")
   assignedAt DateTime @default(now()) @map("assigned_at")
 
-  maid       Maid     @relation(fields: [maidId], references: [id], onDelete: Cascade)
-  team       MaidTeam @relation(fields: [maidTeamId], references: [id], onDelete: Cascade)
+  maid Maid     @relation(fields: [maidId], references: [id], onDelete: Cascade)
+  team MaidTeam @relation(fields: [maidTeamId], references: [id], onDelete: Cascade)
 
   @@id([maidId, maidTeamId])
   @@map("maid_team_members")
 }
 
 model MaidPayout {
-  id           String   @id @default(uuid())
-  maidId       String   @map("maid_id")
-  amount       Decimal  @db.Decimal(10, 2)
-  payDate      DateTime @map("pay_date") @db.Date
-  status       String   @default("paid")
-  notes        String?
-  createdAt    DateTime @default(now()) @map("created_at")
+  id        String   @id @default(uuid())
+  maidId    String   @map("maid_id")
+  amount    Decimal  @db.Decimal(10, 2)
+  payDate   DateTime @map("pay_date") @db.Date
+  status    String   @default("paid")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
 
-  maid         Maid     @relation(fields: [maidId], references: [id])
+  maid Maid @relation(fields: [maidId], references: [id])
 
   @@map("maid_payouts")
 }
 
 model ActivityLog {
-  id          String   @id @default(uuid())
+  id String @id @default(uuid())
 
   // Who & When
-  userId      String?  @map("user_id")
-  userName    String?  @map("user_name")
-  createdAt   DateTime @default(now()) @map("created_at")
+  userId    String?  @map("user_id")
+  userName  String?  @map("user_name")
+  createdAt DateTime @default(now()) @map("created_at")
 
   // What
-  action      String
-  category    String
+  action   String
+  category String
 
   // Related Entities
-  bookingId           String?  @map("booking_id")
-  roomId              String?  @map("room_id")
-  guestId             String?  @map("guest_id")
-  invoiceId           String?  @map("invoice_id")
-  cityLedgerAccountId String?  @map("city_ledger_account_id")
+  bookingId           String? @map("booking_id")
+  roomId              String? @map("room_id")
+  guestId             String? @map("guest_id")
+  invoiceId           String? @map("invoice_id")
+  cityLedgerAccountId String? @map("city_ledger_account_id")
 
   // Content
   description String
   metadata    Json?
-  icon        String   @default("📝")
-  severity    String   @default("info")
+  icon        String @default("📝")
+  severity    String @default("info")
 
   // Relations
-  booking            Booking?           @relation(fields: [bookingId], references: [id])
-  room               Room?              @relation(fields: [roomId], references: [id])
-  guest              Guest?             @relation(fields: [guestId], references: [id])
-  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
+  booking           Booking?           @relation(fields: [bookingId], references: [id])
+  room              Room?              @relation(fields: [roomId], references: [id])
+  guest             Guest?             @relation(fields: [guestId], references: [id])
+  cityLedgerAccount CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
 
   @@index([bookingId, createdAt])
   @@index([roomId, createdAt])
@@ -685,14 +970,14 @@ model ActivityLog {
 // ─── Room Inspection ───────────────────────────────────────────────────────────
 
 model RoomInspection {
-  id             String   @id @default(uuid())
-  roomId         String   @map("room_id")
-  inspectorName  String   @map("inspector_name")
-  remark         String?
-  createdAt      DateTime @default(now()) @map("created_at")
+  id            String   @id @default(uuid())
+  roomId        String   @map("room_id")
+  inspectorName String   @map("inspector_name")
+  remark        String?
+  createdAt     DateTime @default(now()) @map("created_at")
 
-  room           Room                  @relation(fields: [roomId], references: [id])
-  photos         RoomInspectionPhoto[]
+  room   Room                  @relation(fields: [roomId], references: [id])
+  photos RoomInspectionPhoto[]
 
   @@index([roomId, createdAt])
   @@map("room_inspections")
@@ -705,7 +990,7 @@ model RoomInspectionPhoto {
   size         Int?
   createdAt    DateTime @default(now()) @map("created_at")
 
-  inspection   RoomInspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+  inspection RoomInspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
 
   @@index([inspectionId])
   @@map("room_inspection_photos")
@@ -714,36 +999,36 @@ model RoomInspectionPhoto {
 // ─── Booking Companions (ผู้ติดตาม / เพื่อนลูกค้า) ────────────────────────────
 
 model BookingCompanion {
-  id             String   @id @default(uuid())
-  bookingId      String   @map("booking_id")
-  firstName      String   @map("first_name")
-  lastName       String   @map("last_name")
-  firstNameTH    String?  @map("first_name_th")
-  lastNameTH     String?  @map("last_name_th")
-  phone          String?
-  idType         String?  @map("id_type")       // passport, thai_id, driving_license
-  idNumber       String?  @map("id_number")
-  nationality    String?
-  notes          String?
-  ocrRawText     String?  @map("ocr_raw_text")  // OCR full text from ID photo
-  createdAt      DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  bookingId   String   @map("booking_id")
+  firstName   String   @map("first_name")
+  lastName    String   @map("last_name")
+  firstNameTH String?  @map("first_name_th")
+  lastNameTH  String?  @map("last_name_th")
+  phone       String?
+  idType      String?  @map("id_type") // passport, thai_id, driving_license
+  idNumber    String?  @map("id_number")
+  nationality String?
+  notes       String?
+  ocrRawText  String?  @map("ocr_raw_text") // OCR full text from ID photo
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  booking        Booking                @relation(fields: [bookingId], references: [id], onDelete: Cascade)
-  photos         BookingCompanionPhoto[]
+  booking Booking                 @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  photos  BookingCompanionPhoto[]
 
   @@index([bookingId])
   @@map("booking_companions")
 }
 
 model BookingCompanionPhoto {
-  id           String   @id @default(uuid())
-  companionId  String   @map("companion_id")
-  filename     String
-  photoType    String   @default("face") @map("photo_type") // face, id_card, passport, other
-  size         Int?
-  createdAt    DateTime @default(now()) @map("created_at")
+  id          String   @id @default(uuid())
+  companionId String   @map("companion_id")
+  filename    String
+  photoType   String   @default("face") @map("photo_type") // face, id_card, passport, other
+  size        Int?
+  createdAt   DateTime @default(now()) @map("created_at")
 
-  companion    BookingCompanion @relation(fields: [companionId], references: [id], onDelete: Cascade)
+  companion BookingCompanion @relation(fields: [companionId], references: [id], onDelete: Cascade)
 
   @@index([companionId])
   @@map("booking_companion_photos")
@@ -752,50 +1037,95 @@ model BookingCompanionPhoto {
 // ─── Phase 1: Payment & Accounting Layer ────────────────────────────────────
 
 model Payment {
-  id              String        @id @default(uuid())
-  paymentNumber   String        @unique @map("payment_number")    // PAY-YYYYMMDD-NNNN
-  receiptNumber   String        @unique @map("receipt_number")    // RCP-YYYYMMDD-NNNN
-  bookingId       String?       @map("booking_id")
-  guestId         String        @map("guest_id")
+  id            String  @id @default(uuid())
+  paymentNumber String  @unique @map("payment_number") // PAY-YYYYMMDD-NNNN
+  receiptNumber String  @unique @map("receipt_number") // RCP-YYYYMMDD-NNNN
+  bookingId     String? @map("booking_id")
+  guestId       String  @map("guest_id")
 
   // Financial
-  amount          Decimal       @db.Decimal(12, 2)
-  paymentMethod   PaymentMethod @map("payment_method")
-  paymentDate     DateTime      @map("payment_date")
-  referenceNo     String?       @map("reference_no")    // bank slip, QR ref, gateway ref
+  amount        Decimal       @db.Decimal(12, 2)
+  paymentMethod PaymentMethod @map("payment_method")
+  paymentDate   DateTime      @map("payment_date")
+  referenceNo   String?       @map("reference_no") // bank slip, QR ref, gateway ref
 
   // Status & Void pattern
-  status          PaymentStatus @default(ACTIVE)
-  voidReason      String?       @map("void_reason")
-  voidedAt        DateTime?     @map("voided_at")
-  voidedBy        String?       @map("voided_by")
+  status     PaymentStatus @default(ACTIVE)
+  voidReason String?       @map("void_reason")
+  voidedAt   DateTime?     @map("voided_at")
+  voidedBy   String?       @map("voided_by")
 
   // Shift control (Phase 2: enforce non-null)
-  cashSessionId   String?       @map("cash_session_id")
+  cashSessionId String? @map("cash_session_id")
+
+  // Sprint 4B: denormalized cash box for fast per-counter reporting.
+  // Populated in the same write as cashSessionId (server-resolved from the
+  // session → never trusted from the client).
+  cashBoxId String?  @map("cash_box_id")
+  cashBox   CashBox? @relation(fields: [cashBoxId], references: [id])
 
   // Staff tracking
-  receivedBy      String?       @map("received_by")
-  notes           String?
+  receivedBy String? @map("received_by")
+  notes      String?
 
   // Idempotency — UUID sent from client, prevents double-submit
-  idempotencyKey  String        @unique @map("idempotency_key")
+  idempotencyKey String @unique @map("idempotency_key")
 
-  createdAt       DateTime      @default(now()) @map("created_at")
-  createdBy       String        @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
 
   // Folio link (optional — for migration compatibility)
-  folioId         String?       @map("folio_id")
+  folioId String? @map("folio_id")
+
+  // Phase A: which physical account received the money.
+  // Nullable during migration; resolver falls back to system default.
+  financialAccountId String?           @map("financial_account_id")
+  financialAccount   FinancialAccount? @relation("PaymentAccount", fields: [financialAccountId], references: [id])
+
+  // Phase D (reserved): fee split — grossAmount - feeAmount = net credited
+  feeAmount       Decimal? @db.Decimal(12, 2) @map("fee_amount")
+  feeAccountId    String?  @map("fee_account_id")
+  feeAccount      FinancialAccount? @relation("PaymentFeeAccount", fields: [feeAccountId], references: [id])
+
+  // ── Sprint 5: Bank transfer / QR ─────────────────────────────────
+  receivingAccountId String?           @map("receiving_account_id")
+  receivingAccount   FinancialAccount? @relation("PaymentReceivingAccount", fields: [receivingAccountId], references: [id])
+  slipImageUrl       String?           @map("slip_image_url")
+  slipRefNo          String?           @unique @map("slip_ref_no") // กัน slip ซ้ำ (D1)
+
+  // ── Sprint 5: Credit card ────────────────────────────────────────
+  cardBrand   CardBrand?   @map("card_brand")
+  cardType    CardType?    @default(NORMAL) @map("card_type")
+  cardLast4   String?      @db.VarChar(4) @map("card_last4")
+  authCode    String?      @db.VarChar(12) @map("auth_code")
+  terminalId  String?      @map("terminal_id")
+  terminal    EdcTerminal? @relation(fields: [terminalId], references: [id])
+  batchNo     String?      @map("batch_no")
+
+  // ── Sprint 5: Reconciliation (2-state lifecycle) ─────────────────
+  reconStatus ReconStatus @default(RECEIVED) @map("recon_status")
+  clearedAt   DateTime?   @map("cleared_at")
+  clearedBy   String?     @map("cleared_by")
 
   // Relations
-  allocations     PaymentAllocation[]
-  cashSession     CashSession?  @relation(fields: [cashSessionId], references: [id])
-  folio           Folio?        @relation(fields: [folioId], references: [id])
-  auditLogs       PaymentAuditLog[] @relation("PaymentAuditLogs")
+  allocations PaymentAllocation[]
+  cashSession CashSession?        @relation(fields: [cashSessionId], references: [id])
+  folio       Folio?              @relation(fields: [folioId], references: [id])
+  auditLogs   PaymentAuditLog[]   @relation("PaymentAuditLogs")
+  // Phase B: refunds that reference this payment as the source being reversed
+  reversedByRefunds RefundRecord[] @relation("PaymentReversal")
 
   @@index([bookingId])
   @@index([guestId])
   @@index([folioId])
   @@index([paymentDate])
+  @@index([cashBoxId, paymentDate]) // Sprint 4B: per-counter reporting
+  @@index([receivingAccountId])
+  @@index([terminalId])
+  @@index([reconStatus])
+  @@index([batchNo])
+  @@index([amount, paymentDate])       // Sprint 5 Phase 7: fuzzy auto-match
+  @@index([reconStatus, createdAt])    // Sprint 5 Phase 9: stale-alert scan
   @@map("payments")
 }
 
@@ -806,176 +1136,357 @@ model PaymentAllocation {
   amount      Decimal  @db.Decimal(12, 2)
   allocatedAt DateTime @default(now()) @map("allocated_at")
 
-  payment     Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id])
 
   @@unique([paymentId, invoiceId])
   @@index([invoiceId])
   @@map("payment_allocations")
 }
 
+// ── Chart of Accounts ────────────────────────────────────────────────────────
+// Configurable physical accounts (cash drawers, bank accounts, COGS accounts…).
+// Seeded with system defaults that map 1:1 to legacy LedgerAccount enum,
+// so Phase A is additive and preserves existing behavior.
+model FinancialAccount {
+  id   String @id @default(uuid())
+  code String @unique // Thai GAAP-ish, e.g. "1110-01" (CASH main drawer)
+  name String
+  nameEN String? @map("name_en")
+
+  kind    AccountKind
+  subKind AccountSubKind @map("sub_kind")
+
+  // Hierarchy (optional — parent roll-up for reports)
+  parentId String?            @map("parent_id")
+  parent   FinancialAccount?  @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children FinancialAccount[] @relation("AccountHierarchy")
+
+  // Bank-specific (only populated when subKind = BANK)
+  bankName        String? @map("bank_name")
+  bankAccountNo   String? @map("bank_account_no")
+  bankAccountName String? @map("bank_account_name")
+
+  // Opening balance (yokma — ยอดยกมา) — posted as a single system entry
+  openingBalance   Decimal  @default(0) @db.Decimal(15, 2) @map("opening_balance")
+  openingBalanceAt DateTime? @map("opening_balance_at")
+
+  isActive  Boolean @default(true) @map("is_active")
+  isSystem  Boolean @default(false) @map("is_system") // seeded defaults, cannot delete
+  isDefault Boolean @default(false) @map("is_default") // one default per (kind, subKind)
+
+  // Sprint 5 (D4): company vs personal account flag (null for non-bank)
+  ownerType BankAccountOwner? @map("owner_type")
+
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  ledgerEntries LedgerEntry[]
+  payments      Payment[]      @relation("PaymentAccount")
+  paymentFees   Payment[]      @relation("PaymentFeeAccount")
+  refunds       RefundRecord[]
+  cashBoxes     CashBox[]      @relation("CashBoxAccount")
+  transfersOut  TransferRecord[] @relation("TransferFrom")
+  transfersIn   TransferRecord[] @relation("TransferTo")
+
+  // Sprint 5
+  paymentsReceiving Payment[]     @relation("PaymentReceivingAccount")
+  edcTerminals      EdcTerminal[] @relation("TerminalClearingAccount")
+
+  @@index([kind, subKind])
+  @@index([isActive])
+  @@map("financial_accounts")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// TransferRecord — moves money between two money accounts.
+// Use cases:
+//   • Deposit cash drawer into bank
+//   • Move cash from small safe to large safe
+//   • Transfer between two bank accounts
+//
+// Every transfer posts a ledger pair (DR toAccount / CR fromAccount) so all
+// money-overview balances stay consistent.
+model TransferRecord {
+  id            String   @id @default(uuid())
+  date          DateTime @default(now())
+  fromAccountId String   @map("from_account_id")
+  fromAccount   FinancialAccount @relation("TransferFrom", fields: [fromAccountId], references: [id])
+  toAccountId   String   @map("to_account_id")
+  toAccount     FinancialAccount @relation("TransferTo",   fields: [toAccountId],   references: [id])
+  amount        Decimal  @db.Decimal(12, 2)
+  notes         String?
+  batchId       String   @map("batch_id") // shared with the ledger pair for audit
+
+  // Optional — when fromAccount is CASH, link to the open cash session
+  cashSessionId String?      @map("cash_session_id")
+  cashSession   CashSession? @relation("TransferCashSession", fields: [cashSessionId], references: [id])
+
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([date])
+  @@index([fromAccountId])
+  @@index([toAccountId])
+  @@index([batchId])
+  @@map("transfer_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FiscalPeriod — monthly accounting period. Once CLOSED, new ledger entries
+// with a date inside that month are rejected by postLedgerPair.
+// Reopen is allowed (admin-only, logged) for corrections before final audit.
+model FiscalPeriod {
+  id     String             @id @default(uuid())
+  year   Int
+  month  Int                // 1-12
+  status FiscalPeriodStatus @default(OPEN)
+
+  closedAt     DateTime? @map("closed_at")
+  closedBy     String?   @map("closed_by")
+  reopenedAt   DateTime? @map("reopened_at")
+  reopenedBy   String?   @map("reopened_by")
+  reopenReason String?   @map("reopen_reason")
+  notes        String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt       @map("updated_at")
+
+  @@unique([year, month])
+  @@index([status])
+  @@map("fiscal_periods")
+}
+
 model LedgerEntry {
   id            String        @id @default(uuid())
   date          DateTime
   type          LedgerType
-  account       LedgerAccount
+  account       LedgerAccount // legacy enum — kept for back-compat during Phase A
   amount        Decimal       @db.Decimal(12, 2)
-  referenceType String        @map("reference_type")   // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'Void'
+  referenceType String        @map("reference_type") // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'Void'
   referenceId   String        @map("reference_id")
   description   String?
-  createdAt     DateTime      @default(now()) @map("created_at")
-  createdBy     String        @map("created_by")
+
+  // Phase A: new FK — nullable during migration, will be enforced in Phase B
+  financialAccountId String?           @map("financial_account_id")
+  financialAccount   FinancialAccount? @relation(fields: [financialAccountId], references: [id])
+
+  // Phase A: posting batch — paired DR/CR entries share the same batchId for audit
+  batchId String? @map("batch_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
 
   @@index([referenceType, referenceId])
   @@index([account, date])
+  @@index([financialAccountId, date])
+  @@index([batchId])
   @@index([date])
   @@map("ledger_entries")
 }
 
 model SecurityDeposit {
-  id            String        @id @default(uuid())
-  depositNumber String        @unique @map("deposit_number")   // DEP-YYYYMMDD-NNNN
-  bookingId     String        @map("booking_id")
-  guestId       String        @map("guest_id")
+  id            String @id @default(uuid())
+  depositNumber String @unique @map("deposit_number") // DEP-YYYYMMDD-NNNN
+  bookingId     String @map("booking_id")
+  guestId       String @map("guest_id")
 
   amount        Decimal       @db.Decimal(12, 2)
   paymentMethod PaymentMethod @map("payment_method")
   receivedAt    DateTime      @map("received_at")
   referenceNo   String?       @map("reference_no")
 
-  status        DepositStatus @default(held)
+  status DepositStatus @default(held)
 
   // Refund info
-  refundAmount  Decimal?      @map("refund_amount") @db.Decimal(12, 2)
-  refundAt      DateTime?     @map("refund_at")
-  refundMethod  PaymentMethod? @map("refund_method")
-  refundRef     String?       @map("refund_ref")
+  refundAmount Decimal?       @map("refund_amount") @db.Decimal(12, 2)
+  refundAt     DateTime?      @map("refund_at")
+  refundMethod PaymentMethod? @map("refund_method")
+  refundRef    String?        @map("refund_ref")
 
   // Deductions (stored as JSON array: [{reason, amount}])
-  deductions    Json?
+  deductions Json?
 
   // Bank details for transfer refund
-  bankName      String?       @map("bank_name")
-  bankAccount   String?       @map("bank_account")
-  bankAccountName String?     @map("bank_account_name")
+  bankName        String? @map("bank_name")
+  bankAccount     String? @map("bank_account")
+  bankAccountName String? @map("bank_account_name")
 
   // Early termination
-  forfeitReason String?       @map("forfeit_reason")
+  forfeitReason String?      @map("forfeit_reason")
+  forfeitType   ForfeitType? @map("forfeit_type")
 
   // City Ledger — มัดจำองค์กร
   cityLedgerAccountId String? @map("city_ledger_account_id")
 
-  notes         String?
-  createdAt     DateTime      @default(now()) @map("created_at")
-  createdBy     String        @map("created_by")
+  // Sprint 3B: link to Contract (nullable — existing deposits predate contracts)
+  contractId String? @map("contract_id")
 
-  booking            Booking            @relation(fields: [bookingId], references: [id])
-  cityLedgerAccount  CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
-  auditLogs          PaymentAuditLog[]  @relation("DepositAuditLogs")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  booking           Booking            @relation(fields: [bookingId], references: [id])
+  cityLedgerAccount CityLedgerAccount? @relation(fields: [cityLedgerAccountId], references: [id])
+  contract          Contract?          @relation(fields: [contractId], references: [id])
+  auditLogs         PaymentAuditLog[]  @relation("DepositAuditLogs")
 
   @@index([bookingId])
+  @@index([contractId])
   @@map("security_deposits")
 }
 
 model PaymentAuditLog {
-  id          String      @id @default(uuid())
-  action      AuditAction
-  entityType  String      @map("entity_type")   // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'CashSession'
-  entityId    String      @map("entity_id")
-  before      Json?       // state before change (null for CREATE)
-  after       Json        // state after change
-  userId      String      @map("user_id")
-  userName    String?     @map("user_name")
-  ipAddress   String?     @map("ip_address")
-  timestamp   DateTime    @default(now())
+  id         String      @id @default(uuid())
+  action     AuditAction
+  entityType String      @map("entity_type") // 'Payment' | 'Invoice' | 'SecurityDeposit' | 'CashSession'
+  entityId   String      @map("entity_id")
+  before     Json? // state before change (null for CREATE)
+  after      Json // state after change
+  userId     String      @map("user_id")
+  userName   String?     @map("user_name")
+  ipAddress  String?     @map("ip_address")
+  timestamp  DateTime    @default(now())
 
   // Optional FK relations for quick lookup
-  paymentId   String?     @map("payment_id")
-  invoiceId   String?     @map("invoice_id")
-  depositId   String?     @map("deposit_id")
+  paymentId String? @map("payment_id")
+  invoiceId String? @map("invoice_id")
+  depositId String? @map("deposit_id")
 
-  payment     Payment?    @relation("PaymentAuditLogs", fields: [paymentId], references: [id])
-  invoice     Invoice?    @relation("InvoiceAuditLogs", fields: [invoiceId], references: [id])
-  deposit     SecurityDeposit? @relation("DepositAuditLogs", fields: [depositId], references: [id])
+  payment Payment?         @relation("PaymentAuditLogs", fields: [paymentId], references: [id])
+  invoice Invoice?         @relation("InvoiceAuditLogs", fields: [invoiceId], references: [id])
+  deposit SecurityDeposit? @relation("DepositAuditLogs", fields: [depositId], references: [id])
 
   @@index([entityType, entityId, timestamp])
   @@index([timestamp])
   @@map("payment_audit_logs")
 }
 
+// ── Phase B: Cash drawer / counter ───────────────────────────────────────────
+// A CashBox represents a physical cash drawer or counter position.
+// Multiple CashBoxes can exist (e.g. Counter 1, Counter 2, Back office safe).
+// Each CashBox is bound 1:1 to a FinancialAccount (subKind=CASH).
+model CashBox {
+  id                 String  @id @default(uuid())
+  code               String  @unique // "COUNTER-1"
+  name               String
+  location           String?                  // Sprint 4B: "Lobby front desk 1"
+  displayOrder       Int     @default(0) @map("display_order") // Sprint 4B: sort order in UI
+  financialAccountId String           @map("financial_account_id") // FinancialAccount.subKind=CASH
+  financialAccount   FinancialAccount @relation("CashBoxAccount", fields: [financialAccountId], references: [id])
+  isActive           Boolean          @default(true) @map("is_active")
+  notes              String?
+
+  // Sprint 4B: denormalized current-session pointer.
+  // Enforces "one OPEN session per counter" via @unique + partial unique index.
+  currentSessionId String?      @unique @map("current_session_id")
+  currentSession   CashSession? @relation("CurrentSession", fields: [currentSessionId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  sessions CashSession[]
+  payments Payment[]     // Sprint 4B: denormalized reporting link
+
+  @@index([isActive])
+  @@index([displayOrder])
+  @@map("cash_boxes")
+}
+
 model CashSession {
-  id                  String        @id @default(uuid())
-  openedBy            String        @map("opened_by")
-  openedByName        String?       @map("opened_by_name")
-  closedBy            String?       @map("closed_by")
-  closedByName        String?       @map("closed_by_name")
-  openedAt            DateTime      @map("opened_at")
-  closedAt            DateTime?     @map("closed_at")
-  openingBalance      Decimal       @map("opening_balance") @db.Decimal(12, 2)
-  closingBalance      Decimal?      @map("closing_balance") @db.Decimal(12, 2)
-  systemCalculatedCash Decimal?     @map("system_calculated_cash") @db.Decimal(12, 2)
-  status              SessionStatus @default(OPEN)
-  closingNote         String?       @map("closing_note")
+  id                   String        @id @default(uuid())
+  openedBy             String        @map("opened_by")
+  openedByName         String        @map("opened_by_name") // Sprint 4B: required — captured at open-time
+  closedBy             String?       @map("closed_by")
+  closedByName         String?       @map("closed_by_name")
+  openedAt             DateTime      @default(now()) @map("opened_at")
+  closedAt             DateTime?     @map("closed_at")
+  openingBalance       Decimal       @map("opening_balance") @db.Decimal(12, 2)
+  closingBalance       Decimal?      @map("closing_balance") @db.Decimal(12, 2)
+  systemCalculatedCash Decimal?      @map("system_calculated_cash") @db.Decimal(12, 2)
+  status               SessionStatus @default(OPEN)
+  closingNote          String?       @map("closing_note")
 
-  payments            Payment[]
+  // Sprint 4B: counter-centric — every session is tied to a physical drawer.
+  cashBoxId String  @map("cash_box_id")
+  cashBox   CashBox @relation(fields: [cashBoxId], references: [id])
 
-  @@index([status])
+  // Sprint 4B: shift handover lineage (self-referential — at most one successor per session).
+  handoverFromId String?      @unique @map("handover_from_id")
+  handoverFrom   CashSession? @relation("Handover", fields: [handoverFromId], references: [id])
+  handoverTo     CashSession? @relation("Handover")
+
+  // Phase B: reconciliation detail captured at close time
+  totalCashIn      Decimal? @map("total_cash_in")      @db.Decimal(12, 2)
+  totalCashRefunds Decimal? @map("total_cash_refunds") @db.Decimal(12, 2)
+  overShortAmount  Decimal? @map("over_short_amount")  @db.Decimal(12, 2)
+
+  payments       Payment[]
+  refunds        RefundRecord[]
+  transfers      TransferRecord[] @relation("TransferCashSession")
+  currentInBoxes CashBox[]        @relation("CurrentSession")
+
   @@index([openedAt])
+  @@index([cashBoxId, status])
+  @@index([openedBy, status])
   @@map("cash_sessions")
 }
 
 // ─── Folio-Centric Billing Layer ────────────────────────────────────────────
 
 model Folio {
-  id            String   @id @default(uuid())
-  folioNumber   String   @unique @map("folio_number")   // FLO-YYYYMMDD-NNNN
-  bookingId     String   @unique @map("booking_id")     // 1 Booking = 1 Folio
-  guestId       String   @map("guest_id")
+  id          String @id @default(uuid())
+  folioNumber String @unique @map("folio_number") // FLO-YYYYMMDD-NNNN
+  bookingId   String @unique @map("booking_id") // 1 Booking = 1 Folio
+  guestId     String @map("guest_id")
 
   // Cached totals (recalculated on charge add/remove)
-  totalCharges  Decimal  @default(0) @map("total_charges") @db.Decimal(12, 2)
-  totalPayments Decimal  @default(0) @map("total_payments") @db.Decimal(12, 2)
-  balance       Decimal  @default(0) @db.Decimal(12, 2)    // totalCharges - totalPayments
+  totalCharges  Decimal @default(0) @map("total_charges") @db.Decimal(12, 2)
+  totalPayments Decimal @default(0) @map("total_payments") @db.Decimal(12, 2)
+  balance       Decimal @default(0) @db.Decimal(12, 2) // totalCharges - totalPayments
 
-  closedAt      DateTime? @map("closed_at")
-  notes         String?
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  closedAt  DateTime? @map("closed_at")
+  notes     String?
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
 
-  booking       Booking       @relation(fields: [bookingId], references: [id])
-  lineItems     FolioLineItem[]
-  invoices      Invoice[]
-  payments      Payment[]
+  booking   Booking         @relation(fields: [bookingId], references: [id])
+  lineItems FolioLineItem[]
+  invoices  Invoice[]
+  payments  Payment[]
 
   @@index([guestId])
   @@map("folios")
 }
 
 model FolioLineItem {
-  id            String          @id @default(uuid())
-  folioId       String          @map("folio_id")
-  chargeType    FolioChargeType @map("charge_type")
-  description   String
-  amount        Decimal         @db.Decimal(12, 2)
-  quantity      Int             @default(1)
-  unitPrice     Decimal         @default(0) @map("unit_price") @db.Decimal(12, 2)
-  taxType       TaxType         @default(no_tax) @map("tax_type")
+  id          String          @id @default(uuid())
+  folioId     String          @map("folio_id")
+  chargeType  FolioChargeType @map("charge_type")
+  description String
+  amount      Decimal         @db.Decimal(12, 2)
+  quantity    Int             @default(1)
+  unitPrice   Decimal         @default(0) @map("unit_price") @db.Decimal(12, 2)
+  taxType     TaxType         @default(no_tax) @map("tax_type")
 
   // Anti-double-billing status lock
-  billingStatus BillingStatus   @default(UNBILLED) @map("billing_status")
+  billingStatus BillingStatus @default(UNBILLED) @map("billing_status")
 
   // Optional references for traceability
-  serviceDate   DateTime?       @map("service_date") @db.Date
-  productId     String?         @map("product_id")
-  referenceType String?         @map("reference_type")   // 'utility_reading' | 'product' | 'manual'
-  referenceId   String?         @map("reference_id")
+  serviceDate   DateTime? @map("service_date") @db.Date
+  productId     String?   @map("product_id")
+  referenceType String?   @map("reference_type") // 'utility_reading' | 'product' | 'manual'
+  referenceId   String?   @map("reference_id")
 
-  notes         String?
-  createdAt     DateTime        @default(now()) @map("created_at")
-  createdBy     String          @map("created_by")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
 
-  folio         Folio           @relation(fields: [folioId], references: [id])
-  invoiceItem   InvoiceItem?    // 1:1 — enforced by unique constraint on InvoiceItem.folioLineItemId
+  folio             Folio              @relation(fields: [folioId], references: [id])
+  invoiceItem       InvoiceItem? // 1:1 — enforced by unique constraint on InvoiceItem.folioLineItemId
+  housekeepingTasks HousekeepingTask[]
 
   @@index([folioId, billingStatus])
   @@index([folioId, chargeType])
@@ -985,74 +1496,74 @@ model FolioLineItem {
 // ─── City Ledger / Accounts Receivable ──────────────────────────────────────
 
 model CityLedgerAccount {
-  id              String                  @id @default(uuid())
-  accountCode     String                  @unique @map("account_code")    // CL-0001
-  companyName     String                  @map("company_name")
-  companyTaxId    String?                 @map("company_tax_id")
-  companyAddress  String?                 @map("company_address")
+  id             String  @id @default(uuid())
+  accountCode    String  @unique @map("account_code") // CL-0001
+  companyName    String  @map("company_name")
+  companyTaxId   String? @map("company_tax_id")
+  companyAddress String? @map("company_address")
 
-  contactName     String?                 @map("contact_name")
-  contactEmail    String?                 @map("contact_email")
-  contactPhone    String?                 @map("contact_phone")
+  contactName  String? @map("contact_name")
+  contactEmail String? @map("contact_email")
+  contactPhone String? @map("contact_phone")
 
-  creditLimit     Decimal                 @default(0) @map("credit_limit")     @db.Decimal(12, 2)
-  creditTermsDays Int                     @default(30) @map("credit_terms_days")
-  currentBalance  Decimal                 @default(0) @map("current_balance")  @db.Decimal(12, 2) // cached outstanding
+  creditLimit     Decimal @default(0) @map("credit_limit") @db.Decimal(12, 2)
+  creditTermsDays Int     @default(30) @map("credit_terms_days")
+  currentBalance  Decimal @default(0) @map("current_balance") @db.Decimal(12, 2) // cached outstanding
 
-  status          CityLedgerAccountStatus @default(active)
-  version         Int                     @default(1)   // Optimistic Concurrency
+  status  CityLedgerAccountStatus @default(active)
+  version Int                     @default(1) // Optimistic Concurrency
 
-  notes           String?
-  createdAt       DateTime                @default(now()) @map("created_at")
-  updatedAt       DateTime                @updatedAt @map("updated_at")
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  bookings        Booking[]
-  invoices        Invoice[]
-  transactions    CityLedgerTransaction[]
-  payments        CityLedgerPayment[]
-  deposits        SecurityDeposit[]
-  activityLogs    ActivityLog[]
+  bookings     Booking[]
+  invoices     Invoice[]
+  transactions CityLedgerTransaction[]
+  payments     CityLedgerPayment[]
+  deposits     SecurityDeposit[]
+  activityLogs ActivityLog[]
 
   @@map("city_ledger_accounts")
 }
 
 model CityLedgerTransaction {
-  id             String            @id @default(uuid())
-  accountId      String            @map("account_id")
-  date           DateTime          @db.Date
+  id             String   @id @default(uuid())
+  accountId      String   @map("account_id")
+  date           DateTime @db.Date
   // CHARGE | PAYMENT | VOID | ADJUSTMENT | BAD_DEBT
   type           String
-  referenceType  String            @map("reference_type")   // Invoice | Payment | CreditNote
-  referenceId    String            @map("reference_id")
-  amount         Decimal           @db.Decimal(12, 2)
-  runningBalance Decimal           @map("running_balance")  @db.Decimal(12, 2) // cached
+  referenceType  String   @map("reference_type") // Invoice | Payment | CreditNote
+  referenceId    String   @map("reference_id")
+  amount         Decimal  @db.Decimal(12, 2)
+  runningBalance Decimal  @map("running_balance") @db.Decimal(12, 2) // cached
   description    String?
-  version        Int               @default(1)
-  createdAt      DateTime          @default(now()) @map("created_at")
-  createdBy      String            @map("created_by")
+  version        Int      @default(1)
+  createdAt      DateTime @default(now()) @map("created_at")
+  createdBy      String   @map("created_by")
 
-  account        CityLedgerAccount @relation(fields: [accountId], references: [id])
+  account CityLedgerAccount @relation(fields: [accountId], references: [id])
 
   @@index([accountId, date])
   @@map("city_ledger_transactions")
 }
 
 model CityLedgerPayment {
-  id                String            @id @default(uuid())
-  paymentNumber     String            @unique @map("payment_number")       // CL-PAY-YYYYMMDD-NNNN
-  accountId         String            @map("account_id")
-  amount            Decimal           @db.Decimal(12, 2)
-  unallocatedAmount Decimal           @default(0) @map("unallocated_amount") @db.Decimal(12, 2)
-  paymentDate       DateTime          @map("payment_date")
-  paymentMethod     PaymentMethod     @map("payment_method")
-  referenceNo       String?           @map("reference_no")
-  status            PaymentStatus     @default(ACTIVE)
+  id                String        @id @default(uuid())
+  paymentNumber     String        @unique @map("payment_number") // CL-PAY-YYYYMMDD-NNNN
+  accountId         String        @map("account_id")
+  amount            Decimal       @db.Decimal(12, 2)
+  unallocatedAmount Decimal       @default(0) @map("unallocated_amount") @db.Decimal(12, 2)
+  paymentDate       DateTime      @map("payment_date")
+  paymentMethod     PaymentMethod @map("payment_method")
+  referenceNo       String?       @map("reference_no")
+  status            PaymentStatus @default(ACTIVE)
   notes             String?
-  createdAt         DateTime          @default(now()) @map("created_at")
-  createdBy         String            @map("created_by")
+  createdAt         DateTime      @default(now()) @map("created_at")
+  createdBy         String        @map("created_by")
 
-  account           CityLedgerAccount     @relation(fields: [accountId], references: [id])
-  allocations       CityLedgerAllocation[]
+  account     CityLedgerAccount      @relation(fields: [accountId], references: [id])
+  allocations CityLedgerAllocation[]
 
   @@index([accountId])
   @@index([paymentDate])
@@ -1060,16 +1571,476 @@ model CityLedgerPayment {
 }
 
 model CityLedgerAllocation {
-  id          String            @id @default(uuid())
-  clPaymentId String            @map("cl_payment_id")
-  invoiceId   String            @map("invoice_id")
-  amount      Decimal           @db.Decimal(12, 2)
-  allocatedAt DateTime          @default(now()) @map("allocated_at")
+  id          String   @id @default(uuid())
+  clPaymentId String   @map("cl_payment_id")
+  invoiceId   String   @map("invoice_id")
+  amount      Decimal  @db.Decimal(12, 2)
+  allocatedAt DateTime @default(now()) @map("allocated_at")
 
-  clPayment   CityLedgerPayment @relation(fields: [clPaymentId], references: [id])
-  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
+  clPayment CityLedgerPayment @relation(fields: [clPaymentId], references: [id])
+  invoice   Invoice           @relation(fields: [invoiceId], references: [id])
 
   @@unique([clPaymentId, invoiceId])
   @@index([invoiceId])
   @@map("city_ledger_allocations")
+}
+
+/// Ordered room segments covering a booking's full stay.
+/// Invariants (service-enforced):
+///  - Non-split booking → exactly 1 segment matching [checkIn, checkOut]
+///  - Multi-segment: contiguous, non-overlapping, covers [checkIn, checkOut] exactly
+///  - toDate is EXCLUSIVE (matches Booking.checkOut semantics)
+model BookingRoomSegment {
+  id          String      @id @default(uuid())
+  bookingId   String      @map("booking_id")
+  roomId      String      @map("room_id")
+  fromDate    DateTime    @map("from_date") @db.Date // inclusive
+  toDate      DateTime    @map("to_date") @db.Date // exclusive
+  rate        Decimal     @db.Decimal(10, 2)
+  bookingType BookingType @map("booking_type")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  createdBy   String?     @map("created_by")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  room    Room    @relation(fields: [roomId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId, fromDate])
+  @@index([roomId, fromDate, toDate])
+  @@map("booking_room_segments")
+}
+
+/// Audit trail for all room changes (SHUFFLE / MOVE / SPLIT).
+/// Posted-record immutable — never UPDATE, only INSERT.
+model RoomMoveHistory {
+  id                   String         @id @default(uuid())
+  bookingId            String         @map("booking_id")
+  mode                 RoomChangeMode
+  fromRoomId           String         @map("from_room_id")
+  toRoomId             String         @map("to_room_id")
+  effectiveDate        DateTime       @map("effective_date") @db.Date
+  reason               String
+  notes                String?
+  oldRate              Decimal        @map("old_rate") @db.Decimal(10, 2)
+  newRate              Decimal        @map("new_rate") @db.Decimal(10, 2)
+  billingImpact        Decimal        @default(0) @map("billing_impact") @db.Decimal(12, 2)
+  triggeredByBookingId String?        @map("triggered_by_booking_id")
+  createdBy            String         @map("created_by")
+  createdAt            DateTime       @default(now()) @map("created_at")
+
+  booking            Booking  @relation("bookingRoomMoves", fields: [bookingId], references: [id], onDelete: Restrict)
+  triggeredByBooking Booking? @relation("triggeredShuffles", fields: [triggeredByBookingId], references: [id], onDelete: Restrict)
+  fromRoom           Room     @relation("roomMoveFrom", fields: [fromRoomId], references: [id], onDelete: Restrict)
+  toRoom             Room     @relation("roomMoveTo", fields: [toRoomId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId, createdAt])
+  @@index([triggeredByBookingId])
+  @@map("room_move_history")
+}
+
+enum RefundSource {
+  rate_adjustment
+  overpayment
+  deposit
+  cancellation
+}
+
+enum RefundStatus {
+  pending
+  processed
+  cancelled
+}
+
+model RefundRecord {
+  id           String @id @default(uuid())
+  refundNumber String @unique @map("refund_number") // RFD-YYYYMMDD-NNNN
+  bookingId    String @map("booking_id")
+  guestId      String @map("guest_id")
+
+  amount Decimal        @db.Decimal(12, 2)
+  source RefundSource
+  reason String
+  method PaymentMethod? // pending refunds may not have method chosen yet
+  status RefundStatus   @default(pending)
+
+  // Link to the event that created this refund obligation
+  referenceType String? @map("reference_type") // 'Booking' | 'Invoice' | 'SecurityDeposit'
+  referenceId   String? @map("reference_id")
+
+  // Bank details for transfer refund (populated at process time)
+  bankName        String? @map("bank_name")
+  bankAccount     String? @map("bank_account")
+  bankAccountName String? @map("bank_account_name")
+
+  notes       String?
+  processedAt DateTime? @map("processed_at")
+  processedBy String?   @map("processed_by")
+
+  // Phase A: which physical account paid out the refund.
+  // Nullable during migration; required once Phase B enforces integrity.
+  financialAccountId String?           @map("financial_account_id")
+  financialAccount   FinancialAccount? @relation(fields: [financialAccountId], references: [id])
+
+  // Phase B: link cash refunds back to the session they came out of
+  cashSessionId String?      @map("cash_session_id")
+  cashSession   CashSession? @relation(fields: [cashSessionId], references: [id])
+
+  // Phase B: link to the original payment being reversed (full or partial)
+  reversesPaymentId String?  @map("reverses_payment_id")
+  reversesPayment   Payment? @relation("PaymentReversal", fields: [reversesPaymentId], references: [id])
+
+  // Phase C (reserved): approval for refunds above threshold
+  approvedBy String?   @map("approved_by")
+  approvedAt DateTime? @map("approved_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@index([bookingId])
+  @@index([status])
+  @@index([referenceType, referenceId])
+  @@index([financialAccountId])
+  @@map("refund_records")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hotel-wide settings (single-row config). Phase H1: VAT + service charge.
+//
+// Seeded on first boot with vatEnabled=false — flipping to true switches the
+// invoice flow to accrual + splits the ledger into Revenue / Service / VAT legs.
+// Pre-existing invoices stay on cash-basis flow (no retro change).
+// ─────────────────────────────────────────────────────────────────────────────
+model HotelSettings {
+  id       String @id @default(uuid())
+
+  // VAT
+  vatEnabled       Boolean @default(false) @map("vat_enabled")
+  vatRate          Decimal @default(7.00)  @db.Decimal(5, 2) @map("vat_rate")
+  vatInclusive     Boolean @default(false) @map("vat_inclusive")  // price already includes VAT?
+  vatRegistrationNo String? @map("vat_reg_no")
+
+  // Service charge (10% ร้านอาหารโรงแรม)
+  serviceChargeEnabled Boolean @default(false) @map("service_charge_enabled")
+  serviceChargeRate    Decimal @default(10.00) @db.Decimal(5, 2) @map("service_charge_rate")
+
+  // Identity (optional — shown on invoice headers)
+  hotelName    String? @map("hotel_name")
+  hotelAddress String? @map("hotel_address")
+  hotelPhone   String? @map("hotel_phone")
+  hotelEmail   String? @map("hotel_email")
+
+  // Sprint 2b — Housekeeping defaults
+  hkMonthlyFeeDefault   Decimal @default(300) @db.Decimal(10, 2) @map("hk_monthly_fee_default")
+  hkAdhocFeeDefault     Decimal @default(200) @db.Decimal(10, 2) @map("hk_adhoc_fee_default")
+  hkMorningShiftStart   String  @default("09:00") @map("hk_morning_shift_start")
+  hkStaleDailyWarnDays  Int     @default(3) @map("hk_stale_daily_warn_days")
+
+  // Sprint 3B — Contract defaults (all optional / safely defaulted for backfill)
+  hotelNameEn            String?          @map("hotel_name_en")
+  taxId                  String?          @map("tax_id")
+  authorizedRep          String?          @map("authorized_rep")
+  bankName               String?          @map("bank_name")
+  bankAccount            String?          @map("bank_account")
+  bankAccountName        String?          @map("bank_account_name")
+  bankBranch             String?          @map("bank_branch")
+  contractRulesTH        String?          @map("contract_rules_th") @db.Text
+  contractRulesEN        String?          @map("contract_rules_en") @db.Text
+  contractDefaultLang    ContractLanguage @default(th) @map("contract_default_lang")
+  defaultLockInMonths    Int              @default(0)   @map("default_lock_in_months")
+  defaultNoticeDays      Int              @default(30)  @map("default_notice_days")
+  defaultElectricRate    Decimal          @default(8)   @map("default_electric_rate")   @db.Decimal(10, 2)
+  defaultWaterRateMin    Decimal          @default(100) @map("default_water_rate_min")  @db.Decimal(10, 2)
+  defaultWaterRateExcess Decimal          @default(20)  @map("default_water_rate_excess") @db.Decimal(10, 2)
+  defaultLateFeeSchedule Json?            @map("default_late_fee_schedule")
+
+  updatedAt DateTime @updatedAt @map("updated_at")
+  updatedBy String?  @map("updated_by")
+
+  @@map("hotel_settings")
+}
+
+// ─── Phase H2: OTA Commission & Reconciliation ──────────────────────────────
+// Tracks commissions owed to OTAs (Agoda, Booking.com, …) and statements
+// uploaded monthly for reconciliation against internal bookings.
+
+model OtaAgent {
+  id                   String   @id @default(uuid())
+  code                 String   @unique                                // e.g. "agoda", "booking"
+  name                 String                                           // display name
+  defaultCommissionPct Decimal  @default(15.00) @db.Decimal(5, 2) @map("default_commission_pct")
+  /// When guest pays via this OTA's ota_collect channel, commission is netted
+  /// on settlement. We track AR for net payable while OTA holds our money.
+  active               Boolean  @default(true)
+  notes                String?
+
+  createdAt  DateTime @default(now()) @map("created_at")
+  statements OtaStatement[]
+
+  @@map("ota_agents")
+}
+
+model OtaStatement {
+  id             String   @id @default(uuid())
+  agentId        String   @map("agent_id")
+  periodStart    DateTime @map("period_start") @db.Date
+  periodEnd      DateTime @map("period_end")   @db.Date
+  /// Gross booking revenue per OTA statement (before commission)
+  totalGross     Decimal  @default(0) @map("total_gross")      @db.Decimal(12, 2)
+  totalCommission Decimal @default(0) @map("total_commission") @db.Decimal(12, 2)
+  /// Net = gross − commission = what OTA will remit to us
+  netPayable     Decimal  @default(0) @map("net_payable")      @db.Decimal(12, 2)
+  /// draft → uploaded (not posted) | reconciled (all lines matched) | posted (ledger booked) | void
+  status         String   @default("draft")
+  uploadedAt     DateTime @default(now()) @map("uploaded_at")
+  uploadedBy     String?  @map("uploaded_by")
+  postedAt       DateTime? @map("posted_at")
+  postedBy       String?   @map("posted_by")
+  notes          String?
+
+  agent OtaAgent            @relation(fields: [agentId], references: [id])
+  lines OtaStatementLine[]
+
+  @@index([agentId, periodStart])
+  @@map("ota_statements")
+}
+
+model OtaStatementLine {
+  id            String   @id @default(uuid())
+  statementId   String   @map("statement_id")
+  /// OTA's booking reference (from CSV)
+  otaBookingRef String   @map("ota_booking_ref")
+  guestName     String   @map("guest_name")
+  checkIn       DateTime @map("check_in")  @db.Date
+  checkOut      DateTime @map("check_out") @db.Date
+  roomNights    Int      @default(0) @map("room_nights")
+  grossAmount   Decimal  @map("gross_amount")      @db.Decimal(12, 2)
+  commissionAmount Decimal @map("commission_amount") @db.Decimal(12, 2)
+  netAmount     Decimal  @map("net_amount")        @db.Decimal(12, 2)
+  /// FK to internal booking once matched (nullable until reconciled)
+  matchedBookingId String? @map("matched_booking_id")
+  /// unmatched | auto_matched | manual_matched | disputed
+  matchStatus   String   @default("unmatched") @map("match_status")
+  notes         String?
+
+  statement OtaStatement @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  booking   Booking?     @relation("OtaStatementBookings", fields: [matchedBookingId], references: [id])
+
+  @@index([statementId])
+  @@index([matchedBookingId])
+  @@index([otaBookingRef])
+  @@map("ota_statement_lines")
+}
+
+// ─── Sprint 3B: Contracts ───────────────────────────────────────────────────
+
+model Contract {
+  id             String @id @default(uuid())
+  contractNumber String @unique @map("contract_number") // "2026/0042"
+  bookingId      String @unique @map("booking_id") // 1:1 with Booking
+  guestId        String @map("guest_id")
+
+  language ContractLanguage @default(th)
+  status   ContractStatus   @default(draft)
+
+  // ── Duration ──────────────────────────────────────────────
+  startDate      DateTime @map("start_date") @db.Date
+  endDate        DateTime @map("end_date") @db.Date
+  durationMonths Int      @map("duration_months")
+
+  // ── Billing cycle ─────────────────────────────────────────
+  billingCycle       BillingCycle @map("billing_cycle")
+  paymentDueDayStart Int          @default(1) @map("payment_due_day_start")
+  paymentDueDayEnd   Int          @default(5) @map("payment_due_day_end")
+  firstPeriodStart   DateTime     @map("first_period_start") @db.Date
+  firstPeriodEnd     DateTime     @map("first_period_end") @db.Date
+
+  // ── Rent ──────────────────────────────────────────────────
+  monthlyRoomRent      Decimal  @map("monthly_room_rent") @db.Decimal(10, 2)
+  monthlyFurnitureRent Decimal  @default(0) @map("monthly_furniture_rent") @db.Decimal(10, 2)
+  electricRate         Decimal  @map("electric_rate") @db.Decimal(10, 2)
+  waterRateMin         Decimal  @default(0) @map("water_rate_min") @db.Decimal(10, 2)
+  waterRateExcess      Decimal  @default(0) @map("water_rate_excess") @db.Decimal(10, 2)
+  phoneRate            Decimal? @map("phone_rate") @db.Decimal(10, 2)
+
+  // ── Deposits ──────────────────────────────────────────────
+  securityDeposit   Decimal @map("security_deposit") @db.Decimal(12, 2)
+  keyFrontDeposit   Decimal @default(0) @map("key_front_deposit") @db.Decimal(10, 2)
+  keyLockDeposit    Decimal @default(0) @map("key_lock_deposit") @db.Decimal(10, 2)
+  keycardDeposit    Decimal @default(0) @map("keycard_deposit") @db.Decimal(10, 2)
+  keycardServiceFee Decimal @default(0) @map("keycard_service_fee") @db.Decimal(10, 2)
+
+  // ── Parking (optional add-on) ─────────────────────────────
+  parkingStickerFee Decimal? @map("parking_sticker_fee") @db.Decimal(10, 2)
+  parkingMonthly    Decimal? @map("parking_monthly") @db.Decimal(10, 2)
+
+  // ── Lock-in & penalties ──────────────────────────────────
+  lockInMonths            Int             @default(0) @map("lock_in_months")
+  noticePeriodDays        Int             @default(30) @map("notice_period_days")
+  earlyTerminationRule    TerminationRule @default(forfeit_full) @map("early_termination_rule")
+  earlyTerminationPercent Int?            @map("early_termination_percent")
+
+  // ── Late fees ─────────────────────────────────────────────
+  /// JSON: [{ afterDay: 5, amountPerDay: 100 }, { afterDay: 10, amountPerDay: 300 }]
+  lateFeeSchedule Json @map("late_fee_schedule")
+
+  // ── Checkout cleaning ─────────────────────────────────────
+  checkoutCleaningFee Decimal @default(0) @map("checkout_cleaning_fee") @db.Decimal(10, 2)
+
+  // ── Signing & lifecycle ──────────────────────────────────
+  signedAt          DateTime? @map("signed_at")
+  signedByGuest     Boolean   @default(false) @map("signed_by_guest")
+  signedByLessor    Boolean   @default(false) @map("signed_by_lessor")
+  terminatedAt      DateTime? @map("terminated_at")
+  terminationReason String?   @map("termination_reason")
+  terminatedBy      String?   @map("terminated_by")
+
+  // ── Rendered snapshot ────────────────────────────────────
+  /// Full HTML of contract body at signing time — IMMUTABLE once signed
+  renderedHtml      String? @map("rendered_html") @db.Text
+  /// Snapshot of all variable values at signing (for audit)
+  renderedVariables Json?   @map("rendered_variables")
+
+  // ── Audit ────────────────────────────────────────────────
+  createdBy String   @map("created_by")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+  version   Int      @default(1)
+
+  booking    Booking             @relation(fields: [bookingId], references: [id])
+  guest      Guest               @relation(fields: [guestId], references: [id])
+  amendments ContractAmendment[]
+  deposits   SecurityDeposit[]
+
+  @@index([status])
+  @@index([endDate])
+  @@map("contracts")
+}
+
+model ContractAmendment {
+  id              String    @id @default(uuid())
+  contractId      String    @map("contract_id")
+  amendmentNumber Int       @map("amendment_number") // 1, 2, 3…
+  effectiveDate   DateTime  @map("effective_date") @db.Date
+  changes         Json // { "monthlyRoomRent": { from: 5200, to: 5500 } }
+  reason          String
+  signedAt        DateTime? @map("signed_at")
+  createdBy       String    @map("created_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  contract Contract @relation(fields: [contractId], references: [id])
+
+  @@unique([contractId, amendmentNumber])
+  @@map("contract_amendments")
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Sprint 5: Payment & Finance v2
+// ─────────────────────────────────────────────────────────────────────
+
+// EDC terminal registry (BBL / KBank / ...)
+model EdcTerminal {
+  id                String           @id @default(uuid())
+  code              String           @unique // "BBL-01", "KBANK-01"
+  name              String
+  acquirerBank      String           @map("acquirer_bank") // "BBL" | "KBANK"
+  clearingAccountId String           @map("clearing_account_id")
+  clearingAccount   FinancialAccount @relation("TerminalClearingAccount", fields: [clearingAccountId], references: [id])
+  allowedBrands     CardBrand[]      @map("allowed_brands") // [] = all brands accepted
+  merchantId        String?          @map("merchant_id")
+  isActive          Boolean          @default(true) @map("is_active")
+  note              String?
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  payments     Payment[]
+  batchReports CardBatchReport[]
+  feeRates     CardFeeRate[]
+
+  @@index([isActive])
+  @@map("edc_terminals")
+}
+
+// Merchant Discount Rate (MDR) — per terminal × brand × cardType with time window
+model CardFeeRate {
+  id            String       @id @default(uuid())
+  terminalId    String?      @map("terminal_id") // null = global default
+  terminal      EdcTerminal? @relation(fields: [terminalId], references: [id])
+  brand         CardBrand
+  cardType      CardType?    @map("card_type") // null = any
+  ratePercent   Decimal      @db.Decimal(6, 4) @map("rate_percent")
+  effectiveFrom DateTime     @default(now()) @map("effective_from")
+  effectiveTo   DateTime?    @map("effective_to")
+  note          String?
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  @@index([terminalId, brand, cardType, effectiveFrom])
+  @@map("card_fee_rates")
+}
+
+// EDC daily batch settlement ("ส่งยอด") — one row per (terminal, batchNo)
+model CardBatchReport {
+  id             String      @id @default(uuid())
+  terminalId     String      @map("terminal_id")
+  terminal       EdcTerminal @relation(fields: [terminalId], references: [id])
+  batchNo        String      @map("batch_no")
+  closeDate      DateTime    @map("close_date")
+  totalAmount    Decimal     @db.Decimal(14, 2) @map("total_amount")
+  txCount        Int         @map("tx_count")
+  closedByUserId String      @map("closed_by_user_id")
+  closedAt       DateTime    @default(now()) @map("closed_at")
+  note           String?
+  varianceAmount Decimal     @default(0) @db.Decimal(14, 2) @map("variance_amount")
+
+  @@unique([terminalId, batchNo])
+  @@index([closeDate])
+  @@map("card_batch_reports")
+}
+
+// Atomic running-number allocator (Revenue-compliant gapless sequences)
+model NumberSequence {
+  id          String      @id @default(uuid())
+  kind        String      @unique // "TAX_INVOICE" | "RECEIPT"
+  prefix      String
+  nextSeq     Int         @default(1) @map("next_seq")
+  resetEvery  ResetPeriod @default(NEVER) @map("reset_every")
+  lastResetAt DateTime?   @map("last_reset_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@map("number_sequences")
+}
+
+// Tax invoice (ใบกำกับภาษี) — separate from Receipt per D5
+model TaxInvoice {
+  id        String   @id @default(uuid())
+  number    String   @unique // "TI-202604-00001"
+  issueDate DateTime @default(now()) @map("issue_date")
+
+  // Customer snapshot (frozen at issue)
+  customerName    String  @map("customer_name")
+  customerTaxId   String? @map("customer_tax_id")
+  customerBranch  String? @map("customer_branch") // "สำนักงานใหญ่" / "สาขา 00001"
+  customerAddress String? @map("customer_address")
+
+  // Amounts (frozen)
+  subtotal   Decimal @db.Decimal(14, 2)
+  vatAmount  Decimal @db.Decimal(14, 2) @map("vat_amount")
+  grandTotal Decimal @db.Decimal(14, 2) @map("grand_total")
+
+  // Source links (array of IDs — invoices/payments may span billing cycles)
+  coveredInvoiceIds String[] @map("covered_invoice_ids")
+  coveredPaymentIds String[] @map("covered_payment_ids")
+
+  status         TaxInvoiceStatus @default(ISSUED)
+  voidReason     String?          @map("void_reason")
+  voidedAt       DateTime?        @map("voided_at")
+  voidedBy       String?          @map("voided_by")
+  issuedByUserId String           @map("issued_by_user_id")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  @@index([issueDate])
+  @@index([customerTaxId])
+  @@map("tax_invoices")
 }

@@ -49,8 +49,7 @@ ALTER TABLE "invoices" ADD COLUMN "folio_id" TEXT;
 -- Add folio_line_item_id to invoice_items (UNIQUE for anti-double-billing)
 ALTER TABLE "invoice_items" ADD COLUMN "folio_line_item_id" TEXT;
 
--- Add folio_id to payments
-ALTER TABLE "payments" ADD COLUMN "folio_id" TEXT;
+-- NOTE: payments.folio_id skipped — payments table created outside migration history
 
 -- CreateIndex: folios
 CREATE UNIQUE INDEX "folios_folio_number_key" ON "folios"("folio_number");
@@ -67,20 +66,14 @@ CREATE UNIQUE INDEX "invoice_items_folio_line_item_id_key" ON "invoice_items"("f
 -- CreateIndex: invoices.folio_id
 CREATE INDEX "invoices_folio_id_idx" ON "invoices"("folio_id");
 
--- CreateIndex: payments.folio_id
-CREATE INDEX "payments_folio_id_idx" ON "payments"("folio_id");
-
--- AddForeignKey: folios → bookings
+-- AddForeignKey: folios -> bookings
 ALTER TABLE "folios" ADD CONSTRAINT "folios_booking_id_fkey" FOREIGN KEY ("booking_id") REFERENCES "bookings"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
--- AddForeignKey: folio_line_items → folios
+-- AddForeignKey: folio_line_items -> folios
 ALTER TABLE "folio_line_items" ADD CONSTRAINT "folio_line_items_folio_id_fkey" FOREIGN KEY ("folio_id") REFERENCES "folios"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
--- AddForeignKey: invoices → folios
+-- AddForeignKey: invoices -> folios
 ALTER TABLE "invoices" ADD CONSTRAINT "invoices_folio_id_fkey" FOREIGN KEY ("folio_id") REFERENCES "folios"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
--- AddForeignKey: invoice_items → folio_line_items
+-- AddForeignKey: invoice_items -> folio_line_items
 ALTER TABLE "invoice_items" ADD CONSTRAINT "invoice_items_folio_line_item_id_fkey" FOREIGN KEY ("folio_line_item_id") REFERENCES "folio_line_items"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
--- AddForeignKey: payments → folios
-ALTER TABLE "payments" ADD CONSTRAINT "payments_folio_id_fkey" FOREIGN KEY ("folio_id") REFERENCES "folios"("id") ON DELETE SET NULL ON UPDATE CASCADE;

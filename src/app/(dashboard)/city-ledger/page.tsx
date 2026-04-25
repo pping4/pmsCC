@@ -7,8 +7,10 @@
  * Color-coded by status: green=active, yellow=near limit, red=suspended.
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import { fmtBaht, fmtDate } from '@/lib/date-format';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { fmtBaht } from '@/lib/date-format';
+import { useToast } from '@/components/ui';
+import { DataTable, type ColDef } from '@/components/data-table';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -94,6 +96,7 @@ function usagePct(account: CLAccount): number {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function CityLedgerPage() {
+  const toast = useToast();
   const [summary,   setSummary]  = useState<CLSummary | null>(null);
   const [accounts,  setAccounts] = useState<CLAccount[]>([]);
   const [loading,   setLoading]  = useState(true);
@@ -111,13 +114,16 @@ export default function CityLedgerPage() {
         fetch('/api/city-ledger/summary'),
         fetch(`/api/city-ledger${filter !== 'all' ? `?status=${filter}` : ''}`),
       ]);
+      if (!sumRes.ok || !accRes.ok) throw new Error(`HTTP ${sumRes.status}/${accRes.status}`);
       const [sumJson, accJson] = await Promise.all([sumRes.json(), accRes.json()]);
       setSummary(sumJson);
       setAccounts(accJson.accounts ?? []);
+    } catch (e) {
+      toast.error('โหลดข้อมูล City Ledger ไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     } finally {
       setLoading(false);
     }
-  }, [filter]);
+  }, [filter, toast]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -127,7 +133,101 @@ export default function CityLedgerPage() {
     a.accountCode.toLowerCase().includes(search.toLowerCase())
   );
 
+  // ── DataTable columns ─────────────────────────────────────────────────────
+  type CLColKey = 'code' | 'company' | 'balance' | 'limit' | 'usage' | 'terms' | 'status' | 'actions';
+  const clColumns: ColDef<CLAccount, CLColKey>[] = useMemo(() => [
+    {
+      key: 'code', label: 'รหัส', minW: 110,
+      getValue: a => a.accountCode,
+      render:  a => <span style={{ fontWeight: 600, color: '#1e40af' }}>{a.accountCode}</span>,
+    },
+    {
+      key: 'company', label: 'บริษัท', minW: 200,
+      getValue: a => a.companyName,
+      render:  a => (
+        <div>
+          <div style={{ fontWeight: 600 }}>{a.companyName}</div>
+          {a.contactName && <div style={{ fontSize: 12, color: '#6b7280' }}>{a.contactName}</div>}
+        </div>
+      ),
+    },
+    {
+      key: 'balance', label: 'ยอดคงค้าง', align: 'right', minW: 130,
+      getValue: a => String(Math.round(Number(a.currentBalance) * 100)).padStart(14, '0'),
+      getLabel: a => `฿${fmtBaht(Number(a.currentBalance))}`,
+      aggregate: 'sum',
+      aggValue:  a => Number(a.currentBalance),
+      render:    a => (
+        <span style={{ fontWeight: 700, fontFamily: 'monospace', color: Number(a.currentBalance) > 0 ? '#dc2626' : '#16a34a' }}>
+          ฿{fmtBaht(Number(a.currentBalance))}
+        </span>
+      ),
+    },
+    {
+      key: 'limit', label: 'วงเงิน', align: 'right', minW: 120,
+      getValue: a => String(Math.round(Number(a.creditLimit) * 100)).padStart(14, '0'),
+      getLabel: a => Number(a.creditLimit) > 0 ? `฿${fmtBaht(Number(a.creditLimit))}` : '—',
+      aggregate: 'sum',
+      aggValue:  a => Number(a.creditLimit),
+      render:    a => Number(a.creditLimit) > 0
+        ? <span style={{ fontFamily: 'monospace' }}>฿{fmtBaht(Number(a.creditLimit))}</span>
+        : <span style={{ color: '#9ca3af' }}>—</span>,
+    },
+    {
+      key: 'usage', label: 'การใช้งาน', minW: 120, noFilter: true,
+      getValue: a => String(usagePct(a)).padStart(3, '0'),
+      render:   a => {
+        const pct = usagePct(a);
+        if (Number(a.creditLimit) <= 0) return <span style={{ color: '#9ca3af' }}>ไม่จำกัด</span>;
+        return (
+          <div>
+            <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 3 }}>{pct}%</div>
+            <div style={{ height: 6, background: '#e5e7eb', borderRadius: 3 }}>
+              <div style={{
+                height: 6, borderRadius: 3, width: `${pct}%`,
+                background: pct >= 90 ? '#dc2626' : pct >= 70 ? '#d97706' : '#16a34a',
+              }} />
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      key: 'terms', label: 'Credit Terms', align: 'right', minW: 110,
+      getValue: a => String(a.creditTermsDays).padStart(4, '0'),
+      getLabel: a => `${a.creditTermsDays} วัน`,
+      render:   a => <span style={{ color: '#6b7280' }}>{a.creditTermsDays} วัน</span>,
+    },
+    {
+      key: 'status', label: 'สถานะ', minW: 140,
+      getValue: a => getStatusLabel(a),
+      render:   a => (
+        <span style={{ fontSize: 12, fontWeight: 600, color: getStatusColor(a) }}>
+          {getStatusLabel(a)}
+        </span>
+      ),
+    },
+    {
+      key: 'actions', label: '', minW: 110, noFilter: true,
+      getValue: () => '',
+      render:   a => (
+        <a
+          href={`/city-ledger/${a.id}`}
+          onClick={e => e.stopPropagation()}
+          style={{ color: '#2563eb', textDecoration: 'none', fontSize: 13, fontWeight: 600 }}
+        >
+          ดูรายละเอียด →
+        </a>
+      ),
+    },
+  ], []);
+
   async function handleSave() {
+    if (saving) return;
+    if (!form.companyName.trim()) {
+      toast.warning('กรุณาระบุชื่อบริษัท');
+      return;
+    }
     setError('');
     setSaving(true);
     try {
@@ -140,11 +240,16 @@ export default function CityLedgerPage() {
           creditTermsDays: parseInt(form.creditTermsDays)   || 30,
         }),
       });
-      const json = await res.json();
-      if (!res.ok) { setError(json.error ?? 'เกิดข้อผิดพลาด'); return; }
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
       setShowModal(false);
       setForm(EMPTY_FORM);
       fetchAll();
+      toast.success('สร้างบัญชี City Ledger สำเร็จ');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'เกิดข้อผิดพลาด';
+      setError(msg);
+      toast.error('สร้างบัญชีไม่สำเร็จ', msg);
     } finally {
       setSaving(false);
     }
@@ -209,66 +314,28 @@ export default function CityLedgerPage() {
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>กำลังโหลด...</div>
       ) : (
-        <div style={{ overflowX: 'auto', border: '1px solid #e5e7eb', borderRadius: 10, background: '#fff' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-            <thead>
-              <tr style={{ background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}>
-                {['รหัส', 'บริษัท', 'ยอดคงค้าง', 'วงเงิน', 'การใช้งาน', 'Credit Terms', 'สถานะ', ''].map(h => (
-                  <th key={h} style={{ padding: '10px 14px', textAlign: 'left', fontWeight: 600, color: '#374151', whiteSpace: 'nowrap' }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length === 0 ? (
-                <tr><td colSpan={8} style={{ padding: 32, textAlign: 'center', color: '#9ca3af' }}>ไม่พบข้อมูล</td></tr>
-              ) : filtered.map(acc => {
-                const pct = usagePct(acc);
-                return (
-                  <tr key={acc.id} style={{ borderBottom: '1px solid #f3f4f6', background: getStatusBg(acc) }}>
-                    <td style={{ padding: '10px 14px', fontWeight: 600, color: '#1e40af' }}>{acc.accountCode}</td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <div style={{ fontWeight: 600 }}>{acc.companyName}</div>
-                      {acc.contactName && <div style={{ fontSize: 12, color: '#6b7280' }}>{acc.contactName}</div>}
-                    </td>
-                    <td style={{ padding: '10px 14px', fontWeight: 700, color: Number(acc.currentBalance) > 0 ? '#dc2626' : '#16a34a' }}>
-                      ฿{fmtBaht(Number(acc.currentBalance))}
-                    </td>
-                    <td style={{ padding: '10px 14px', color: '#374151' }}>
-                      {Number(acc.creditLimit) > 0 ? `฿${fmtBaht(Number(acc.creditLimit))}` : '—'}
-                    </td>
-                    <td style={{ padding: '10px 14px', minWidth: 100 }}>
-                      {Number(acc.creditLimit) > 0 ? (
-                        <div>
-                          <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 3 }}>{pct}%</div>
-                          <div style={{ height: 6, background: '#e5e7eb', borderRadius: 3 }}>
-                            <div style={{
-                              height: 6, borderRadius: 3,
-                              width: `${pct}%`,
-                              background: pct >= 90 ? '#dc2626' : pct >= 70 ? '#d97706' : '#16a34a',
-                            }} />
-                          </div>
-                        </div>
-                      ) : <span style={{ color: '#9ca3af' }}>ไม่จำกัด</span>}
-                    </td>
-                    <td style={{ padding: '10px 14px', color: '#6b7280' }}>{acc.creditTermsDays} วัน</td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <span style={{ fontSize: 12, fontWeight: 600, color: getStatusColor(acc) }}>
-                        {getStatusLabel(acc)}
-                      </span>
-                    </td>
-                    <td style={{ padding: '10px 14px' }}>
-                      <a
-                        href={`/city-ledger/${acc.id}`}
-                        style={{ color: '#2563eb', textDecoration: 'none', fontSize: 13, fontWeight: 600 }}
-                      >
-                        ดูรายละเอียด →
-                      </a>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div style={{ border: '1px solid #e5e7eb', borderRadius: 10, background: '#fff', overflow: 'hidden' }}>
+          <DataTable<CLAccount, CLColKey>
+            tableKey={`city-ledger.list.${filter}`}
+            syncUrl
+            exportFilename={`pms_city_ledger_${filter}`}
+            exportSheetName="บัญชี City Ledger"
+            rows={filtered}
+            columns={clColumns}
+            rowKey={a => a.id}
+            defaultSort={{ col: 'balance', dir: 'desc' }}
+            groupByCols={['status', 'terms']}
+            // Only highlight problem rows (suspended/over-limit); normal rows keep default bg
+            rowHighlight={a => {
+              const bal   = Number(a.currentBalance);
+              const limit = Number(a.creditLimit);
+              if (a.status === 'suspended')                 return '#fef2f2';
+              if (limit > 0 && bal >= limit * 0.9)          return '#fffbeb';
+              return undefined;
+            }}
+            emptyText="ไม่พบข้อมูล"
+            summaryLabel={(f, total) => <>🏢 {f}{f !== total ? `/${total}` : ''} บัญชี</>}
+          />
         </div>
       )}
 
