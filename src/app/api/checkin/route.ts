@@ -23,7 +23,7 @@ import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { createSecurityDeposit } from '@/services/securityDeposit.service';
 import { z } from 'zod';
-import { getFolioByBookingId, addCharge, createInvoiceFromFolio, markLineItemsPaid } from '@/services/folio.service';
+import { getFolioByBookingId, addCharge, addNightlyRoomCharges, createInvoiceFromFolio, markLineItemsPaid } from '@/services/folio.service';
 import { createPayment } from '@/services/payment.service';
 import { logActivity } from '@/services/activityLog.service';
 import { transitionRoom } from '@/services/roomStatus.service';
@@ -253,22 +253,36 @@ export async function POST(request: Request) {
       });
 
       if (!existingRoomCharge) {
-        const chargeDesc = isMonthly
-          ? `ค่าห้องพักเดือนแรก${
-              booking.bookingType === 'monthly_short' ? ' (รายเดือนระยะสั้น)' : ' (รายเดือนระยะยาว)'
-            } — ห้อง ${booking.room.number}`
-          : `ค่าห้องพัก ${nights ?? 1} คืน — ห้อง ${booking.room.number}`;
-
-        await addCharge(tx, {
-          folioId:     folio.folioId,
-          chargeType:  'ROOM',
-          description: chargeDesc,
-          amount:      stayAmount,
-          quantity:    nights ?? 1,
-          unitPrice:   Number(booking.rate),
-          serviceDate: new Date(booking.checkIn),   // period start = check-in
-          createdBy:   userId,
-        });
+        // Receipt-Standardization: daily → 1 row per night; monthly → single row.
+        if (!isMonthly && nights && nights > 0) {
+          await addNightlyRoomCharges(tx, {
+            folioId:      folio.folioId,
+            roomNumber:   booking.room.number,
+            startDate:    new Date(booking.checkIn),
+            nights,
+            ratePerNight: Number(booking.rate),
+            taxType:      'no_tax',
+            referenceType: 'booking',
+            referenceId:   booking.id,
+            notes:         'เช็คอิน',
+            createdBy:    userId,
+          });
+        } else {
+          const monthlyLabel = booking.bookingType === 'monthly_short'
+            ? ' (รายเดือนระยะสั้น)'
+            : ' (รายเดือนระยะยาว)';
+          await addCharge(tx, {
+            folioId:     folio.folioId,
+            chargeType:  'ROOM',
+            description: `ค่าห้องพักเดือนแรก${monthlyLabel} — ห้อง ${booking.room.number}`,
+            amount:      stayAmount,
+            quantity:    1,
+            unitPrice:   stayAmount,
+            serviceDate: new Date(booking.checkIn),
+            periodEnd:   new Date(booking.checkOut),
+            createdBy:   userId,
+          });
+        }
 
         // Credit back any DEPOSIT_BOOKING already paid at booking confirmation.
         // Prevents: INV-BK (deposit paid) + full room charge = overcharge.

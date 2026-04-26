@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { recalculateRate, RateCalculationContext } from '@/services/bookingRate.service';
 import { logActivity } from '@/services/activityLog.service';
-import { addCharge, createInvoiceFromFolio, getFolioByBookingId } from '@/services/folio.service';
+import { addCharge, addNightlyRoomCharges, createInvoiceFromFolio, getFolioByBookingId } from '@/services/folio.service';
 import { createPendingRefund } from '@/services/refund.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 import { z } from 'zod';
@@ -757,21 +757,46 @@ export async function PATCH(request: NextRequest) {
 
         const changedBy = session.user?.id || session.user?.email || 'system';
         const nightsAdded = newNights - originalNights;
+        const ratePerNight = Number(rateResult.additionalCharge) / nightsAdded;
 
-        await addCharge(tx, {
-          folioId: folio.folioId,
-          chargeType: 'ROOM',
-          description: `Extended stay — ${nightsAdded} คืน`,
-          amount: Number(rateResult.additionalCharge),
-          quantity: nightsAdded,
-          unitPrice: Number(rateResult.additionalCharge) / nightsAdded,
-          taxType: 'no_tax',
-          serviceDate: new Date(),
-          referenceType: 'Booking',
-          referenceId: bookingId,
-          notes: 'Drag-resize extension',
-          createdBy: changedBy,
-        });
+        // Receipt-Standardization: drag-resize on a daily booking → 1 row per
+        // added night. The first added night starts at the OLD checkOut.
+        if (booking.bookingType === 'daily') {
+          // Need the room number — fetch since `booking` here doesn't include it
+          const r = await tx.room.findUnique({
+            where:  { id: booking.roomId },
+            select: { number: true },
+          });
+          await addNightlyRoomCharges(tx, {
+            folioId:      folio.folioId,
+            roomNumber:   r?.number ?? '?',
+            startDate:    new Date(booking.checkOut),
+            nights:       nightsAdded,
+            ratePerNight,
+            taxType:      'no_tax',
+            referenceType: 'Booking',
+            referenceId:   bookingId,
+            notes:         'Drag-resize extension',
+            createdBy:    changedBy,
+          });
+        } else {
+          // Monthly drag-resize keeps a single charge spanning the extension
+          await addCharge(tx, {
+            folioId: folio.folioId,
+            chargeType: 'ROOM',
+            description: `ค่าเช่าเพิ่มเติม (ขยายระยะเวลา)`,
+            amount: Number(rateResult.additionalCharge),
+            quantity: 1,
+            unitPrice: Number(rateResult.additionalCharge),
+            taxType: 'no_tax',
+            serviceDate: new Date(booking.checkOut),
+            periodEnd:   newCheckOut,
+            referenceType: 'Booking',
+            referenceId: bookingId,
+            notes: 'Drag-resize extension',
+            createdBy: changedBy,
+          });
+        }
 
         await createInvoiceFromFolio(tx, {
           folioId: folio.folioId,

@@ -1476,6 +1476,11 @@ model FolioLineItem {
 
   // Optional references for traceability
   serviceDate   DateTime? @map("service_date") @db.Date
+  /// Receipt-Standardization: end of the service period (exclusive).
+  /// For nightly ROOM charges: serviceDate + 1 (each row covers exactly 1 night).
+  /// For monthly rent / utilities: end of billing period.
+  /// NULL for non-period items (extras, food, penalties, etc.)
+  periodEnd     DateTime? @map("period_end") @db.Date
   productId     String?   @map("product_id")
   referenceType String?   @map("reference_type") // 'utility_reading' | 'product' | 'manual'
   referenceId   String?   @map("reference_id")

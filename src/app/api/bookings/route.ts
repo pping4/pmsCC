@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { logActivity } from '@/services/activityLog.service';
-import { createFolio, addCharge, createInvoiceFromFolio } from '@/services/folio.service';
+import { createFolio, addCharge, addNightlyRoomCharges, createInvoiceFromFolio } from '@/services/folio.service';
 import { generateBookingNumber } from '@/services/invoice-number.service';
 import { createPayment } from '@/services/payment.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
@@ -270,21 +270,39 @@ export async function POST(request: NextRequest) {
       // ★ Create invoice if payment is provided at booking time ★
       if (paymentMethod) {
         if (paymentType === 'full') {
-          // Full payment — add charge to folio, then create invoice
+          // Full payment — add charge(s) to folio, then create invoice.
+          // Receipt-Standardization: for daily, persist 1 row per night so every
+          // downstream receipt/invoice renders the same per-night breakdown.
           const nights = data.bookingType === 'daily'
             ? Math.max(1, Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24)))
             : null;
-          const desc = data.bookingType === 'daily'
-            ? `ค่าห้องพัก ${nights} คืน — ห้อง ${data.roomNumber} (ชำระล่วงหน้าตอนจอง)`
-            : `ค่าห้องพัก — ห้อง ${data.roomNumber} (ชำระล่วงหน้าตอนจอง)`;
 
-          await addCharge(tx, {
-            folioId,
-            chargeType: 'ROOM',
-            description: desc,
-            amount: expectedStayAmount,
-            createdBy: userId,
-          });
+          if (data.bookingType === 'daily' && nights) {
+            await addNightlyRoomCharges(tx, {
+              folioId,
+              roomNumber:   data.roomNumber,
+              startDate:    checkInDate,
+              nights,
+              ratePerNight: Number(data.rate),
+              taxType:      'no_tax',
+              referenceType: 'booking',
+              referenceId:   created.id,
+              notes:         'ชำระล่วงหน้าตอนจอง',
+              createdBy:    userId,
+            });
+          } else {
+            // Monthly: keep a single row, period spans full booking window
+            await addCharge(tx, {
+              folioId,
+              chargeType:  'ROOM',
+              description: `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
+              amount:      expectedStayAmount,
+              serviceDate: checkInDate,
+              periodEnd:   checkOutDate,
+              notes:       'ชำระล่วงหน้าตอนจอง',
+              createdBy:   userId,
+            });
+          }
 
           const invResult = await createInvoiceFromFolio(tx, {
             folioId,
@@ -340,6 +358,33 @@ export async function POST(request: NextRequest) {
             });
 
             // ── Build receipt data ────────────────────────────────────────
+            // Receipt-Standardization: for daily bookings, render one item per
+            // night with periodStart/periodEnd. Monthly: single row spanning
+            // the booking window. The receipt component handles both shapes.
+            const receiptItems: ReceiptData['items'] =
+              data.bookingType === 'daily' && nights
+                ? Array.from({ length: nights }, (_, i) => {
+                    const nightStart = new Date(checkInDate);
+                    nightStart.setUTCHours(0, 0, 0, 0);
+                    nightStart.setUTCDate(nightStart.getUTCDate() + i);
+                    const nightEnd = new Date(nightStart);
+                    nightEnd.setUTCDate(nightEnd.getUTCDate() + 1);
+                    return {
+                      description: `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
+                      quantity:    1,
+                      unitPrice:   Number(data.rate),
+                      amount:      Number(data.rate),
+                      periodStart: fmtDate(nightStart),
+                      periodEnd:   fmtDate(nightEnd),
+                    };
+                  })
+                : [{
+                    description: `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
+                    amount:      invResult.grandTotal,
+                    periodStart: fmtDate(checkInDate),
+                    periodEnd:   fmtDate(checkOutDate),
+                  }];
+
             bookingReceipt = {
               receiptType:   'booking_full',
               receiptNumber: rcpNum,
@@ -351,14 +396,7 @@ export async function POST(request: NextRequest) {
               bookingType:   data.bookingType,
               checkIn:       fmtDate(checkInDate),
               checkOut:      fmtDate(checkOutDate),
-              items: [{
-                description: nights
-                  ? `ค่าห้องพัก ${nights} คืน — ห้อง ${data.roomNumber}`
-                  : `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
-                quantity:  nights ?? undefined,
-                unitPrice: Number(data.rate),
-                amount:    invResult.grandTotal,
-              }],
+              items:         receiptItems,
               subtotal:      invResult.grandTotal,
               vatAmount:     0,
               grandTotal:    invResult.grandTotal,

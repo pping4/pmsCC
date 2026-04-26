@@ -45,9 +45,35 @@ export interface AddChargeInput {
   unitPrice?: number;
   taxType?: TaxType;
   serviceDate?: Date;
+  /**
+   * Receipt-Standardization: end of service period (exclusive).
+   * - For monthly rent / utilities: end of billing period
+   * - For nightly ROOM via addNightlyRoomCharges: serviceDate + 1
+   * - Leave undefined for non-period charges (extras, food, penalties)
+   */
+  periodEnd?: Date;
   productId?: string;
   referenceType?: string;
   referenceId?: string;
+  notes?: string;
+  createdBy: string;
+}
+
+export interface AddNightlyRoomChargesInput {
+  folioId: string;
+  /** Room number e.g. "203" — embedded in each row's description */
+  roomNumber: string;
+  /** First night start date (inclusive). Time component ignored. */
+  startDate: Date;
+  /** Number of nights — must be ≥ 1 */
+  nights: number;
+  /** Price per night */
+  ratePerNight: number;
+  taxType?: TaxType;
+  /** Optional reference for traceability — copied to every row */
+  referenceType?: string;
+  referenceId?: string;
+  /** Optional notes — copied to every row */
   notes?: string;
   createdBy: string;
 }
@@ -123,6 +149,7 @@ export async function addCharge(
       taxType: (input.taxType ?? 'no_tax') as never,
       billingStatus: 'UNBILLED' as never,
       serviceDate: input.serviceDate ?? null,
+      periodEnd:   input.periodEnd   ?? null,
       productId: input.productId ?? null,
       referenceType: input.referenceType ?? null,
       referenceId: input.referenceId ?? null,
@@ -149,6 +176,84 @@ export async function addCharges(
     const result = await addCharge(tx, charge);
     ids.push(result.lineItemId);
   }
+  return { lineItemIds: ids };
+}
+
+/**
+ * Receipt-Standardization helper: create EXACTLY `nights` FolioLineItem rows for
+ * a daily-booking room charge — one row per night, each with quantity=1.
+ *
+ * Rationale: every PMS receipt (booking pre-pay, check-in, check-out, extend)
+ * must render the same way: "ค่าห้องพัก — ห้อง 203 / 2026-04-26 — 2026-04-27".
+ * Persisting per-night rows at creation time (rather than expanding at render
+ * time as we used to in checkout) means every flow gets the breakdown for free,
+ * and accountants can credit/void individual nights without splitting a row.
+ *
+ * NOT used for monthly_short / monthly_long bookings — those keep a single
+ * monthly charge row. Only call this when bookingType === 'daily'.
+ *
+ * Each row:
+ *   - description: `ค่าห้องพัก — ห้อง ${roomNumber}`  (no "X คืน" suffix)
+ *   - quantity: 1, unitPrice: ratePerNight, amount: ratePerNight
+ *   - serviceDate: startDate + i  (inclusive)
+ *   - periodEnd:   startDate + i + 1  (exclusive)
+ *   - chargeType: 'ROOM', billingStatus: 'UNBILLED'
+ *
+ * Returns the IDs of all created line items in chronological order.
+ */
+export async function addNightlyRoomCharges(
+  tx: TxClient,
+  input: AddNightlyRoomChargesInput,
+): Promise<{ lineItemIds: string[] }> {
+  if (!Number.isInteger(input.nights) || input.nights < 1) {
+    throw new Error('addNightlyRoomCharges: nights must be an integer >= 1');
+  }
+  if (input.ratePerNight < 0) {
+    throw new Error('addNightlyRoomCharges: ratePerNight must be >= 0');
+  }
+
+  // Normalize startDate to UTC midnight so date arithmetic is unambiguous
+  // (the @db.Date column stores date-only; PG truncates anyway, but we want
+  // the in-memory Date math to be predictable across DST/timezones).
+  const start = new Date(input.startDate);
+  start.setUTCHours(0, 0, 0, 0);
+
+  const description = `ค่าห้องพัก — ห้อง ${input.roomNumber}`;
+  const ratePerNight = new Prisma.Decimal(input.ratePerNight);
+  const taxType = (input.taxType ?? 'no_tax') as never;
+
+  const ids: string[] = [];
+  for (let i = 0; i < input.nights; i++) {
+    const nightStart = new Date(start);
+    nightStart.setUTCDate(nightStart.getUTCDate() + i);
+    const nightEnd = new Date(start);
+    nightEnd.setUTCDate(nightEnd.getUTCDate() + i + 1);
+
+    const row = await tx.folioLineItem.create({
+      data: {
+        folioId:       input.folioId,
+        chargeType:    'ROOM' as never,
+        description,
+        amount:        ratePerNight,
+        quantity:      1,
+        unitPrice:     ratePerNight,
+        taxType,
+        billingStatus: 'UNBILLED' as never,
+        serviceDate:   nightStart,
+        periodEnd:     nightEnd,
+        referenceType: input.referenceType ?? null,
+        referenceId:   input.referenceId ?? null,
+        notes:         input.notes ?? null,
+        createdBy:     input.createdBy,
+      },
+      select: { id: true },
+    });
+    ids.push(row.id);
+  }
+
+  // Recalculate folio totals once after the batch (cheaper than once per row)
+  await recalculateFolioBalance(tx, input.folioId);
+
   return { lineItemIds: ids };
 }
 

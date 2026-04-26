@@ -36,6 +36,7 @@ import { z }                         from 'zod';
 import {
   createFolio,
   addCharge,
+  addNightlyRoomCharges,
   createInvoiceFromFolio,
   getFolioByBookingId,
 } from '@/services/folio.service';
@@ -201,22 +202,39 @@ export async function POST(
     });
 
     if (!existingRoomCharge) {
-      const chargeDesc =
-        booking.bookingType === 'daily'
-          ? `ค่าห้องพัก ${nights ?? 1} คืน — ห้อง ${booking.room.number}`
-          : booking.bookingType === 'monthly_short'
-            ? `ค่าห้องพักเดือนแรก (รายเดือนระยะสั้น) — ห้อง ${booking.room.number}`
-            : `ค่าห้องพักเดือนแรก (รายเดือนระยะยาว) — ห้อง ${booking.room.number}`;
-
-      await addCharge(tx, {
-        folioId:     folio.folioId,
-        chargeType:  'ROOM',
-        description: chargeDesc,
-        amount:      stayTotal,
-        quantity:    nights ?? 1,
-        unitPrice:   Number(booking.rate),
-        createdBy:   userId,
-      });
+      // Receipt-Standardization: daily → 1 row per night; monthly → single row
+      // covering the whole booking window. Same standard everywhere.
+      if (booking.bookingType === 'daily' && nights && nights > 0) {
+        await addNightlyRoomCharges(tx, {
+          folioId:      folio.folioId,
+          roomNumber:   booking.room.number,
+          startDate:    new Date(booking.checkIn),
+          nights,
+          ratePerNight: Number(booking.rate),
+          taxType:      'no_tax',
+          referenceType: 'booking',
+          referenceId:   bookingId,
+          notes:         'รับชำระเงิน',
+          createdBy:    userId,
+        });
+      } else {
+        const monthlyLabel = booking.bookingType === 'monthly_short'
+          ? ' (รายเดือนระยะสั้น)'
+          : booking.bookingType === 'monthly_long'
+            ? ' (รายเดือนระยะยาว)'
+            : '';
+        await addCharge(tx, {
+          folioId:     folio.folioId,
+          chargeType:  'ROOM',
+          description: `ค่าห้องพักเดือนแรก${monthlyLabel} — ห้อง ${booking.room.number}`,
+          amount:      stayTotal,
+          quantity:    1,
+          unitPrice:   stayTotal,
+          serviceDate: new Date(booking.checkIn),
+          periodEnd:   new Date(booking.checkOut),
+          createdBy:   userId,
+        });
+      }
     }
 
     // ── 6. Credit back any DEPOSIT_BOOKING already paid ───────────────────
@@ -335,10 +353,32 @@ export async function POST(
         ? `${booking.guest.firstNameTH} ${booking.guest.lastNameTH}`.trim()
         : `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();
 
-    const receiptDesc =
-      booking.bookingType === 'daily'
-        ? `ค่าห้องพัก ${nights ?? 1} คืน — ห้อง ${booking.room.number}`
-        : `ค่าห้องพัก — ห้อง ${booking.room.number}`;
+    // Receipt-Standardization: build per-night receipt items for daily bookings
+    // (mirrors the addNightlyRoomCharges call above).  Monthly bookings get a
+    // single row with the period range.
+    const receiptItems: ReceiptData['items'] =
+      booking.bookingType === 'daily' && nights && nights > 0
+        ? Array.from({ length: nights }, (_, i) => {
+            const nightStart = new Date(booking.checkIn);
+            nightStart.setUTCHours(0, 0, 0, 0);
+            nightStart.setUTCDate(nightStart.getUTCDate() + i);
+            const nightEnd = new Date(nightStart);
+            nightEnd.setUTCDate(nightEnd.getUTCDate() + 1);
+            return {
+              description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+              quantity:    1,
+              unitPrice:   Number(booking.rate),
+              amount:      Number(booking.rate),
+              periodStart: fmtDate(nightStart),
+              periodEnd:   fmtDate(nightEnd),
+            };
+          })
+        : [{
+            description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+            amount:      invResult.grandTotal,
+            periodStart: fmtDate(booking.checkIn),
+            periodEnd:   fmtDate(booking.checkOut),
+          }];
 
     receipt = {
       receiptType:   booking.status === 'confirmed' ? 'booking_full' : 'checkin_upfront',
@@ -351,7 +391,7 @@ export async function POST(
       bookingType:   booking.bookingType,
       checkIn:       fmtDate(booking.checkIn),
       checkOut:      fmtDate(booking.checkOut),
-      items: [{ description: receiptDesc, amount: invResult.grandTotal }],
+      items:         receiptItems,
       subtotal:      invResult.grandTotal,
       vatAmount:     0,
       grandTotal:    invResult.grandTotal,

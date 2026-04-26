@@ -29,6 +29,7 @@ import { z }                 from 'zod';
 import {
   getFolioByBookingId,
   addCharge,
+  addNightlyRoomCharges,
   createInvoiceFromFolio,
 } from '@/services/folio.service';
 import { recalculateFolioBalance } from '@/services/folio.service';
@@ -193,22 +194,40 @@ export async function POST(
       const folio = await getFolioByBookingId(tx, params.id);
       if (!folio) throw new Error('ไม่พบ Folio ของการจองนี้');
 
-      const description =
-        booking.bookingType === 'daily'
-          ? `ค่าห้องพักเพิ่มเติม ${extraDays} คืน (ต่ออายุ)`
-          : `ค่าเช่าเพิ่มเติม ${extraDays} วัน (ต่ออายุสัญญา ${bookingTypeLabel})`;
-
-      const { lineItemId: newLineItemId } = await addCharge(tx, {
-        folioId:     folio.folioId,
-        chargeType:  'ROOM',
-        description,
-        amount:      extraCharge,
-        quantity:    extraDays,
-        unitPrice:   effectiveRate,
-        serviceDate: oldCheckOut,         // charge starts from old checkout
-        notes:       notes,
-        createdBy:   userId,
-      });
+      // Receipt-Standardization: daily extend → 1 row per added night.
+      // Monthly extend → single row covering the extension period.
+      let newLineItemIds: string[];
+      if (booking.bookingType === 'daily') {
+        const result = await addNightlyRoomCharges(tx, {
+          folioId:      folio.folioId,
+          roomNumber:   booking.room.number,
+          startDate:    oldCheckOut,
+          nights:       extraDays,
+          ratePerNight: effectiveRate,
+          taxType:      'no_tax',
+          referenceType: 'booking',
+          referenceId:   params.id,
+          notes:         notes ?? 'ต่ออายุการจอง',
+          createdBy:    userId,
+        });
+        newLineItemIds = result.lineItemIds;
+      } else {
+        const description =
+          `ค่าเช่าเพิ่มเติม — ห้อง ${booking.room.number} (ต่ออายุสัญญา ${bookingTypeLabel})`;
+        const { lineItemId } = await addCharge(tx, {
+          folioId:     folio.folioId,
+          chargeType:  'ROOM',
+          description,
+          amount:      extraCharge,
+          quantity:    1,
+          unitPrice:   extraCharge,
+          serviceDate: oldCheckOut,
+          periodEnd:   newCheckOut,
+          notes:       notes,
+          createdBy:   userId,
+        });
+        newLineItemIds = [lineItemId];
+      }
 
       let invoiceId: string | undefined;
       let paymentId: string | undefined;
@@ -225,7 +244,7 @@ export async function POST(
           dueDate:     new Date(),
           notes:       notes ?? `ต่ออายุการจอง BK-${booking.bookingNumber}`,
           createdBy:   userId,
-          lineItemIds: [newLineItemId],      // only bill the new extension charge
+          lineItemIds: newLineItemIds,        // bill all new extension nights/rows
         });
 
         if (invResult) {

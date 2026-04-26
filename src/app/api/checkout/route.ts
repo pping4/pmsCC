@@ -27,7 +27,7 @@ import { postBadDebt } from '@/services/ledger.service';
 import { postInvoiceToCityLedger } from '@/services/cityLedger.service';
 import { z } from 'zod';
 import {
-  getFolioByBookingId, addCharge, createInvoiceFromFolio,
+  getFolioByBookingId, addCharge, addNightlyRoomCharges, createInvoiceFromFolio,
   closeFolio,
 } from '@/services/folio.service';
 import { generateInvoiceNumber } from '@/services/invoice-number.service';
@@ -312,15 +312,18 @@ export async function POST(request: Request) {
           const checkInTime = booking.actualCheckIn ?? booking.checkIn;
           const actualNights = calcNights(checkInTime, now);
 
-          await addCharge(tx, {
-            folioId:     folio.folioId,
-            chargeType:  'ROOM',
-            description: `ค่าห้องพัก ${actualNights} คืน — ห้อง ${booking.room.number}`,
-            amount:      Number(booking.rate) * actualNights,
-            quantity:    actualNights,
-            unitPrice:   Number(booking.rate),
-            serviceDate: new Date(booking.actualCheckIn ?? booking.checkIn),  // period start
-            createdBy:   userId,
+          // Receipt-Standardization: persist 1 row per night.
+          await addNightlyRoomCharges(tx, {
+            folioId:      folio.folioId,
+            roomNumber:   booking.room.number,
+            startDate:    new Date(booking.actualCheckIn ?? booking.checkIn),
+            nights:       actualNights,
+            ratePerNight: Number(booking.rate),
+            taxType:      'no_tax',
+            referenceType: 'booking',
+            referenceId:   booking.id,
+            notes:         'เช็คเอาท์ — รายการห้อง',
+            createdBy:    userId,
           });
 
           // B: For each PAID DEPOSIT_BOOKING, add a matching negative ADJUSTMENT
