@@ -7,6 +7,8 @@ import { INPUT_STYLE, LABEL_STYLE, FONT } from '../lib/constants';
 import { parseUTCDate, formatDateStr, addDays, diffDays } from '../lib/date-utils';
 import { useToast } from '@/components/ui';
 import { fmtBaht } from '@/lib/date-format';
+import ReceiptModal from '@/components/receipt/ReceiptModal';
+import type { ReceiptData } from '@/components/receipt/types';
 
 interface NewBookingDialogProps {
   isOpen: boolean;
@@ -62,6 +64,12 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
 
   // ─── Step ─────────────────────────────────────────────────────────────────────
   const [step, setStep] = useState<Step>(1);
+
+  // ─── Receipt (shown after pre-pay at booking time) ───────────────────────────
+  // Receipt-Standardization: when the user pays at booking time, the API returns
+  // `receipt` populated. We surface it via ReceiptModal so the cashier can print
+  // it immediately — same UX as paying at check-in / check-out.
+  const [bookingReceipt, setBookingReceipt] = useState<ReceiptData | null>(null);
 
   // ─── Guest ────────────────────────────────────────────────────────────────────
   const [selectedGuest, setSelectedGuest] = useState<GuestSearchResult | null>(null);
@@ -435,9 +443,18 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
         const err = await r.json().catch(() => ({}));
         throw new Error(err?.error || err?.message || `HTTP ${r.status}`);
       }
+      const data = await r.json().catch(() => ({} as { receipt?: ReceiptData | null }));
       toast.success('สร้างการจองสำเร็จ', `ห้อง ${selectedRoom.number}`);
+      // Refresh the parent list either way so the new booking shows.
       onCreated();
-      onClose();
+      // Receipt-Standardization: if the API returned a receipt (i.e. the user
+      // paid at booking time), keep this dialog mounted and surface the
+      // ReceiptModal. We defer onClose() until the user dismisses the receipt.
+      if (data && data.receipt) {
+        setBookingReceipt(data.receipt as ReceiptData);
+      } else {
+        onClose();
+      }
     } catch (err) {
       toast.error('สร้างการจองไม่สำเร็จ', err instanceof Error ? err.message : undefined);
     } finally {
@@ -1083,6 +1100,15 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
           )}
         </div>
       </div>
+
+      {/* Receipt Modal — shown after a pre-paid booking is created */}
+      <ReceiptModal
+        receipt={bookingReceipt}
+        onClose={() => {
+          setBookingReceipt(null);
+          onClose();
+        }}
+      />
     </div>
   );
 };

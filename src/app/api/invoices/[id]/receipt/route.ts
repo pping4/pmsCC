@@ -79,9 +79,16 @@ export async function GET(
         select: {
           description: true,
           amount:      true,
-          // Link back to folio line item for qty × price detail
+          // Link back to folio line item for qty × price + period detail.
+          // Receipt-Standardization: serviceDate / periodEnd are persisted on
+          // creation, so reprinted receipts render identically to fresh ones.
           folioLineItem: {
-            select: { quantity: true, unitPrice: true },
+            select: {
+              quantity:    true,
+              unitPrice:   true,
+              serviceDate: true,
+              periodEnd:   true,
+            },
           },
         },
       },
@@ -148,6 +155,15 @@ export async function GET(
         ? Number(item.folioLineItem.unitPrice)
         : undefined,
       amount: Number(item.amount),
+      // Receipt-Standardization: surface persisted period dates so the
+      // thermal receipt renders the per-night breakdown identically to the
+      // fresh-issue path. NULL for non-period items (extras, food, deposits).
+      periodStart: item.folioLineItem?.serviceDate
+        ? safeDate(new Date(item.folioLineItem.serviceDate))
+        : undefined,
+      periodEnd:   item.folioLineItem?.periodEnd
+        ? safeDate(new Date(item.folioLineItem.periodEnd))
+        : undefined,
     })),
 
     subtotal:      Number(invoice.subtotal),

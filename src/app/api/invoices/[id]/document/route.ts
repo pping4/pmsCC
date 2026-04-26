@@ -77,7 +77,13 @@ export async function GET(
           amount:      true,
           taxType:     true,
           folioLineItem: {
-            select: { quantity: true, unitPrice: true, chargeType: true, serviceDate: true },
+            select: {
+              quantity:    true,
+              unitPrice:   true,
+              chargeType:  true,
+              serviceDate: true,
+              periodEnd:   true,   // Receipt-Standardization
+            },
           },
         },
       },
@@ -154,16 +160,22 @@ export async function GET(
     checkIn:        safeDate(invoice.booking?.checkIn  ? new Date(invoice.booking.checkIn)  : null),
     checkOut:       safeDate(invoice.booking?.checkOut ? new Date(invoice.booking.checkOut) : null),
 
-    // Line items — ROOM charges expanded per night; others shown as-is with period
+    // Line items — Receipt-Standardization: serviceDate + periodEnd are now
+    // persisted at creation time (one row per night for ROOM charges via
+    // addNightlyRoomCharges; single row with span for monthly), so the document
+    // simply mirrors the FolioLineItem rows.  Legacy rows (qty>1, no periodEnd)
+    // fall back to the render-time expansion as a safety net — once all old
+    // bookings are closed out, that fallback path becomes unreachable.
     items: invoice.items.flatMap((item): InvoiceLineItem[] => {
       const fl        = item.folioLineItem;
       const unitPrice = fl?.unitPrice ? Number(fl.unitPrice) : Number(item.amount);
       const qty       = fl?.quantity ?? 1;
 
-      // ── ROOM charge with serviceDate + multiple nights → expand per night ──
+      // ── Legacy fallback: ROOM with qty>1 and no periodEnd → expand at render
       if (
         fl?.chargeType === 'ROOM' &&
         fl.serviceDate &&
+        !fl.periodEnd &&
         qty > 1
       ) {
         return expandNightlyItems({
@@ -175,10 +187,9 @@ export async function GET(
         });
       }
 
-      // ── Single-night ROOM or non-ROOM charge: show with period if available ─
-      const { periodStart, periodEnd } = computePeriod(
-        fl?.serviceDate, fl?.quantity, fl?.chargeType, safeDate
-      );
+      // ── Standard path: emit one row with persisted period span ────────────
+      const periodStart = fl?.serviceDate ? safeDate(new Date(fl.serviceDate)) : undefined;
+      const periodEnd   = fl?.periodEnd   ? safeDate(new Date(fl.periodEnd))   : undefined;
 
       return [{
         description: item.description,

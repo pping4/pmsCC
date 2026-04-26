@@ -433,7 +433,13 @@ export async function POST(request: Request) {
               description:   true,
               amount:        true,
               folioLineItem: {
-                select: { quantity: true, unitPrice: true, chargeType: true, serviceDate: true },
+                select: {
+                  quantity:    true,
+                  unitPrice:   true,
+                  chargeType:  true,
+                  serviceDate: true,
+                  periodEnd:   true,   // Receipt-Standardization
+                },
               },
             },
           });
@@ -453,10 +459,11 @@ export async function POST(request: Request) {
               const unitPrice = fl?.unitPrice ? Number(fl.unitPrice) : undefined;
               const qty       = fl?.quantity ?? 1;
 
-              // ROOM charge with serviceDate + multiple nights → expand per night
+              // Legacy fallback: ROOM with qty>1 and no periodEnd → expand at render
               if (
                 fl?.chargeType === 'ROOM' &&
                 fl.serviceDate &&
+                !fl.periodEnd &&
                 qty > 1 &&
                 unitPrice !== undefined
               ) {
@@ -468,17 +475,11 @@ export async function POST(request: Request) {
                 });
               }
 
-              // Single-night or non-ROOM: show as-is
-              let periodStart: string | undefined;
-              let periodEnd:   string | undefined;
-              if (fl?.serviceDate) {
-                periodStart = fmtDate(new Date(fl.serviceDate));
-                if (fl.chargeType === 'ROOM' && qty > 0) {
-                  const end = new Date(fl.serviceDate);
-                  end.setUTCDate(end.getUTCDate() + qty);
-                  periodEnd = fmtDate(end);
-                }
-              }
+              // Standard path: emit row with persisted period span. After
+              // Receipt-Standardization addNightlyRoomCharges, ROOM rows
+              // already have qty=1 + periodEnd, so this is the common case.
+              const periodStart = fl?.serviceDate ? fmtDate(new Date(fl.serviceDate)) : undefined;
+              const periodEnd   = fl?.periodEnd   ? fmtDate(new Date(fl.periodEnd))   : undefined;
               return [{
                 description: i.description,
                 amount:      Number(i.amount),
