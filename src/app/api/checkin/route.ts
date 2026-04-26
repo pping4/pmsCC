@@ -161,7 +161,13 @@ export async function POST(request: Request) {
   // Receipt holder — populated per payment type inside the transaction
   let checkinReceipt: ReceiptData | null = null;
 
-  const result = await prisma.$transaction(async (tx) => {
+  // Wrap the whole transaction so any thrown error is surfaced as JSON.
+  // Without this, an exception inside $transaction bubbles up to Next.js,
+  // which serves an HTML error page; clients calling res.json() then fail
+  // with "Unexpected end of JSON input" and no useful diagnostic.
+  let result;
+  try {
+    result = await prisma.$transaction(async (tx) => {
     // ── 1. Update booking → checked_in ────────────────────────────────────
     const updatedBooking = await tx.booking.update({
       where: { id: bookingId },
@@ -483,7 +489,20 @@ export async function POST(request: Request) {
     }
 
     return { updatedBooking, stayInvoiceId, securityDepositId };
-  });
+    });
+  } catch (err) {
+    // Server-side log so the operator can see the actual exception
+    console.error('POST /api/checkin transaction error:', err);
+    const message =
+      err instanceof Error ? err.message : 'เกิดข้อผิดพลาดระหว่างเช็คอิน';
+    // Map known Prisma errors to friendlier statuses; default 500.
+    let status = 500;
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      if (err.code === 'P2002') status = 409;
+      else if (err.code === 'P2025') status = 404;
+    }
+    return NextResponse.json({ success: false, error: message }, { status });
+  }
 
   return NextResponse.json({
     success: true,
