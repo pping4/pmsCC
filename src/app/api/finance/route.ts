@@ -92,8 +92,28 @@ export async function GET(request: NextRequest) {
     .filter(i => i.badDebt)
     .reduce((sum, inv) => sum + Number(inv.grandTotal), 0);
 
-  // By payment method — removed since paymentMethod is no longer on Invoice
-  const byPaymentMethod: Record<string, number> = { cash: 0, transfer: 0, credit_card: 0 };
+  // By payment method — Sprint 5: paymentMethod moved Invoice → Payment.
+  // Sum ACTIVE payments grouped by method, scoped to the same period.
+  // Filtering on paymentDate (business date) — matches how accountants think about it,
+  // and the column is indexed for fast groupBy. If a CashSession filter is active,
+  // narrow to that session's payments only.
+  const paymentRows = await prisma.payment.groupBy({
+    by: ['paymentMethod'],
+    where: {
+      status: 'ACTIVE',
+      paymentDate: { gte: fromDate, lte: toDate },
+      ...(sessionIdParam ? { cashSessionId: sessionIdParam } : {}),
+    },
+    _sum: { amount: true },
+  });
+  // Seed the keys so the UI always shows the canonical method order even when
+  // a method has zero — accountants want to see "เงินสด ฿0" rather than nothing.
+  const byPaymentMethod: Record<string, number> = {
+    cash: 0, transfer: 0, credit_card: 0, promptpay: 0, ota_collect: 0,
+  };
+  for (const row of paymentRows) {
+    byPaymentMethod[row.paymentMethod] = Number(row._sum.amount ?? 0);
+  }
 
   // Today's stats
   const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
