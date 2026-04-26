@@ -1034,7 +1034,12 @@ export default function ReservationPage() {
         allRooms={flatRooms}
         onClose={() => setNewBookingState(null)}
         onCreated={() => {
-          setNewBookingState(null);
+          // Refresh tape chart so the new booking is visible immediately, but
+          // do NOT close the dialog from here. The dialog itself decides when
+          // to call onClose — it stays mounted while showing the receipt
+          // modal after a pre-paid booking, then closes when the cashier
+          // dismisses the receipt. Closing here would unmount the dialog
+          // before setBookingReceipt() could surface the modal.
           fetchData();
         }}
       />
