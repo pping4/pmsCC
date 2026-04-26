@@ -983,19 +983,35 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
                 opacity: cityLedgerAccountId ? 0.4 : 1,
                 pointerEvents: cityLedgerAccountId ? 'none' : 'auto',
               }}>
-                <div style={{
+                {/*
+                  Bugfix: previously this row had BOTH an outer div onClick AND
+                  an inner input onChange that called setCollectPayment.  When
+                  the user clicked the checkbox, the change event toggled state
+                  ON, then the click bubbled to the row and the row's onClick
+                  toggled it back OFF — net effect: state stayed false but the
+                  checkbox briefly looked checked.  That's why creating a
+                  booking with "รับชำระเงินล่วงหน้า" was silently producing
+                  no invoice / no receipt.
+
+                  Use a <label> wrapper so the row is clickable AND clicking
+                  fires exactly one onChange.  No bubbling double-toggle.
+                */}
+                <label style={{
                   display: 'flex', alignItems: 'center', gap: 8,
                   padding: '10px 12px',
                   backgroundColor: collectPayment ? '#ecfdf5' : '#f9fafb',
                   cursor: 'pointer', transition: 'background-color 0.15s',
-                }} onClick={() => setCollectPayment(!collectPayment)}>
-                  <input type="checkbox" checked={collectPayment}
-                    onChange={() => setCollectPayment(!collectPayment)}
-                    style={{ margin: 0, cursor: 'pointer' }} />
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={collectPayment}
+                    onChange={(e) => setCollectPayment(e.target.checked)}
+                    style={{ margin: 0, cursor: 'pointer' }}
+                  />
                   <span style={{ fontSize: 13, fontWeight: 600, color: '#1f2937' }}>
                     💰 รับชำระเงินล่วงหน้า (ณ วันจอง)
                   </span>
-                </div>
+                </label>
 
                 {collectPayment && (
                   <div style={{ padding: 12, borderTop: '1px solid #e5e7eb' }}>
