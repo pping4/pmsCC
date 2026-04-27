@@ -271,28 +271,91 @@ export async function POST(
       }
     }
 
-    // ── 7. Create invoice from UNBILLED folio items ────────────────────────
+    // ── 7. Allocate to existing unpaid invoices (preferred) OR create new ──
+    // Why this order matters: drag-resize, monthly renewal, and other flows
+    // already bill their charges into an INV-EX / INV-MN at creation time.
+    // When the cashier later opens the booking and clicks "รับชำระเงิน" we
+    // must allocate to that EXISTING invoice -- creating a second invoice
+    // from UNBILLED items would either fail (no UNBILLED rows left) or
+    // double-bill the customer.  Only fall back to createInvoiceFromFolio
+    // when there is genuinely no outstanding invoice.
     const isMonthly =
       booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
-    const dueDate = isMonthly
-      ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
-      : new Date(booking.checkOut);
 
-    const invResult = await createInvoiceFromFolio(tx, {
-      folioId:     folio.folioId,
-      guestId:     booking.guestId,
-      bookingId,
-      invoiceType: invoiceTypeCode,
-      dueDate,
-      notes:       notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
-      createdBy:   userId,
+    const existingUnpaid = await tx.invoice.findMany({
+      where: {
+        bookingId,
+        status: { in: ['unpaid', 'overdue', 'partially_paid'] as never[] },
+      },
+      orderBy: { issueDate: 'asc' },
+      select: {
+        id: true, invoiceNumber: true,
+        grandTotal: true, paidAmount: true,
+      },
     });
 
-    if (!invResult) {
-      throw new Error(
-        'ไม่พบรายการค้างชำระ — อาจชำระครบแล้ว หรือไม่มีรายการที่ยังไม่ได้ออกบิล',
-      );
+    type InvoiceForPayment = {
+      invoiceId: string;
+      invoiceNumber: string;
+      grandTotal: number;
+    };
+    let invoicesForPayment: InvoiceForPayment;
+    let totalAmountToPay: number;
+    let allocations: Array<{ invoiceId: string; amount: number }>;
+
+    if (existingUnpaid.length > 0) {
+      // Pay against existing unpaid invoices, oldest first
+      allocations = existingUnpaid
+        .map((inv) => ({
+          invoiceId: inv.id,
+          amount:    Math.max(0, Number(inv.grandTotal) - Number(inv.paidAmount)),
+        }))
+        .filter((a) => a.amount > 0);
+      totalAmountToPay = allocations.reduce((s, a) => s + a.amount, 0);
+      // Use the first unpaid invoice as the "primary" for the receipt header.
+      invoicesForPayment = {
+        invoiceId:     existingUnpaid[0].id,
+        invoiceNumber: existingUnpaid[0].invoiceNumber,
+        grandTotal:    totalAmountToPay,
+      };
+      if (totalAmountToPay <= 0) {
+        throw new Error(
+          'ไม่พบยอดค้างชำระ — ใบแจ้งหนี้ทั้งหมดถูกชำระครบแล้ว',
+        );
+      }
+    } else {
+      // No existing unpaid invoices → fall back to creating one from UNBILLED
+      const dueDate = isMonthly
+        ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
+        : new Date(booking.checkOut);
+
+      const invResult = await createInvoiceFromFolio(tx, {
+        folioId:     folio.folioId,
+        guestId:     booking.guestId,
+        bookingId,
+        invoiceType: invoiceTypeCode,
+        dueDate,
+        notes:       notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
+        createdBy:   userId,
+      });
+
+      if (!invResult) {
+        throw new Error(
+          'ไม่พบรายการค้างชำระ — อาจชำระครบแล้ว หรือไม่มีรายการที่ยังไม่ได้ออกบิล',
+        );
+      }
+      invoicesForPayment = {
+        invoiceId:     invResult.invoiceId,
+        invoiceNumber: invResult.invoiceNumber,
+        grandTotal:    invResult.grandTotal,
+      };
+      totalAmountToPay = invResult.grandTotal;
+      allocations = [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }];
     }
+
+    // Maintain the legacy `invResult` local for the rest of the function so
+    // diff churn stays minimal in receipt building / activity log.
+    const invResult = invoicesForPayment;
 
     // ── 8. Delegate to payment.service (single ledger chokepoint) ─────────
     // payment.service handles: cash-session resolution, slip-refNo dedup,
@@ -303,12 +366,12 @@ export async function POST(
       idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
       guestId:        booking.guestId,
       bookingId,
-      amount:         invResult.grandTotal,
+      amount:         totalAmountToPay,
       paymentMethod,
       paymentDate:    now,
       receivedBy:     userId,
       notes:          notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
-      allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+      allocations,
       createdBy:      userId,
       createdByName:  userName ?? undefined,
       // Sprint 5 — transfer/QR
@@ -354,27 +417,45 @@ export async function POST(
         ? `${booking.guest.firstNameTH} ${booking.guest.lastNameTH}`.trim()
         : `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();
 
-    // Receipt-Standardization: build per-night receipt items for daily bookings
-    // (mirrors the addNightlyRoomCharges call above).  Monthly bookings get a
-    // single row with the period range.
-    const receiptItems: ReceiptData['items'] =
-      booking.bookingType === 'daily' && nights && nights > 0
-        ? Array.from({ length: nights }, (_, i) => {
-            const nightStart = new Date(booking.checkIn);
-            nightStart.setUTCHours(0, 0, 0, 0);
-            nightStart.setUTCDate(nightStart.getUTCDate() + i);
-            const nightEnd = new Date(nightStart);
-            nightEnd.setUTCDate(nightEnd.getUTCDate() + 1);
-            return {
-              description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
-              quantity:    1,
-              unitPrice:   Number(booking.rate),
-              amount:      Number(booking.rate),
-              periodStart: fmtDate(nightStart),
-              periodEnd:   fmtDate(nightEnd),
-            };
-          })
-        : [{
+    // Receipt-Standardization: pull line items from the invoice(s) we just
+    // paid -- not from booking dates -- so a payment against INV-EX
+    // (drag-resize extension) shows only the extension nights, not the
+    // entire stay. The InvoiceItem ↔ FolioLineItem 1:1 link surfaces the
+    // persisted serviceDate / periodEnd we set in addNightlyRoomCharges.
+    const paidInvoiceIds = allocations.map((a) => a.invoiceId);
+    const paidItems = await tx.invoiceItem.findMany({
+      where: { invoiceId: { in: paidInvoiceIds } },
+      orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+      select: {
+        description: true,
+        amount:      true,
+        folioLineItem: {
+          select: {
+            quantity:    true,
+            unitPrice:   true,
+            serviceDate: true,
+            periodEnd:   true,
+          },
+        },
+      },
+    });
+
+    const receiptItems: ReceiptData['items'] = paidItems.length > 0
+      ? paidItems.map((it) => {
+          const fl = it.folioLineItem;
+          return {
+            description: it.description,
+            quantity:    fl?.quantity   ?? 1,
+            unitPrice:   fl?.unitPrice ? Number(fl.unitPrice) : Number(it.amount),
+            amount:      Number(it.amount),
+            periodStart: fl?.serviceDate ? fmtDate(new Date(fl.serviceDate)) : undefined,
+            periodEnd:   fl?.periodEnd   ? fmtDate(new Date(fl.periodEnd))   : undefined,
+          };
+        })
+      // Defensive fallback for the (unlikely) case where invoice items can't
+      // be loaded -- show a single summary line so the cashier still has a
+      // receipt to hand the customer.
+      : [{
             description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
             amount:      invResult.grandTotal,
             periodStart: fmtDate(booking.checkIn),

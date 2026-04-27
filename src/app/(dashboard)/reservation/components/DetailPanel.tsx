@@ -7,6 +7,7 @@ import { fmtThaiLong, fmtCurrency, guestDisplayName, diffDays, parseUTCDate } fr
 import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
+import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
 import InvoiceModal from '@/components/invoice/InvoiceModal';
 import MoveRoomDialog from './MoveRoomDialog';
 import SplitSegmentDialog from './SplitSegmentDialog';
@@ -178,7 +179,15 @@ export default function DetailPanel({
   const [billingPayOpen,    setBillingPayOpen]    = useState(false);
   const [billingPayMethod,  setBillingPayMethod]  = useState<string>('cash');
   const [billingCashSessId, setBillingCashSessId] = useState<string | null>(null);
+  // Tracks whether the /api/cash-sessions/current fetch has resolved at least
+  // once. Without this, the form briefly renders the "ยังไม่มีกะ..." warning
+  // before the GET completes -- a one-frame flash that confuses the cashier.
+  const [billingCashSessChecked, setBillingCashSessChecked] = useState(false);
   const [billingPayLoading, setBillingPayLoading] = useState(false);
+  // Transfer / promptpay — receiving account is required by the server.
+  // Auto-defaulted by ReceivingAccountPicker when there's only one bank
+  // account (or one is flagged isDefault).
+  const [billingReceivingAccountId, setBillingReceivingAccountId] = useState<string | undefined>();
 
   // ── Check-in payment step ─────────────────────────────────────────────────
   // 'idle'     → show normal action buttons
@@ -500,12 +509,15 @@ export default function DetailPanel({
   useEffect(() => {
     if (!billingPayOpen || billingPayMethod !== 'cash') {
       setBillingCashSessId(null);
+      setBillingCashSessChecked(false);
       return;
     }
+    setBillingCashSessChecked(false);
     fetch('/api/cash-sessions/current')
       .then(r => r.json())
       .then(d => setBillingCashSessId(d.session?.id ?? null))
-      .catch(() => setBillingCashSessId(null));
+      .catch(() => setBillingCashSessId(null))
+      .finally(() => setBillingCashSessChecked(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [billingPayOpen, billingPayMethod, booking?.id]);
 
@@ -515,6 +527,14 @@ export default function DetailPanel({
     setBillingPayLoading(true);
     setError('');
     try {
+      // Client-side guard: server validates again, but failing fast here
+      // gives the cashier an immediate inline message instead of a roundtrip.
+      if ((billingPayMethod === 'transfer' || billingPayMethod === 'promptpay')
+          && !billingReceivingAccountId) {
+        setBillingPayLoading(false);
+        setError('กรุณาเลือกบัญชีที่รับเงิน');
+        return;
+      }
       const res  = await fetch(`/api/bookings/${booking.id}/pay`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -528,6 +548,9 @@ export default function DetailPanel({
           ),
           // Sprint 4B: cashSessionId resolved server-side from caller's shift.
           paymentMethod: billingPayMethod,
+          // Sprint 5: bank-transfer fields
+          ...(billingPayMethod === 'transfer' || billingPayMethod === 'promptpay'
+            ? { receivingAccountId: billingReceivingAccountId } : {}),
         }),
       });
       const data = await res.json() as { success?: boolean; error?: string; receipt?: ReceiptData };
@@ -2568,9 +2591,27 @@ export default function DetailPanel({
                                     </button>
                                   ))}
                                 </div>
-                                {billingPayMethod === 'cash' && !billingCashSessId && (
+                                {billingPayMethod === 'cash' && billingCashSessChecked && !billingCashSessId && (
                                   <div style={{ marginBottom: 8, fontSize: 11, color: '#b91c1c', padding: '6px 8px', background: '#fef2f2', borderRadius: 6, border: '1px solid #fca5a5' }}>
                                     ⚠️ ยังไม่มีกะแคชเชียร์ที่เปิดอยู่ — กรุณาเปิดกะก่อน
+                                  </div>
+                                )}
+                                {(billingPayMethod === 'transfer' || billingPayMethod === 'promptpay') && (
+                                  <div style={{ marginBottom: 8 }}>
+                                    {/* Auto-defaults when there is only one BANK account (or one
+                                        is flagged isDefault). The cashier still sees the picker
+                                        in case they need to override. */}
+                                    <ReceivingAccountPicker
+                                      receivingAccountId={billingReceivingAccountId}
+                                      onChange={setBillingReceivingAccountId}
+                                      disabled={billingPayLoading}
+                                      label="บัญชีที่รับเงิน"
+                                    />
+                                  </div>
+                                )}
+                                {billingPayMethod === 'credit_card' && (
+                                  <div style={{ marginBottom: 8, fontSize: 11, color: '#1e40af', padding: '6px 8px', background: '#eff6ff', borderRadius: 6, border: '1px solid #bfdbfe' }}>
+                                    ℹ️ การรับชำระบัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเต็มที่หน้า Guest Folio แทน
                                   </div>
                                 )}
                                 {error && (
@@ -2588,10 +2629,20 @@ export default function DetailPanel({
                                   </button>
                                   <button
                                     onClick={handleBillingPay}
-                                    disabled={billingPayLoading || (billingPayMethod === 'cash' && !billingCashSessId)}
+                                    disabled={
+                                      billingPayLoading ||
+                                      (billingPayMethod === 'cash' && !billingCashSessId) ||
+                                      ((billingPayMethod === 'transfer' || billingPayMethod === 'promptpay') && !billingReceivingAccountId) ||
+                                      billingPayMethod === 'credit_card'
+                                    }
                                     style={{
                                       flex: 2, padding: '7px', borderRadius: 6, border: 'none',
-                                      background: (billingPayLoading || (billingPayMethod === 'cash' && !billingCashSessId)) ? '#86efac' : '#16a34a',
+                                      background: (
+                                        billingPayLoading ||
+                                        (billingPayMethod === 'cash' && !billingCashSessId) ||
+                                        ((billingPayMethod === 'transfer' || billingPayMethod === 'promptpay') && !billingReceivingAccountId) ||
+                                        billingPayMethod === 'credit_card'
+                                      ) ? '#86efac' : '#16a34a',
                                       color: '#fff', fontSize: 11, fontWeight: 700,
                                       cursor: billingPayLoading ? 'wait' : 'pointer', fontFamily: FONT,
                                     }}
