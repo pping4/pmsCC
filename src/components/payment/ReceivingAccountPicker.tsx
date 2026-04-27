@@ -15,6 +15,7 @@ interface Account {
   name: string;
   bankName?: string | null;
   bankAccountNo?: string | null;
+  isDefault?: boolean;
 }
 
 interface Props {
@@ -35,7 +36,20 @@ export function ReceivingAccountPicker({ receivingAccountId, onChange, disabled,
         const res = await fetch('/api/financial-accounts?active=1&subKind=BANK');
         if (!res.ok) throw new Error('fetch accounts failed');
         const data = await res.json();
-        if (!abort) setAccounts(data.accounts ?? []);
+        if (abort) return;
+        const list: Account[] = data.accounts ?? [];
+        setAccounts(list);
+
+        // UX: skip the empty "— เลือกบัญชี —" placeholder when the cashier
+        // has no real choice to make.  Pick a sensible default automatically:
+        //   1. an account flagged isDefault=true
+        //   2. otherwise, the only account if there's exactly one
+        // Only fires when no value is already selected — never overrides
+        // an existing selection that the parent passed in.
+        if (!receivingAccountId && list.length > 0) {
+          const def = list.find(a => a.isDefault) ?? (list.length === 1 ? list[0] : null);
+          if (def) onChange(def.id);
+        }
       } catch {
         if (!abort) setAccounts([]);
       } finally {
@@ -43,6 +57,7 @@ export function ReceivingAccountPicker({ receivingAccountId, onChange, disabled,
       }
     })();
     return () => { abort = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (

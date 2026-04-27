@@ -180,7 +180,8 @@ export async function POST(
   // ── 4-9. All writes in a single transaction ───────────────────────────────
   let receipt: ReceiptData | null = null;
 
-  await prisma.$transaction(async (tx) => {
+  try {
+    await prisma.$transaction(async (tx) => {
     // ── 4. Ensure folio exists ─────────────────────────────────────────────
     let folio = await getFolioByBookingId(tx, bookingId);
     if (!folio) {
@@ -400,7 +401,21 @@ export async function POST(
       issueDate:     now.toISOString(),
       cashierName:   userName,
     };
-  });
+    });
+  } catch (err) {
+    // Without this wrapper an exception inside $transaction bubbles up to
+    // Next.js, which serves an HTML error page; clients calling res.json()
+    // then fail with the cryptic "Unexpected end of JSON input". Return JSON.
+    console.error('POST /api/bookings/[id]/pay transaction error:', err);
+    const message =
+      err instanceof Error ? err.message : 'เกิดข้อผิดพลาดระหว่างรับชำระเงิน';
+    let status = 500;
+    if (err instanceof Prisma.PrismaClientKnownRequestError) {
+      if (err.code === 'P2002') status = 409;
+      else if (err.code === 'P2025') status = 404;
+    }
+    return NextResponse.json({ success: false, error: message }, { status });
+  }
 
   return NextResponse.json({ success: true, receipt });
 }

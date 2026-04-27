@@ -467,6 +467,23 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
 
   if (!isOpen) return null;
 
+  // Receipt-Standardization: when a pre-paid booking succeeds the API returns
+  // a `receipt` payload. We render ONLY the ReceiptModal in that case so the
+  // booking form doesn't stay visible behind a smaller modal — confused
+  // cashiers were closing the form modal and finding a stranded receipt
+  // modal underneath. Closing the receipt now closes the whole dialog.
+  if (bookingReceipt) {
+    return (
+      <ReceiptModal
+        receipt={bookingReceipt}
+        onClose={() => {
+          setBookingReceipt(null);
+          onClose();
+        }}
+      />
+    );
+  }
+
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 1000,
@@ -1116,15 +1133,6 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
           )}
         </div>
       </div>
-
-      {/* Receipt Modal — shown after a pre-paid booking is created */}
-      <ReceiptModal
-        receipt={bookingReceipt}
-        onClose={() => {
-          setBookingReceipt(null);
-          onClose();
-        }}
-      />
     </div>
   );
 };

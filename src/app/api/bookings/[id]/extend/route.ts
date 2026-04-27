@@ -35,6 +35,8 @@ import {
 import { recalculateFolioBalance } from '@/services/folio.service';
 import { createPayment } from '@/services/payment.service';
 import { logActivity }       from '@/services/activityLog.service';
+import { fmtDate }            from '@/lib/date-format';
+import type { ReceiptData }   from '@/components/receipt/types';
 
 const ExtendSchema = z.object({
   /** New check-out date (must be strictly after current checkOut) */
@@ -87,6 +89,7 @@ export async function POST(
       bookingNumber: true,
       status:      true,
       bookingType: true,
+      checkIn:     true,
       checkOut:    true,
       rate:        true,
       guestId:     true,
@@ -119,6 +122,9 @@ export async function POST(
     booking.bookingType === 'monthly_short' ? 'รายเดือน (สั้น)' : 'รายเดือน (ยาว)';
 
   const guestName = `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();
+
+  // Receipt holder — populated when collectNow + payment succeeds.
+  let extendReceipt: ReceiptData | null = null;
 
   try {
     const result = await prisma.$transaction(async (tx) => {
@@ -267,6 +273,54 @@ export async function POST(
             createdByName:  userName ?? undefined,
           });
           paymentId = result.id;
+
+          // Receipt-Standardization: build per-night receipt for the extension.
+          // Mirror the line items we just persisted via addNightlyRoomCharges.
+          const receiptItems: ReceiptData['items'] =
+            booking.bookingType === 'daily'
+              ? Array.from({ length: extraDays }, (_, i) => {
+                  const ns = new Date(oldCheckOut);
+                  ns.setUTCHours(0, 0, 0, 0);
+                  ns.setUTCDate(ns.getUTCDate() + i);
+                  const ne = new Date(ns);
+                  ne.setUTCDate(ne.getUTCDate() + 1);
+                  return {
+                    description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+                    quantity:    1,
+                    unitPrice:   effectiveRate,
+                    amount:      effectiveRate,
+                    periodStart: fmtDate(ns),
+                    periodEnd:   fmtDate(ne),
+                  };
+                })
+              : [{
+                  description: `ค่าเช่าเพิ่มเติม — ห้อง ${booking.room.number}`,
+                  amount:      extraCharge,
+                  periodStart: fmtDate(oldCheckOut),
+                  periodEnd:   fmtDate(newCheckOut),
+                }];
+
+          extendReceipt = {
+            receiptType:   'checkout', // closest match for "extension paid now"
+            receiptNumber: result.receiptNumber,
+            paymentNumber: result.paymentNumber,
+            invoiceNumber: invResult.invoiceNumber,
+            bookingNumber: booking.bookingNumber,
+            guestName,
+            roomNumber:    booking.room.number,
+            bookingType:   booking.bookingType,
+            checkIn:       fmtDate(booking.checkIn),
+            checkOut:      fmtDate(newCheckOut),
+            items:         receiptItems,
+            subtotal:      invResult.grandTotal,
+            vatAmount:     0,
+            grandTotal:    invResult.grandTotal,
+            paymentMethod: paymentMethod!,
+            paidAmount:    invResult.grandTotal,
+            issueDate:     new Date().toISOString(),
+            cashierName:   userName,
+            notes:         `ต่ออายุการจอง +${extraDays} ${booking.bookingType === 'daily' ? 'คืน' : 'วัน'}`,
+          };
         }
       }
 
@@ -309,6 +363,7 @@ export async function POST(
       extraCharge: result.extraCharge,
       invoiceId:   result.invoiceId,
       paymentId:   result.paymentId,
+      receipt:     extendReceipt,   // null when collectNow=false (เก็บเงินภายหลัง)
     });
 
   } catch (err: unknown) {

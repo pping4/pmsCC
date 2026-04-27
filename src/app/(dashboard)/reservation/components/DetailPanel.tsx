@@ -660,13 +660,16 @@ export default function DetailPanel({
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(payload),
       });
-      const data = await res.json() as { success?: boolean; error?: string };
+      const data = await res.json() as { success?: boolean; error?: string; receipt?: ReceiptData | null };
       if (!res.ok || !data.success) throw new Error(data.error ?? `HTTP ${res.status}`);
 
       setExtendStep('idle');
       setLoading(false);
       onRefresh();
       toast.success('ขยายเวลาการจองสำเร็จ');
+      // Receipt-Standardization: surface the receipt modal if the user chose
+      // "เก็บเงินตอนนี้". `receipt` is null when "เก็บเงินภายหลัง" — no modal.
+      if (data.receipt) setReceiptData(data.receipt);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
       setError(msg);
