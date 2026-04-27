@@ -285,7 +285,7 @@ export async function POST(
     const existingUnpaid = await tx.invoice.findMany({
       where: {
         bookingId,
-        status: { in: ['unpaid', 'overdue', 'partially_paid'] as never[] },
+        status: { in: ['unpaid', 'overdue', 'partial'] as never[] },
       },
       orderBy: { issueDate: 'asc' },
       select: {
