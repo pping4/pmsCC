@@ -32,8 +32,14 @@ const ALLOWED: Record<RoomStatus, RoomStatus[]> = {
   available:   ['occupied', 'reserved', 'maintenance', 'cleaning'],
   occupied:    ['checkout', 'maintenance', 'cleaning'],
   reserved:    ['occupied', 'available'],
-  checkout:    ['cleaning', 'available'],
-  cleaning:    ['available', 'maintenance'],
+  // checkout is the post-checkout "needs cleaning" state. The textbook flow
+  // is checkout → cleaning → available → occupied, but real properties
+  // routinely have same-day turnovers where the next guest checks in
+  // before housekeeping is complete (the room is then flagged for cleaning
+  // through a parallel housekeeping task).  Allow the direct paths to
+  // `occupied` and `reserved` to support that workflow.
+  checkout:    ['cleaning', 'available', 'occupied', 'reserved'],
+  cleaning:    ['available', 'maintenance', 'occupied', 'reserved'],
   maintenance: ['available'],
 };
 

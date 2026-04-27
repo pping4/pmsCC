@@ -128,6 +128,21 @@ async function main() {
     `TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`,
   );
 
+  // 2.5) Reset rooms whose status was set by a now-deleted booking. Without
+  // this, rooms stay stuck at "occupied" / "checkout" / "reserved" and any
+  // new booking trying to use them throws RoomTransitionError because the
+  // state machine forbids those direct transitions.
+  console.log('\n🚪  Resetting stale room statuses…');
+  const resetResult = await prisma.room.updateMany({
+    where:  { status: { not: 'available' } },
+    data:   { status: 'available', currentBookingId: null },
+  });
+  if (resetResult.count > 0) {
+    console.log(`    ${resetResult.count} room(s) reset to 'available'`);
+  } else {
+    console.log('    all rooms already available');
+  }
+
   // 3) Verify all are zero
   console.log('\n✅  Row counts AFTER:');
   let allZero = true;
