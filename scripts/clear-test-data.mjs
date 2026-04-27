@@ -111,9 +111,18 @@ async function main() {
     }
   }
 
-  // 2) Truncate everything in a single transaction
-  // CASCADE handles any FK dependency we missed.
-  console.log('\n🗑   Truncating…');
+  // 2) Detach `cash_boxes.current_session_id` FK before truncating
+  // cash_sessions. Otherwise TRUNCATE ... CASCADE would cascade through that
+  // FK and wipe out the CashBox master records (configuration, NOT test data).
+  console.log('\n🔓  Detaching cash_boxes.current_session_id FK…');
+  await prisma.$executeRawUnsafe(
+    `UPDATE "cash_boxes" SET "current_session_id" = NULL WHERE "current_session_id" IS NOT NULL`,
+  );
+
+  // 3) Truncate everything in a single statement
+  // CASCADE handles any FK dependency we missed (already detached the
+  // CashBox → CashSession one above).
+  console.log('🗑   Truncating…');
   const tableList = TABLES_TO_CLEAR.map((t) => `"${t}"`).join(', ');
   await prisma.$executeRawUnsafe(
     `TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`,
