@@ -117,14 +117,29 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
       }
       resolvedCashBoxId = sessionCheck.cashBoxId;
     }
-  } else if (resolvedCashSessionId) {
-    // Non-cash payment that still references a session (e.g. QR paid while
-    // at a counter — used for shift attribution). Look up cashBoxId only.
-    const sessionCheck = await tx.cashSession.findUnique({
-      where:  { id: resolvedCashSessionId },
-      select: { cashBoxId: true },
-    });
-    resolvedCashBoxId = sessionCheck?.cashBoxId ?? null;
+  } else {
+    // Non-cash payment (transfer / promptpay / credit_card / ota_collect):
+    // attribute to the cashier's open shift when one exists so the shift
+    // dashboard's "โอน / การ์ด / อื่นๆ" KPI counts these payments. Without
+    // this, the cashier's shift summary under-reports their activity --
+    // they took a transfer at the counter, but the dashboard says ฿0.
+    //
+    // Unlike cash, a missing shift is NOT fatal: a transfer can be processed
+    // off-shift (e.g. back-office reconciliation), in which case the payment
+    // simply lacks a session link.
+    if (!resolvedCashSessionId) {
+      const active = await getActiveSessionForUser(tx, input.createdBy);
+      if (active) {
+        resolvedCashSessionId = active.id;
+        resolvedCashBoxId     = active.cashBoxId;
+      }
+    } else {
+      const sessionCheck = await tx.cashSession.findUnique({
+        where:  { id: resolvedCashSessionId },
+        select: { cashBoxId: true },
+      });
+      resolvedCashBoxId = sessionCheck?.cashBoxId ?? null;
+    }
   }
 
   // ── Sprint 5 pre-checks ──────────────────────────────────────────────

@@ -46,6 +46,13 @@ export interface CreateDepositInput {
   createdBy: string;
   createdByName?: string;
   ipAddress?: string;
+  /**
+   * Bank account that received the deposit (transfer / qr / promptpay).
+   * Routed to ledger DEBIT side via postPaymentReceived.moneyAccountId so
+   * the right FinancialAccount balance updates -- without this, every
+   * transfer-deposit hits the system-default BANK account.
+   */
+  receivingAccountId?: string;
 }
 
 export async function createSecurityDeposit(tx: TxClient, input: CreateDepositInput) {
@@ -108,6 +115,8 @@ export async function createSecurityDeposit(tx: TxClient, input: CreateDepositIn
     amount: input.amount,
     depositId: deposit.id,
     createdBy: input.createdBy,
+    // Route the DR side to the cashier's chosen bank account for transfers.
+    moneyAccountId: input.receivingAccountId ?? null,
   });
 
   // ── Create Payment record so cash session totals include this deposit ──────
@@ -133,6 +142,10 @@ export async function createSecurityDeposit(tx: TxClient, input: CreateDepositIn
       receivedBy:     input.receivedBy ?? null,
       notes:          `มัดจำ ${depositNumber} — ห้อง (booking ${input.bookingId})`,
       createdBy:      input.createdBy,
+      // Mirror the deposit's receiving account on the Payment row so the
+      // cashier shift dashboard and money-overview can attribute it
+      // correctly when the deposit was paid via transfer.
+      receivingAccountId: input.receivingAccountId ?? null,
     },
   });
 

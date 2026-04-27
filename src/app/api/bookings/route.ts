@@ -147,6 +147,16 @@ export async function POST(request: NextRequest) {
     const paymentMethod   = data.paymentMethod   || null;   // 'cash' | 'transfer' | 'credit_card' | null
     const paymentType     = data.paymentType     || 'full'; // 'full' | 'deposit'
     const depositAmount   = Number(data.deposit) || 0;
+    // For bank transfer / promptpay the cashier picks which bank account
+    // received the funds; for cash this is null and resolveMoneyAccount
+    // falls back to the cash-box's linked FinancialAccount.
+    const receivingAccountId = (data.receivingAccountId as string | undefined) || null;
+    if ((paymentMethod === 'transfer' || paymentMethod === 'promptpay') && !receivingAccountId) {
+      return NextResponse.json(
+        { error: 'กรุณาเลือกบัญชีที่รับเงิน' },
+        { status: 422 }
+      );
+    }
     const now = new Date();
 
     // Sprint 4B: resolve userId (id takes priority over email — cashSession.openedBy stores id)
@@ -333,6 +343,9 @@ export async function POST(request: NextRequest) {
               allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
               createdBy:      session?.user?.email ?? 'system',
               createdByName:  session?.user?.name ?? undefined,
+              // Route the ledger DEBIT to the bank account picked by the cashier
+              // (transfer/promptpay). null for cash → resolveMoneyAccount default.
+              receivingAccountId: receivingAccountId ?? undefined,
             });
             const payNum = bkResult.paymentNumber;
             const rcpNum = bkResult.receiptNumber;
@@ -441,6 +454,7 @@ export async function POST(request: NextRequest) {
               allocations:    [{ invoiceId: invResult.invoiceId, amount: depositAmount }],
               createdBy:      session?.user?.email ?? 'system',
               createdByName:  session?.user?.name ?? undefined,
+              receivingAccountId: receivingAccountId ?? undefined,
             });
             const payNum = depResult.paymentNumber;
             const rcpNum = depResult.receiptNumber;

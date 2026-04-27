@@ -46,6 +46,8 @@ const CheckoutSchema = z.object({
   badDebtNote:     z.string().max(500).optional(),
   // ── Optional: collect outstanding at checkout ──────────────────────────
   paymentMethod:   z.enum(['cash', 'transfer', 'credit_card']).optional(),
+  /** Bank account that received the transfer (when paymentMethod=transfer). */
+  receivingAccountId: z.string().min(1).optional(),
   // Sprint 4B: cashSessionId removed from schema — server resolves it from
   // the authenticated user's open shift via getActiveSessionForUser.
 }).refine(
@@ -80,7 +82,10 @@ export async function POST(request: Request) {
     );
   }
 
-  const { bookingId, notes, badDebt, badDebtNote, paymentMethod } = parsed.data;
+  const { bookingId, notes, badDebt, badDebtNote, paymentMethod, receivingAccountId } = parsed.data;
+  if (paymentMethod === 'transfer' && !receivingAccountId) {
+    return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
+  }
   const userId   = authSession.user.id ?? authSession.user.email ?? 'system';
 
   // Sprint 4B: cashSessionId is resolved server-side inside the transaction.
@@ -402,6 +407,7 @@ export async function POST(request: Request) {
             receivedBy:     userId,
             allocations:    [{ invoiceId: coResult.invoiceId, amount: coResult.grandTotal }],
             createdBy:      userId,
+            receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
           });
           coPayNum = coPaymentResult.paymentNumber;
           coRcpNum = coPaymentResult.receiptNumber;

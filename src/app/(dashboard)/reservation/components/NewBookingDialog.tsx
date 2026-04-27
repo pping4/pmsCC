@@ -9,6 +9,7 @@ import { useToast } from '@/components/ui';
 import { fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
+import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
 
 interface NewBookingDialogProps {
   isOpen: boolean;
@@ -70,6 +71,10 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
   // `receipt` populated. We surface it via ReceiptModal so the cashier can print
   // it immediately — same UX as paying at check-in / check-out.
   const [bookingReceipt, setBookingReceipt] = useState<ReceiptData | null>(null);
+
+  // Transfer / promptpay — receiving bank account. Auto-defaulted by the
+  // picker so most cashiers never see it; required by the API though.
+  const [receivingAccountId, setReceivingAccountId] = useState<string | undefined>();
 
   // ─── Guest ────────────────────────────────────────────────────────────────────
   const [selectedGuest, setSelectedGuest] = useState<GuestSearchResult | null>(null);
@@ -419,6 +424,13 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
     if (collectPayment && paymentType === 'deposit' && deposit <= 0) {
       toast.warning('กรุณาระบุจำนวนเงินมัดจำ'); return;
     }
+    if (collectPayment && paymentMethod === 'transfer' && !receivingAccountId) {
+      toast.warning('กรุณาเลือกบัญชีที่รับเงิน'); return;
+    }
+    if (collectPayment && paymentMethod === 'credit_card') {
+      toast.warning('บัตรเครดิตต้องระบุเครื่อง EDC — ใช้ฟอร์มเก็บเงินที่หน้า Guest Folio แทน');
+      return;
+    }
 
     setIsLoading(true);
     try {
@@ -437,6 +449,11 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
           notes: notes.trim() || null,
           ...(cityLedgerAccountId ? { cityLedgerAccountId } : {}),
           ...(collectPayment && !cityLedgerAccountId ? { paymentMethod, paymentType } : {}),
+          // Bank-transfer needs to tell the server which bank account
+          // received the money — without this the server uses the default
+          // BANK account in the chart of accounts.
+          ...(collectPayment && paymentMethod === 'transfer' && receivingAccountId
+            ? { receivingAccountId } : {}),
         }),
       });
       if (!r.ok) {
@@ -1063,6 +1080,28 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
                         </select>
                       </div>
                     </div>
+
+                    {/* Receiving-account picker for bank transfer.  Renders
+                        only when the chosen method needs it.  Auto-selects
+                        the default BANK account so most cashiers don't have
+                        to interact with this control. */}
+                    {paymentMethod === 'transfer' && (
+                      <div style={{ marginTop: 10 }}>
+                        <ReceivingAccountPicker
+                          receivingAccountId={receivingAccountId}
+                          onChange={setReceivingAccountId}
+                        />
+                      </div>
+                    )}
+                    {paymentMethod === 'credit_card' && (
+                      <div style={{
+                        marginTop: 10, padding: '8px 12px',
+                        backgroundColor: '#eff6ff', borderRadius: 6,
+                        fontSize: 12, color: '#1e40af',
+                      }}>
+                        ℹ️ บัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเก็บเงินเต็มที่หน้า Guest Folio แทน
+                      </div>
+                    )}
 
                     <div style={{
                       marginTop: 10, padding: '8px 12px',

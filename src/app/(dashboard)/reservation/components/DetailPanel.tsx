@@ -200,6 +200,12 @@ export default function DetailPanel({
   const [collectUpfront,  setCollectUpfront]  = useState<boolean>(false);
   const [upfrontMethod,   setUpfrontMethod]   = useState<string>('cash');
   const [cashSessionId,   setCashSessionId]   = useState<string | null>(null);
+  // Shared bank-account picker state for ANY transfer in the check-in flow
+  // (deposit, upfront).  Auto-defaulted by ReceivingAccountPicker.
+  const [checkinReceivingAccountId, setCheckinReceivingAccountId] = useState<string | undefined>();
+  // Same idea for the extend / checkout / checkout-collect flows below.
+  const [extendReceivingAccountId,  setExtendReceivingAccountId]  = useState<string | undefined>();
+  const [checkoutReceivingAccountId, setCheckoutReceivingAccountId] = useState<string | undefined>();
 
   // ── Check-out payment step ────────────────────────────────────────────────
   // 'idle'      → normal action buttons
@@ -627,6 +633,14 @@ export default function DetailPanel({
         payload.collectUpfront = true;
         payload.upfrontPaymentMethod = upfrontMethod;
       }
+      // Receipt-Standardization: when ANY of the check-in payment legs goes
+      // through a bank transfer, route the ledger DEBIT to the bank account
+      // the cashier picked.  Sent unconditionally — server ignores it for
+      // cash legs.
+      if ((depositMethod === 'transfer' || upfrontMethod === 'transfer')
+          && checkinReceivingAccountId) {
+        payload.receivingAccountId = checkinReceivingAccountId;
+      }
 
       const res = await fetch('/api/checkin', {
         method: 'POST',
@@ -676,6 +690,9 @@ export default function DetailPanel({
       if (extendCollectNow && extraDays * effectiveRate > 0) {
         // Sprint 4B: cashSessionId resolved server-side.
         payload.paymentMethod = extendPayMethod;
+        if (extendPayMethod === 'transfer' && extendReceivingAccountId) {
+          payload.receivingAccountId = extendReceivingAccountId;
+        }
       }
 
       const res = await fetch(`/api/bookings/${booking.id}/extend`, {
@@ -792,6 +809,9 @@ export default function DetailPanel({
       // Sprint 4B: cashSessionId is resolved server-side from the caller's shift.
       if (checkoutOutstanding > 0) {
         payload.paymentMethod = checkoutPayMethod;
+        if (checkoutPayMethod === 'transfer' && checkoutReceivingAccountId) {
+          payload.receivingAccountId = checkoutReceivingAccountId;
+        }
       }
 
       const res = await fetch('/api/checkout', {
@@ -1128,6 +1148,15 @@ export default function DetailPanel({
                               </button>
                             ))}
                           </div>
+                          {upfrontMethod === 'transfer' && (
+                            <div style={{ marginTop: 8 }}>
+                              <ReceivingAccountPicker
+                                receivingAccountId={checkinReceivingAccountId}
+                                onChange={setCheckinReceivingAccountId}
+                                label="บัญชีที่รับเงิน (โอน)"
+                              />
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1181,23 +1210,34 @@ export default function DetailPanel({
                       />
                     </div>
                     {depositAmount > 0 && (
-                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        {PAYMENT_METHODS.map(pm => (
-                          <button
-                            key={pm.value}
-                            onClick={() => setDepositMethod(pm.value)}
-                            style={{
-                              padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500,
-                              border: `1.5px solid ${depositMethod === pm.value ? '#16a34a' : '#e5e7eb'}`,
-                              background: depositMethod === pm.value ? '#dcfce7' : '#fff',
-                              color: depositMethod === pm.value ? '#16a34a' : '#6b7280',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            {pm.label}
-                          </button>
-                        ))}
-                      </div>
+                      <>
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          {PAYMENT_METHODS.map(pm => (
+                            <button
+                              key={pm.value}
+                              onClick={() => setDepositMethod(pm.value)}
+                              style={{
+                                padding: '5px 12px', borderRadius: 6, fontSize: 12, fontWeight: 500,
+                                border: `1.5px solid ${depositMethod === pm.value ? '#16a34a' : '#e5e7eb'}`,
+                                background: depositMethod === pm.value ? '#dcfce7' : '#fff',
+                                color: depositMethod === pm.value ? '#16a34a' : '#6b7280',
+                                cursor: 'pointer',
+                              }}
+                            >
+                              {pm.label}
+                            </button>
+                          ))}
+                        </div>
+                        {depositMethod === 'transfer' && (
+                          <div style={{ marginTop: 8 }}>
+                            <ReceivingAccountPicker
+                              receivingAccountId={checkinReceivingAccountId}
+                              onChange={setCheckinReceivingAccountId}
+                              label="บัญชีที่รับเงินมัดจำ"
+                            />
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
 
@@ -1390,6 +1430,15 @@ export default function DetailPanel({
                           </button>
                         ))}
                       </div>
+                      {checkoutPayMethod === 'transfer' && (
+                        <div style={{ marginTop: 10 }}>
+                          <ReceivingAccountPicker
+                            receivingAccountId={checkoutReceivingAccountId}
+                            onChange={setCheckoutReceivingAccountId}
+                            label="บัญชีที่รับเงิน (โอน)"
+                          />
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div style={{ marginBottom: 16, padding: '12px 14px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #86efac', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -1729,6 +1778,15 @@ export default function DetailPanel({
                             {extendPayMethod === 'cash' && (
                               <div style={{ marginTop: 8, fontSize: 11, color: extendCashSessId ? '#16a34a' : '#dc2626' }}>
                                 {extendCashSessId ? `✅ กะแคชเชียร์: ${extendCashSessId.slice(-6)}` : '⚠️ ไม่มีกะแคชเชียร์ที่เปิดอยู่'}
+                              </div>
+                            )}
+                            {extendPayMethod === 'transfer' && (
+                              <div style={{ marginTop: 10 }}>
+                                <ReceivingAccountPicker
+                                  receivingAccountId={extendReceivingAccountId}
+                                  onChange={setExtendReceivingAccountId}
+                                  label="บัญชีที่รับเงิน (โอน)"
+                                />
                               </div>
                             )}
                           </div>

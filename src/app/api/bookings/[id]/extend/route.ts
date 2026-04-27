@@ -46,6 +46,8 @@ const ExtendSchema = z.object({
   /** Whether to collect payment right now */
   collectNow:    z.boolean().default(false),
   paymentMethod: z.enum(['cash', 'transfer', 'credit_card']).optional(),
+  /** Bank account that received the transfer (when paymentMethod=transfer). */
+  receivingAccountId: z.string().min(1).optional(),
   notes:         z.string().max(500).optional(),
 });
 
@@ -69,7 +71,10 @@ export async function POST(
     );
   }
 
-  const { newCheckOut: newCheckOutStr, newRate, collectNow, paymentMethod, notes } = parsed.data;
+  const { newCheckOut: newCheckOutStr, newRate, collectNow, paymentMethod, receivingAccountId, notes } = parsed.data;
+  if (collectNow && (paymentMethod === 'transfer') && !receivingAccountId) {
+    return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
+  }
 
   // Validate payment info when collecting now
   if (collectNow && !paymentMethod) {
@@ -271,6 +276,7 @@ export async function POST(
             allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
             createdBy:      userId,
             createdByName:  userName ?? undefined,
+            receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
           });
           paymentId = result.id;
 

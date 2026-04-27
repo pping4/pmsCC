@@ -308,9 +308,15 @@ export async function postDepositReceived(
     amount: number;
     depositId: string;
     createdBy: string;
+    /**
+     * Cashier-picked bank account when the deposit comes via transfer / qr.
+     * Routes the DR side to that specific FinancialAccount instead of the
+     * system default BANK account.
+     */
+    moneyAccountId?: string | null;
   }
 ) {
-  const money = await resolveMoneyAccount(tx, opts.paymentMethod);
+  const money = await resolveMoneyAccount(tx, opts.paymentMethod, opts.moneyAccountId);
 
   await postLedgerPair(tx, {
     debitAccount: money.legacy, debitAccountId: money.accountId,

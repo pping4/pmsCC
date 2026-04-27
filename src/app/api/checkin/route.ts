@@ -43,6 +43,10 @@ const CheckinSchema = z.object({
   // Upfront stay payment
   collectUpfront:        z.boolean().optional().default(false),
   upfrontPaymentMethod:  z.enum(['cash', 'transfer', 'credit_card', 'promptpay', 'ota_collect']).optional(),
+  // Bank account that received the transfer/QR (shared by deposit + upfront
+  // legs).  Required by the server when ANY transfer is involved; otherwise
+  // optional.  Validation per-leg happens inside payment.service.
+  receivingAccountId:    z.string().min(1).optional(),
   // Sprint 4B: cashSessionId / depositCashSessionId are NOT accepted from the
   // client. For cash payments, the server looks up the caller's open shift.
 });
@@ -76,7 +80,18 @@ export async function POST(request: Request) {
     depositReferenceNo,
     collectUpfront,
     upfrontPaymentMethod,
+    receivingAccountId,
   } = parsed.data;
+
+  // Server-side guard: every transfer leg needs a receivingAccountId so the
+  // ledger DEBIT lands on the right bank account.  The client picker
+  // auto-defaults this so most cashiers never trigger this branch.
+  const needsReceiving =
+    depositPaymentMethod === 'transfer' || depositPaymentMethod === 'promptpay' ||
+    upfrontPaymentMethod === 'transfer' || upfrontPaymentMethod === 'promptpay';
+  if (needsReceiving && !receivingAccountId) {
+    return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
+  }
 
   // ── Fetch booking ─────────────────────────────────────────────────────────
   // NOTE: Fetch booking FIRST so double-payment guard can run before any other
@@ -358,6 +373,10 @@ export async function POST(request: Request) {
         notes:         `เงินมัดจำ ห้อง ${booking.room.number}`,
         createdBy:     userId,
         createdByName: userName,
+        // Route ledger DEBIT to the cashier's chosen bank account when this
+        // is a transfer. Null for cash → resolveMoneyAccount picks default.
+        receivingAccountId: depositPaymentMethod === 'transfer' || depositPaymentMethod === 'promptpay'
+          ? receivingAccountId : undefined,
       });
       securityDepositId = depResult.depositId;
 
@@ -428,6 +447,8 @@ export async function POST(request: Request) {
         allocations:    [{ invoiceId: stayInvoiceId, amount: ciCollectedAmount }],
         createdBy:      userId,
         createdByName:  userName ?? undefined,
+        receivingAccountId: upfrontPaymentMethod === 'transfer' || upfrontPaymentMethod === 'promptpay'
+          ? receivingAccountId : undefined,
       });
       const paymentNumber = upfrontResult.paymentNumber;
       const receiptNumber = upfrontResult.receiptNumber;
