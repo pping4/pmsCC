@@ -320,6 +320,90 @@ async function main() {
     expect(cashSum === 5000, `cash payments for this booking total ฿5,000 (got ฿${cashSum})`);
     console.log('');
 
+    // ─── Scenario 4.5: TRANSFER routes ledger DEBIT to receivingAccountId ─
+    // Critical bug from real cashier traffic: payment.service was calling
+    // postPaymentReceived without forwarding payment.receivingAccountId, so
+    // every transfer DR'd the system-default BANK account instead of the
+    // one the cashier actually selected. Result: /finance/money-overview
+    // showed ฿0 in the chosen bank, the real default account was overstated.
+    console.log('4️⃣.5 Transfer payment hits receivingAccountId, NOT default BANK');
+    {
+      // Pick TWO BANK accounts, force the non-default one as receiver, then
+      // verify the ledger entry was DEBITed against THAT account, not default.
+      const banks = await prisma.financialAccount.findMany({
+        where: { isActive: true, subKind: 'BANK' },
+        orderBy: { isDefault: 'desc' },
+        select: { id: true, code: true, isDefault: true },
+        take: 2,
+      });
+      if (banks.length < 2) {
+        console.log('    ⚠  need 2+ BANK accounts to test routing — skipped');
+      } else {
+        const target = banks.find(b => !b.isDefault) ?? banks[1]; // non-default
+        let xferPaymentId = '';
+
+        await prisma.$transaction(async (tx) => {
+          // Make a tiny stand-alone invoice to pay against
+          const sessionId = await ensureOpenSession(tx, user.id);
+
+          // We'll reuse the booking from scenario 1+2; add a fresh charge.
+          const folio = await getFolioByBookingId(tx, bookingId);
+          if (!folio) throw new Error('Scenario 4.5: folio gone');
+
+          await addCharge(tx, {
+            folioId:    folio.folioId,
+            chargeType: 'EXTRA_SERVICE',
+            description: 'Transfer-routing test charge',
+            amount:     500,
+            quantity:   1,
+            unitPrice:  500,
+            createdBy:  user.id,
+          });
+          const inv = await createInvoiceFromFolio(tx, {
+            folioId:     folio.folioId,
+            guestId:     guest.id,
+            bookingId,
+            invoiceType: 'GN',
+            dueDate:     new Date(Date.now() + 86400000),
+            createdBy:   user.id,
+          });
+          if (!inv) throw new Error('Scenario 4.5: invoice null');
+          createdEntities.invoiceIds.push(inv.invoiceId);
+
+          const pay = await createPayment(tx, {
+            idempotencyKey: `e2e-4.5-${bookingId}`,
+            guestId:        guest.id,
+            bookingId,
+            amount:         500,
+            paymentMethod:  'transfer',
+            paymentDate:    new Date(),
+            cashSessionId:  sessionId,
+            receivedBy:     user.id,
+            allocations:    [{ invoiceId: inv.invoiceId, amount: 500 }],
+            createdBy:      user.id,
+            // The bug: this used to be ignored. Now it must propagate to the
+            // ledger DEBIT side via postPaymentReceived.moneyAccountId.
+            receivingAccountId: target.id,
+            slipRefNo:          'E2E-TEST-' + Date.now(),
+          });
+          xferPaymentId = pay.id;
+          createdEntities.paymentIds.push(pay.id);
+        });
+
+        // Inspect: the DEBIT for THIS payment must hit `target.id`.
+        const drEntries = await prisma.ledgerEntry.findMany({
+          where: { referenceType: 'Payment', referenceId: xferPaymentId, type: 'DEBIT' },
+          select: { financialAccountId: true, amount: true, account: true },
+        });
+        expect(drEntries.length === 1, `transfer posts exactly 1 DEBIT (got ${drEntries.length})`);
+        expect(drEntries[0]?.financialAccountId === target.id,
+          `DEBIT.financialAccountId = chosen receiver ${target.code}` +
+          ` (got ${drEntries[0]?.financialAccountId === target.id ? 'correct' : 'WRONG — defaulted'})`);
+        expect(Number(drEntries[0]?.amount) === 500, `DEBIT amount = ฿500`);
+      }
+    }
+    console.log('');
+
     // ─── Scenario 5: Bank account auto-default lookup ─────────────────────
     console.log('5️⃣   ReceivingAccountPicker default lookup');
     const banks = await prisma.financialAccount.findMany({

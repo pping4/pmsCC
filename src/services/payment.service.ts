@@ -298,6 +298,13 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
     creditSide: 'AR',
     feeAmount: input.feeAmount ?? null,
     feeAccountId: input.feeAccountId ?? null,
+    // Critical: pass the cashier's chosen receivingAccountId (transfer / qr /
+    // promptpay) through to the ledger so the DR side hits THE bank account
+    // the money actually arrived in -- not the system default. Without this,
+    // /finance/money-overview shows ฿0 in the chosen account and the cashier
+    // shift "โอน/การ์ด/อื่นๆ" KPI under-counts. Cash payments leave this
+    // null; resolveMoneyAccount falls back to the cash-box / system default.
+    moneyAccountId: input.receivingAccountId ?? null,
   });
 
   // Step 5: Post contra-revenue for discounts
@@ -461,6 +468,11 @@ export async function voidPayment(tx: TxClient, input: VoidPaymentInput) {
     creditSide: 'AR',
     feeAmount: payment.feeAmount != null ? Number(payment.feeAmount) : null,
     feeAccountId: payment.feeAccountId ?? null,
+    // Mirror the receiving-account chosen on the original receive so the
+    // CR side hits the same bank account the money sat in. Void is a pure
+    // reversal -- if we left moneyAccountId null, we'd CR the system
+    // default and leave the actual receiving account permanently overstated.
+    moneyAccountId: payment.receivingAccountId ?? null,
   });
 
   // Step 6: Audit log
