@@ -111,22 +111,53 @@ async function main() {
     }
   }
 
-  // 2) Detach `cash_boxes.current_session_id` FK before truncating
-  // cash_sessions. Otherwise TRUNCATE ... CASCADE would cascade through that
-  // FK and wipe out the CashBox master records (configuration, NOT test data).
-  console.log('\n🔓  Detaching cash_boxes.current_session_id FK…');
-  await prisma.$executeRawUnsafe(
-    `UPDATE "cash_boxes" SET "current_session_id" = NULL WHERE "current_session_id" IS NOT NULL`,
-  );
+  // 2) Snapshot cash_boxes config so we can restore after TRUNCATE
+  // PostgreSQL's TRUNCATE ... CASCADE walks every FK that REFERENCES the
+  // truncated table -- and since cash_boxes.current_session_id points at
+  // cash_sessions, truncating cash_sessions wipes cash_boxes too,
+  // regardless of whether the FK column is currently null.  An UPDATE
+  // before the TRUNCATE doesn't help: the cascade is decided from the
+  // schema, not from the data.  So we snapshot first and re-insert after.
+  const cashBoxSnapshot = await prisma.cashBox.findMany({
+    select: {
+      id: true, code: true, name: true, location: true, displayOrder: true,
+      financialAccountId: true, isActive: true, notes: true,
+      createdAt: true, updatedAt: true,
+    },
+  });
 
-  // 3) Truncate everything in a single statement
-  // CASCADE handles any FK dependency we missed (already detached the
-  // CashBox → CashSession one above).
+  // 3) Truncate every transactional table.  CASCADE handles any FK we
+  // didn't list explicitly (and as noted above, it WILL cascade through
+  // cash_sessions to cash_boxes -- restored from the snapshot below).
   console.log('🗑   Truncating…');
   const tableList = TABLES_TO_CLEAR.map((t) => `"${t}"`).join(', ');
   await prisma.$executeRawUnsafe(
     `TRUNCATE TABLE ${tableList} RESTART IDENTITY CASCADE`,
   );
+
+  // 3a) Restore cash_boxes from the snapshot taken before truncate.
+  // current_session_id is intentionally null -- the link is rebuilt the
+  // next time a cashier opens a shift.
+  if (cashBoxSnapshot.length > 0) {
+    console.log(`🔁  Restoring ${cashBoxSnapshot.length} cash box(es)…`);
+    for (const b of cashBoxSnapshot) {
+      await prisma.cashBox.create({
+        data: {
+          id:                 b.id,
+          code:               b.code,
+          name:               b.name,
+          location:           b.location,
+          displayOrder:       b.displayOrder,
+          financialAccountId: b.financialAccountId,
+          isActive:           b.isActive,
+          notes:              b.notes,
+          createdAt:          b.createdAt,
+          updatedAt:          b.updatedAt,
+          currentSessionId:   null,
+        },
+      });
+    }
+  }
 
   // 2.5) Reset rooms whose status was set by a now-deleted booking. Without
   // this, rooms stay stuck at "occupied" / "checkout" / "reserved" and any

@@ -74,6 +74,27 @@ interface SessionSummary {
   breakdown:            Record<string, number>;
 }
 
+// Row shape for the "Recent Payments" data table on the shift dashboard.
+// Mirrors GET /api/cash-sessions/[id]/transactions.
+interface ShiftTransaction {
+  id:                    string;
+  paymentNumber:         string;
+  receiptNumber:         string;
+  paymentDate:           string;     // ISO
+  amount:                number;
+  paymentMethod:         string;
+  status:                'ACTIVE' | 'VOIDED';
+  voidReason:            string | null;
+  voidedAt:              string | null;
+  bookingId:             string | null;
+  bookingNumber:         string;
+  roomNumber:            string;
+  guestName:             string;
+  invoiceNumber:         string;
+  receivingAccountCode:  string | null;
+  receivingAccountName:  string | null;
+}
+
 interface SessionHistoryItem {
   id:                   string;
   openedByName:         string | null;
@@ -151,6 +172,21 @@ export default function CashierPage() {
   const { data: perms } = useEffectivePermissions();
   const canHandover = can(perms, 'cashier.handover');
   const canClose    = can(perms, 'cashier.close_shift');
+  // The void endpoint enforces admin/manager server-side. Mirror that here so
+  // we don't tease cashiers with a button they can't use. Using rbac
+  // permission keys would be more granular but this matches the actual
+  // server policy in /api/payments/[id]/void.
+  const userRole    = (authSession?.user as { role?: string } | undefined)?.role;
+  const canVoid     = userRole === 'admin' || userRole === 'manager';
+
+  // Recent Payments table state
+  const [transactions, setTransactions] = useState<ShiftTransaction[]>([]);
+  const [txLoading,    setTxLoading]    = useState(false);
+
+  // Void dialog state
+  const [voidTarget,   setVoidTarget]   = useState<ShiftTransaction | null>(null);
+  const [voidReason,   setVoidReason]   = useState('');
+  const [voidSubmit,   setVoidSubmit]   = useState(false);
 
   // Close-shift result (shown after API call)
   const [closeResult, setCloseResult] = useState<{
@@ -179,6 +215,55 @@ export default function CashierPage() {
       toast.error('โหลดข้อมูลกะไม่สำเร็จ', e instanceof Error ? e.message : undefined);
     }
   }, [toast]);
+
+  // ── Fetch transactions for the current session ────────────────────────────
+  const fetchTransactions = useCallback(async (sessionId: string) => {
+    setTxLoading(true);
+    try {
+      const res = await fetch(`/api/cash-sessions/${sessionId}/transactions`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { rows: ShiftTransaction[] };
+      setTransactions(data.rows ?? []);
+    } catch (e) {
+      // Non-fatal — leave the list empty rather than blocking the whole page.
+      console.warn('Failed to load shift transactions:', e);
+      setTransactions([]);
+    } finally {
+      setTxLoading(false);
+    }
+  }, []);
+
+  // ── Void a payment (manager/admin only) ───────────────────────────────────
+  const handleVoid = async () => {
+    if (!voidTarget || voidSubmit) return;
+    if (voidReason.trim().length < 5) {
+      toast.error('กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
+      return;
+    }
+    setVoidSubmit(true);
+    try {
+      const res = await fetch(`/api/payments/${voidTarget.id}/void`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ voidReason: voidReason.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.error ?? `HTTP ${res.status}`);
+      }
+      toast.success('Void สำเร็จ', `ใบเสร็จ ${voidTarget.receiptNumber} ถูกยกเลิกแล้ว`);
+      setVoidTarget(null);
+      setVoidReason('');
+      // Refresh both KPI breakdown and transactions list
+      await fetchCurrentSession();
+      if (currentSession) await fetchTransactions(currentSession.id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Void ไม่สำเร็จ';
+      toast.error('Void ไม่สำเร็จ', msg);
+    } finally {
+      setVoidSubmit(false);
+    }
+  };
 
   // ── Fetch available counters (state-1 picker) ─────────────────────────────
   const fetchAvailableBoxes = useCallback(async () => {
@@ -214,6 +299,16 @@ export default function CashierPage() {
       setLoading(false);
     })();
   }, [fetchCurrentSession, fetchHistory, fetchAvailableBoxes]);
+
+  // Whenever the active session changes (open / close / handover), refresh the
+  // "Recent Payments" table.  Empty when no session is open.
+  useEffect(() => {
+    if (currentSession?.id) {
+      void fetchTransactions(currentSession.id);
+    } else {
+      setTransactions([]);
+    }
+  }, [currentSession?.id, fetchTransactions]);
 
   // ── Open session (counter-centric) ─────────────────────────────────────────
   const handleOpen = async () => {
@@ -274,6 +369,129 @@ export default function CashierPage() {
     await fetchCurrentSession();
     await Promise.all([fetchHistory(), fetchAvailableBoxes()]);
   };
+
+  // ─── DataTable columns (Recent Payments in current shift) ─────────────────
+  // Declared with the rest of the hooks so hook order is stable across the
+  // "no session" / "session open" branches.
+  type TxColKey =
+    | 'paymentDate' | 'receiptNumber' | 'guestName' | 'roomNumber'
+    | 'invoiceNumber' | 'paymentMethod' | 'receivingAccount'
+    | 'amount' | 'status' | 'voidReason' | 'actions';
+  const txColumns: ColDef<ShiftTransaction, TxColKey>[] = useMemo(() => [
+    {
+      key: 'paymentDate', label: 'เวลา', minW: 140,
+      getValue: r => r.paymentDate,
+      getLabel: r => fmtDateTime(r.paymentDate),
+      render:   r => (
+        <span style={{ color: 'var(--text-primary)', fontFamily: 'monospace', fontSize: 12 }}>
+          {fmtDateTime(r.paymentDate)}
+        </span>
+      ),
+    },
+    {
+      key: 'receiptNumber', label: 'เลขที่ใบเสร็จ', minW: 170,
+      getValue: r => r.receiptNumber,
+      render:   r => (
+        <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-primary)' }}>
+          {r.receiptNumber}
+        </span>
+      ),
+    },
+    {
+      key: 'guestName', label: 'ผู้เข้าพัก', minW: 160,
+      getValue: r => r.guestName || '—',
+      render:   r => <span style={{ color: 'var(--text-primary)' }}>{r.guestName || '—'}</span>,
+    },
+    {
+      key: 'roomNumber', label: 'ห้อง', align: 'center', minW: 70,
+      getValue: r => r.roomNumber || '—',
+      render:   r => <span style={{ color: 'var(--text-secondary)' }}>{r.roomNumber || '—'}</span>,
+    },
+    {
+      key: 'invoiceNumber', label: 'ใบแจ้งหนี้', minW: 170,
+      getValue: r => r.invoiceNumber || '—',
+      render:   r => (
+        <span style={{ fontFamily: 'monospace', fontSize: 12, color: 'var(--text-secondary)' }}>
+          {r.invoiceNumber || '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'paymentMethod', label: 'ช่องทาง', align: 'center', minW: 100,
+      getValue: r => r.paymentMethod,
+      getLabel: r => PM_LABEL[r.paymentMethod] ?? r.paymentMethod,
+      render:   r => (
+        <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+          {PM_LABEL[r.paymentMethod] ?? r.paymentMethod}
+        </span>
+      ),
+    },
+    {
+      key: 'receivingAccount', label: 'บัญชีรับเงิน', minW: 160,
+      getValue: r => r.receivingAccountCode ?? '',
+      getLabel: r => r.receivingAccountName ?? r.receivingAccountCode ?? '—',
+      render:   r => r.receivingAccountCode
+        ? (
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            {r.receivingAccountCode} {r.receivingAccountName ? `· ${r.receivingAccountName}` : ''}
+          </span>
+        )
+        : <span style={{ color: 'var(--text-faint)' }}>—</span>,
+    },
+    {
+      key: 'amount', label: 'ยอด', align: 'right', minW: 110,
+      // Use sortable padded key, but display formatted Baht.
+      getValue: r => String(Math.round(r.amount * 100)).padStart(12, '0'),
+      getLabel: r => `฿${fmtBaht(r.amount)}`,
+      aggregate: 'sum',
+      aggValue:  r => (r.status === 'ACTIVE' ? r.amount : 0),
+      render:    r => (
+        <span style={{
+          fontFamily: 'monospace',
+          color: r.status === 'VOIDED' ? 'var(--text-faint)' : 'var(--text-primary)',
+          textDecoration: r.status === 'VOIDED' ? 'line-through' : undefined,
+        }}>
+          ฿{fmtBaht(r.amount)}
+        </span>
+      ),
+    },
+    {
+      key: 'status', label: 'สถานะ', align: 'center', minW: 90,
+      getValue: r => r.status,
+      getLabel: r => (r.status === 'ACTIVE' ? 'ใช้งาน' : 'ยกเลิก'),
+      render:   r => r.status === 'ACTIVE'
+        ? <span style={{ display: 'inline-flex', fontSize: 11, fontWeight: 500, color: '#15803d', background: '#dcfce7', padding: '2px 10px', borderRadius: 999 }}>✓ ใช้งาน</span>
+        : <span style={{ display: 'inline-flex', fontSize: 11, fontWeight: 500, color: '#b91c1c', background: '#fee2e2', padding: '2px 10px', borderRadius: 999 }}>✗ ยกเลิก</span>,
+    },
+    {
+      key: 'voidReason', label: 'เหตุผล void', minW: 160,
+      getValue: r => r.voidReason ?? '',
+      render:   r => r.voidReason
+        ? <span style={{ fontSize: 11, color: '#b91c1c', fontStyle: 'italic' }}>{r.voidReason}</span>
+        : <span style={{ color: 'var(--text-faint)' }}>—</span>,
+    },
+    {
+      key: 'actions', label: '', align: 'center', minW: 100, noFilter: true,
+      getValue: () => '',
+      render: r => r.status === 'ACTIVE' && canVoid
+        ? (
+          <button
+            type="button"
+            onClick={() => { setVoidTarget(r); setVoidReason(''); }}
+            className="text-xs px-3 py-1 rounded border transition"
+            style={{
+              borderColor: '#fca5a5',
+              color: '#b91c1c',
+              background: '#fef2f2',
+              cursor: 'pointer',
+            }}
+          >
+            ✗ ยกเลิก
+          </button>
+        )
+        : <span style={{ color: 'var(--text-faint)' }}>—</span>,
+    },
+  ], [canVoid]);
 
   // ─── DataTable columns (session history) — declared BEFORE any conditional
   //      early return so hook order stays stable across renders. ──────────────
@@ -559,6 +777,48 @@ export default function CashierPage() {
             </div>
           )}
 
+          {/* Recent Payments — full data table with per-row Void action.
+              The whole point of this section is "หาบิลที่จะ void ได้เร็ว" —
+              cashier opens this page, sees the receipts they've taken, and
+              can void without first hunting down the guest in /reservation. */}
+          <div className="bg-white rounded-lg p-4 shadow-sm" style={{ background: 'var(--surface-card)' }}>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
+                รายการรับเงินในกะนี้
+              </p>
+              <button
+                type="button"
+                onClick={() => currentSession && void fetchTransactions(currentSession.id)}
+                disabled={txLoading}
+                className="text-xs px-2 py-1 rounded border hover:bg-gray-50 disabled:opacity-50"
+                style={{ borderColor: 'var(--border-default)', color: 'var(--text-secondary)' }}
+              >
+                {txLoading ? 'กำลังโหลด…' : '🔄 รีเฟรช'}
+              </button>
+            </div>
+            <DataTable<ShiftTransaction>
+              rows={transactions}
+              rowKey={(r) => r.id}
+              tableKey="cashier-shift-transactions"
+              defaultSort={{ col: 'paymentDate', dir: 'desc' }}
+              emptyText={txLoading ? 'กำลังโหลด…' : 'ยังไม่มีรายการรับเงินในกะนี้'}
+              summaryLabel={(filtered, total) => (
+                <span style={{ color: 'var(--text-secondary)' }}>
+                  💳 {filtered}{filtered !== total ? ` / ${total}` : ''} รายการ
+                </span>
+              )}
+              columns={txColumns}
+              dateRange={{
+                col:     'paymentDate',
+                getDate: (r) => new Date(r.paymentDate),
+                label:   'วันที่รับเงิน',
+              }}
+              groupByCols={['paymentMethod', 'status']}
+              rowHighlight={(r) => (r.status === 'VOIDED' ? 'rgba(239,68,68,0.06)' : undefined)}
+              exportFilename="cashier-shift-transactions"
+            />
+          </div>
+
           {/* Action bar — Handover / Close */}
           <div className="border-t border-green-200 pt-4 flex flex-wrap gap-2">
             {canHandover && (
@@ -711,6 +971,94 @@ export default function CashierPage() {
             }}
           />
         </>
+      )}
+
+      {/* Void Payment confirm dialog. Reason >=5 chars enforced both client
+          and server side; the server also re-checks admin/manager role. */}
+      {voidTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1100,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)' }}
+            onClick={() => !voidSubmit && setVoidTarget(null)}
+          />
+          <div
+            style={{
+              position: 'relative', zIndex: 1, width: '100%', maxWidth: 480,
+              background: 'var(--surface-card)', borderRadius: 12, padding: 20,
+              boxShadow: '0 20px 25px rgba(0,0,0,0.15)',
+            }}
+            className="pms-card"
+          >
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
+              ✗ ยืนยันการยกเลิกใบเสร็จ
+            </h3>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
+              ใบเสร็จที่ถูก void จะคืนยอดที่ allocate ไว้ให้ใบแจ้งหนี้และกลับ ledger
+              อัตโนมัติ — การกระทำนี้ไม่สามารถย้อนกลับได้
+            </p>
+            <div style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 12 }}>
+              <div><strong>ใบเสร็จ:</strong> <span style={{ fontFamily: 'monospace' }}>{voidTarget.receiptNumber}</span></div>
+              <div><strong>การชำระ:</strong> <span style={{ fontFamily: 'monospace' }}>{voidTarget.paymentNumber}</span></div>
+              <div><strong>ผู้เข้าพัก:</strong> {voidTarget.guestName || '—'}{voidTarget.roomNumber ? ` · ห้อง ${voidTarget.roomNumber}` : ''}</div>
+              <div><strong>ยอด:</strong> ฿{fmtBaht(voidTarget.amount)} ({PM_LABEL[voidTarget.paymentMethod] ?? voidTarget.paymentMethod})</div>
+            </div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4, color: 'var(--text-primary)' }}>
+              เหตุผลในการยกเลิก <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <textarea
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              placeholder="เช่น ลูกค้ายกเลิกการชำระ, ออกใบเสร็จซ้ำ, รับเงินผิดยอด …"
+              rows={3}
+              disabled={voidSubmit}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)',
+                fontSize: 13, fontFamily: 'inherit',
+                background: 'var(--surface-card)', color: 'var(--text-primary)',
+              }}
+            />
+            <p style={{ fontSize: 11, color: 'var(--text-faint)', marginTop: 4 }}>
+              ต้องระบุอย่างน้อย 5 ตัวอักษร ({voidReason.trim().length}/5)
+            </p>
+            <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+              <button
+                type="button"
+                onClick={() => { setVoidTarget(null); setVoidReason(''); }}
+                disabled={voidSubmit}
+                style={{
+                  flex: 1, padding: '8px', borderRadius: 6,
+                  border: '1px solid var(--border-default)',
+                  background: 'var(--surface-card)', color: 'var(--text-primary)',
+                  fontSize: 13, fontWeight: 500,
+                  cursor: voidSubmit ? 'not-allowed' : 'pointer',
+                }}
+              >
+                ปิด
+              </button>
+              <button
+                type="button"
+                onClick={handleVoid}
+                disabled={voidSubmit || voidReason.trim().length < 5}
+                style={{
+                  flex: 2, padding: '8px', borderRadius: 6, border: 'none',
+                  background: (voidSubmit || voidReason.trim().length < 5) ? '#fca5a5' : '#dc2626',
+                  color: '#fff', fontSize: 13, fontWeight: 700,
+                  cursor: (voidSubmit || voidReason.trim().length < 5) ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {voidSubmit ? '⏳ กำลังยกเลิก…' : '✗ ยืนยันยกเลิก'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
