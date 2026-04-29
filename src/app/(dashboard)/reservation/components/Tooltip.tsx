@@ -29,10 +29,20 @@ export default function Tooltip({ data, divRef }: TooltipProps) {
   const unit   = booking.bookingType === 'daily' ? 'คืน' : 'เดือน';
 
   // ─── Payment math ───────────────────────────────────────────────────────────
+  // expectedTotal + totalPaid come from the Folio (sum of FolioLineItem and
+  // active payments respectively) — authoritative even after drag-resize,
+  // unlike `booking.rate * nights` which double-counts because drag-resize
+  // stores rate as cumulative, not per-night.
   const expected    = booking.expectedTotal || 0;
   const paid        = booking.totalPaid     || 0;
   const outstanding = Math.max(0, expected - paid);
   const paidPct     = expected > 0 ? Math.min(100, Math.round((paid / expected) * 100)) : 0;
+  // Show derived per-night rate from the authoritative total ÷ nights so the
+  // popup never displays the cumulative-rate ghost from booking.rate.
+  const perNightFromFolio =
+    booking.bookingType === 'daily' && nights > 0 && expected > 0
+      ? expected / nights
+      : Number(booking.rate) || 0;
 
   const PAYMENT_COLOR: Record<string, { bg: string; label: string }> = {
     pending:      { bg: '#f59e0b', label: 'รอชำระ' },
@@ -132,7 +142,7 @@ export default function Tooltip({ data, divRef }: TooltipProps) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', fontSize: 11 }}>
             <span style={{ color: '#94a3b8' }}>
-              ราคา ฿{fmtBaht(booking.rate)}/{unit}
+              ราคา ฿{fmtBaht(perNightFromFolio)}/{unit}
               {booking.deposit > 0 && ` · มัดจำ ฿${fmtBaht(booking.deposit)}`}
             </span>
             {outstanding > 0 ? (

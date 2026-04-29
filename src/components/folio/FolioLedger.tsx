@@ -20,6 +20,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 import { useToast, ConfirmDialog } from '@/components/ui';
+import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -176,6 +177,57 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
   const [refundTarget, setRefundTarget] = useState<FolioPayment | null>(null);
   const [refunding, setRefunding] = useState(false);
 
+  // ─── Quick-pay (issue invoice for UNBILLED + collect) state ──────────────
+  // Lets the cashier collect outstanding balance directly from the folio
+  // page -- without this, the "ยังไม่ออกบิล" warning was a dead end (you
+  // had to wait for checkout). The pay endpoint allocates to existing
+  // unpaid invoices first, then falls back to creating a new one from
+  // UNBILLED line items, so this single button works for every shape of
+  // outstanding balance.
+  const [payOpen,        setPayOpen]        = useState(false);
+  const [payMethod,      setPayMethod]      = useState<'cash' | 'transfer' | 'credit_card'>('cash');
+  const [payRecvAccount, setPayRecvAccount] = useState<string | undefined>();
+  const [paySubmitting,  setPaySubmitting]  = useState(false);
+
+  const handleQuickPay = useCallback(async () => {
+    if (!folio || paySubmitting) return;
+    if (payMethod === 'transfer' && !payRecvAccount) {
+      toast.error('กรุณาเลือกบัญชีที่รับเงิน'); return;
+    }
+    if (payMethod === 'credit_card') {
+      toast.error('บัตรเครดิตต้องระบุเครื่อง EDC — ใช้หน้า Guest Folio ของผู้เข้าพักหรือ DetailPanel แทน');
+      return;
+    }
+    setPaySubmitting(true);
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}/pay`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount:        Number(folio.balance),
+          paymentMethod: payMethod,
+          ...(payMethod === 'transfer' && payRecvAccount
+              ? { receivingAccountId: payRecvAccount } : {}),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.success === false) {
+        throw new Error(data?.error ?? `HTTP ${res.status}`);
+      }
+      toast.success('รับชำระสำเร็จ', `ใบเสร็จ ${data.receipt?.receiptNumber ?? '-'} · ฿${fmtBaht(Number(folio.balance))}`);
+      setPayOpen(false);
+      setPayMethod('cash');
+      setPayRecvAccount(undefined);
+      load();
+      onRefresh?.();
+    } catch (e) {
+      toast.error('รับชำระไม่สำเร็จ', e instanceof Error ? e.message : undefined);
+    } finally {
+      setPaySubmitting(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [folio, payMethod, payRecvAccount, paySubmitting, bookingId, onRefresh]);
+
   const handleRefund = useCallback(async () => {
     if (!refundTarget || refunding) return;
     setRefunding(true);
@@ -318,10 +370,100 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
       {unbilledTotal > 0 && (
         <div className="flex items-center gap-2 rounded-lg bg-yellow-50 border border-yellow-300 px-3 py-2 text-sm text-yellow-800">
           <span>⚠️</span>
-          <span>
+          <span className="flex-1">
             มีรายการ <strong>ยังไม่ออกบิล</strong> มูลค่า{' '}
             <strong>฿{fmtBaht(unbilledTotal)}</strong> — ต้องออก Invoice ก่อนเช็คเอาท์
           </span>
+        </div>
+      )}
+
+      {/* ── Quick-pay action ── */}
+      {balance > 0 && !folio.closedAt && (
+        <div className="rounded-lg bg-emerald-50 border border-emerald-300 p-3 text-sm">
+          <div className="flex items-center gap-3 mb-2">
+            <span className="text-base">💰</span>
+            <span className="flex-1 text-emerald-900">
+              ยอดค้างชำระ <strong>฿{fmtBaht(balance)}</strong>
+              {unbilledTotal > 0 && (
+                <span className="text-xs text-emerald-700 ml-2">
+                  (จะออก Invoice ใหม่อัตโนมัติจากรายการที่ยังไม่ออกบิล)
+                </span>
+              )}
+            </span>
+            {!payOpen && (
+              <button
+                type="button"
+                onClick={() => setPayOpen(true)}
+                className="text-xs font-semibold px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white"
+              >
+                💵 รับชำระเงิน
+              </button>
+            )}
+          </div>
+
+          {payOpen && (
+            <div className="bg-white rounded-md border border-emerald-200 p-3 space-y-3">
+              <div>
+                <p className="text-xs font-semibold text-gray-700 mb-2">ช่องทางชำระ</p>
+                <div className="flex gap-2 flex-wrap">
+                  {([
+                    { v: 'cash',        l: '💵 เงินสด' },
+                    { v: 'transfer',    l: '🏦 โอนเงิน' },
+                    { v: 'credit_card', l: '💳 บัตรเครดิต' },
+                  ] as const).map((pm) => (
+                    <button
+                      key={pm.v}
+                      type="button"
+                      onClick={() => setPayMethod(pm.v)}
+                      className={`px-3 py-1.5 text-xs rounded-md border ${
+                        payMethod === pm.v
+                          ? 'bg-emerald-100 border-emerald-500 text-emerald-700 font-semibold'
+                          : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+                      }`}
+                    >
+                      {pm.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {payMethod === 'transfer' && (
+                <ReceivingAccountPicker
+                  receivingAccountId={payRecvAccount}
+                  onChange={setPayRecvAccount}
+                  label="บัญชีที่รับเงิน (โอน)"
+                />
+              )}
+              {payMethod === 'credit_card' && (
+                <div className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1.5">
+                  ℹ️ บัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเก็บเงินที่ tab บิลในหน้าตารางจองแทน
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-1 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => { setPayOpen(false); setPayMethod('cash'); setPayRecvAccount(undefined); }}
+                  disabled={paySubmitting}
+                  className="flex-1 text-xs px-3 py-1.5 rounded-md border border-gray-200 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="button"
+                  onClick={handleQuickPay}
+                  disabled={
+                    paySubmitting ||
+                    payMethod === 'credit_card' ||
+                    (payMethod === 'transfer' && !payRecvAccount)
+                  }
+                  className="flex-[2] text-xs font-semibold px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {paySubmitting ? '⏳ กำลังบันทึก…' : `✅ ยืนยัน · ฿${fmtBaht(balance)}`}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

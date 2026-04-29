@@ -181,6 +181,17 @@ export async function GET(request: NextRequest) {
                   status:     true,
                 },
               },
+              // Folio totals are the source of truth for the popup's
+              // outstanding/paid figures.  Computing `rate * nights` at the
+              // client breaks after drag-resize because route.ts stores
+              // booking.rate as cumulative, not per-night.
+              folio: {
+                select: {
+                  totalCharges:  true,
+                  totalPayments: true,
+                  balance:       true,
+                },
+              },
             },
             orderBy: { checkIn: 'asc' },
           },
@@ -254,15 +265,30 @@ export async function GET(request: NextRequest) {
         const deposit = Number(b.deposit);
         const invoices = (b as any).invoices || [];
 
-        let expectedTotal = rate;
-        if (b.bookingType === 'daily') {
-          const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
-          expectedTotal = rate * Math.max(1, nights);
+        // Authoritative numbers come from the Folio (totalCharges / totalPayments
+        // are kept in sync by recalculateFolioBalance after every charge,
+        // payment, void).  Folio is missing for legacy bookings that predate
+        // the folio rollout, so fall back to the old rate*nights/invoice-sum
+        // calculation in that case.
+        const folio = (b as any).folio as
+          | { totalCharges: unknown; totalPayments: unknown; balance: unknown }
+          | null
+          | undefined;
+        let expectedTotal: number;
+        let totalPaid:     number;
+        if (folio) {
+          expectedTotal = Number(folio.totalCharges ?? 0);
+          totalPaid     = Number(folio.totalPayments ?? 0);
+        } else {
+          expectedTotal = rate;
+          if (b.bookingType === 'daily') {
+            const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
+            expectedTotal = rate * Math.max(1, nights);
+          }
+          totalPaid = invoices
+            .filter((inv: any) => inv.status !== 'voided' && inv.status !== 'cancelled')
+            .reduce((sum: number, inv: any) => sum + Number(inv.paidAmount ?? 0), 0);
         }
-
-        const totalPaid = invoices
-          .filter((inv: any) => inv.status !== 'voided' && inv.status !== 'cancelled')
-          .reduce((sum: number, inv: any) => sum + Number(inv.paidAmount ?? 0), 0);
 
         let paymentLevel: 'pending' | 'deposit_paid' | 'fully_paid' = 'pending';
         if (totalPaid >= expectedTotal && expectedTotal > 0) {
@@ -333,20 +359,29 @@ export async function GET(request: NextRequest) {
           },
         },
         invoices: { select: { grandTotal: true, paidAmount: true, status: true } },
+        folio: { select: { totalCharges: true, totalPayments: true, balance: true } },
       },
     });
     for (const b of missing) {
       const rate    = Number(b.rate);
       const deposit = Number(b.deposit);
       const invoices = b.invoices ?? [];
-      let expectedTotal = rate;
-      if (b.bookingType === 'daily') {
-        const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
-        expectedTotal = rate * Math.max(1, nights);
+      // Same authoritative-folio logic as the primary branch above.
+      let expectedTotal: number;
+      let totalPaid:     number;
+      if (b.folio) {
+        expectedTotal = Number(b.folio.totalCharges ?? 0);
+        totalPaid     = Number(b.folio.totalPayments ?? 0);
+      } else {
+        expectedTotal = rate;
+        if (b.bookingType === 'daily') {
+          const nights = calculateNights(new Date(b.checkIn), new Date(b.checkOut));
+          expectedTotal = rate * Math.max(1, nights);
+        }
+        totalPaid = invoices
+          .filter((inv) => inv.status !== 'voided' && inv.status !== 'cancelled')
+          .reduce((sum, inv) => sum + Number(inv.paidAmount ?? 0), 0);
       }
-      const totalPaid = invoices
-        .filter((inv) => inv.status !== 'voided' && inv.status !== 'cancelled')
-        .reduce((sum, inv) => sum + Number(inv.paidAmount ?? 0), 0);
       let paymentLevel: 'pending' | 'deposit_paid' | 'fully_paid' = 'pending';
       if (totalPaid >= expectedTotal && expectedTotal > 0) paymentLevel = 'fully_paid';
       else if (totalPaid > 0)                              paymentLevel = 'deposit_paid';
@@ -740,16 +775,21 @@ export async function PATCH(request: NextRequest) {
         console.warn('RateAudit insert failed (non-fatal):', auditErr);
       }
 
-      // Handle financial adjustments based on scenario
+      // Handle financial adjustments based on scenario.
+      //
+      // Run for BOTH scenario C (extend, partial paid) and scenario D (extend,
+      // fully paid). Both produce additionalCharge > 0 when nightsDifference
+      // > 0 -- they only differ in payment posture.  Originally this block
+      // was guarded by `scenario === 'D'` only, which left scenario-C extends
+      // with FolioLineItem rows still UNBILLED forever (no invoice = nothing
+      // for the cashier to collect against, and the bill tab showed no "รับ
+      // ชำระเงิน" button).  Issuing INV-EX immediately means the cashier can
+      // collect any time before checkout via the existing pay flow.
       if (
-        rateResult.scenario === 'D' &&
+        (rateResult.scenario === 'C' || rateResult.scenario === 'D') &&
         rateResult.additionalCharge &&
         rateResult.additionalCharge.greaterThan(0)
       ) {
-        // Scenario D (extend, fully paid): post the additional charge through the
-        // folio-centric billing engine so the new invoice is linked to a
-        // FolioLineItem (billing invariant preserved) and invoice-number generation
-        // goes through the sequential service instead of Invoice.count() + 1.
         const folio = await getFolioByBookingId(tx, bookingId);
         if (!folio) {
           throw new Error('FOLIO_NOT_FOUND');
