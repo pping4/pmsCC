@@ -78,6 +78,7 @@ interface FolioData {
   id: string;
   folioNumber: string;
   bookingId: string;
+  guestId: string;
   totalCharges: number;
   totalPayments: number;
   balance: number;
@@ -189,12 +190,35 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
   const [payRecvAccount, setPayRecvAccount] = useState<string | undefined>();
   const [paySubmitting,  setPaySubmitting]  = useState(false);
 
+  // ─── Phase 3.next — Available guest credit ───────────────────────────────
+  // Pulled when the pay panel opens. The cashier sees the available balance
+  // and can apply some/all of it before charging the rest.
+  const [availableCredit, setAvailableCredit] = useState<number>(0);
+  const [applyCreditAmount, setApplyCreditAmount] = useState<number>(0);
+  useEffect(() => {
+    if (!payOpen || !folio?.guestId) { setAvailableCredit(0); return; }
+    fetch(`/api/guest-credits?status=active&guestId=${folio.guestId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const total = (d.rows ?? []).reduce(
+          (s: number, c: { remainingAmount: number }) => s + Number(c.remainingAmount), 0);
+        setAvailableCredit(total);
+        // Default to "use as much as possible up to outstanding"
+        const balance = Number(folio.balance);
+        setApplyCreditAmount(Math.min(total, Math.max(0, balance)));
+      })
+      .catch(() => setAvailableCredit(0));
+  }, [payOpen, folio]);
+
   const handleQuickPay = useCallback(async () => {
     if (!folio || paySubmitting) return;
-    if (payMethod === 'transfer' && !payRecvAccount) {
+    const balance = Number(folio.balance);
+    const credit  = Math.max(0, Math.min(applyCreditAmount, availableCredit, balance));
+    const cashRequired = balance - credit;
+    if (cashRequired > 0 && payMethod === 'transfer' && !payRecvAccount) {
       toast.error('กรุณาเลือกบัญชีที่รับเงิน'); return;
     }
-    if (payMethod === 'credit_card') {
+    if (cashRequired > 0 && payMethod === 'credit_card') {
       toast.error('บัตรเครดิตต้องระบุเครื่อง EDC — ใช้หน้า Guest Folio ของผู้เข้าพักหรือ DetailPanel แทน');
       return;
     }
@@ -204,8 +228,10 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          amount:        Number(folio.balance),
+          // After credit applied, only the remaining cash portion is "amount"
+          amount:        Math.max(0.01, cashRequired),
           paymentMethod: payMethod,
+          ...(credit > 0 ? { applyCreditAmount: credit } : {}),
           ...(payMethod === 'transfer' && payRecvAccount
               ? { receivingAccountId: payRecvAccount } : {}),
         }),
@@ -226,7 +252,7 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
       setPaySubmitting(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folio, payMethod, payRecvAccount, paySubmitting, bookingId, onRefresh]);
+  }, [folio, payMethod, payRecvAccount, paySubmitting, bookingId, onRefresh, applyCreditAmount, availableCredit]);
 
   const handleRefund = useCallback(async () => {
     if (!refundTarget || refunding) return;
@@ -429,6 +455,47 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
 
           {payOpen && (
             <div className="bg-white rounded-md border border-emerald-200 p-3 space-y-3">
+              {/* Phase 3.next — Apply guest credit before charging cash */}
+              {availableCredit > 0 && (
+                <div className="bg-amber-50 border border-amber-300 rounded-md p-2.5">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-amber-900">
+                      🎫 ลูกค้ามีเครดิตคงเหลือ
+                    </span>
+                    <span className="text-xs font-mono text-amber-900">
+                      ฿{fmtBaht(availableCredit)} ที่ใช้ได้
+                    </span>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-amber-900">
+                    <span>ใช้ก่อน:</span>
+                    <span className="font-mono">฿</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={Math.min(availableCredit, balance)}
+                      step="0.01"
+                      value={applyCreditAmount}
+                      onChange={(e) => setApplyCreditAmount(Math.max(0, Math.min(
+                        Number(e.target.value) || 0,
+                        availableCredit,
+                        balance,
+                      )))}
+                      className="flex-1 px-2 py-1 border border-amber-300 rounded text-sm font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setApplyCreditAmount(Math.min(availableCredit, balance))}
+                      className="text-[10px] px-2 py-0.5 rounded bg-amber-200 hover:bg-amber-300"
+                    >
+                      ใช้สูงสุด
+                    </button>
+                  </label>
+                  <div className="mt-1.5 text-[11px] text-amber-800">
+                    เก็บเงินสด/โอนเพิ่ม: <strong className="font-mono">฿{fmtBaht(Math.max(0, balance - applyCreditAmount))}</strong>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <p className="text-xs font-semibold text-gray-700 mb-2">ช่องทางชำระ</p>
                 <div className="flex gap-2 flex-wrap">
@@ -480,12 +547,21 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
                   onClick={handleQuickPay}
                   disabled={
                     paySubmitting ||
-                    payMethod === 'credit_card' ||
-                    (payMethod === 'transfer' && !payRecvAccount)
+                    // Cash leg validation only when there IS a cash leg
+                    (balance - applyCreditAmount > 0 && (
+                      payMethod === 'credit_card' ||
+                      (payMethod === 'transfer' && !payRecvAccount)
+                    ))
                   }
                   className="flex-[2] text-xs font-semibold px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {paySubmitting ? '⏳ กำลังบันทึก…' : `✅ ยืนยัน · ฿${fmtBaht(balance)}`}
+                  {paySubmitting
+                    ? '⏳ กำลังบันทึก…'
+                    : applyCreditAmount >= balance
+                      ? `✅ ใช้เครดิต ฿${fmtBaht(applyCreditAmount)}`
+                      : applyCreditAmount > 0
+                        ? `✅ เครดิต ฿${fmtBaht(applyCreditAmount)} + เงินสด ฿${fmtBaht(balance - applyCreditAmount)}`
+                        : `✅ ยืนยัน · ฿${fmtBaht(balance)}`}
                 </button>
               </div>
             </div>

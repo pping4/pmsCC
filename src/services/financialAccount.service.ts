@@ -46,6 +46,7 @@ const DEFAULT_ACCOUNTS: SeedAccount[] = [
   { code: '4110-01', name: 'รายได้ค่าห้องพัก',          nameEN: 'Room Revenue',               kind: 'REVENUE',   subKind: 'ROOM_REVENUE',      isDefault: true },
   { code: '4120-01', name: 'รายได้อาหารและเครื่องดื่ม',   nameEN: 'Food & Beverage Revenue',    kind: 'REVENUE',   subKind: 'FB_REVENUE',        isDefault: true },
   { code: '4130-01', name: 'รายได้ค่าปรับ',             nameEN: 'Penalty Revenue',            kind: 'REVENUE',   subKind: 'PENALTY_REVENUE',   isDefault: true },
+  { code: '4140-01', name: 'รายได้จากเครดิตหมดอายุ',     nameEN: 'Forfeited Guest Credit',     kind: 'REVENUE',   subKind: 'FORFEITED_REVENUE', isDefault: true },
   { code: '4900-01', name: 'รายได้อื่น',                nameEN: 'Other Revenue',              kind: 'REVENUE',   subKind: 'OTHER_REVENUE',     isDefault: true },
 
   // Expense / Contra-revenue

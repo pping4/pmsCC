@@ -218,3 +218,153 @@ export async function listActiveCredits(
     remainingAmount: Number(c.remainingAmount),
   }));
 }
+
+// ─── Sum of available credit for a guest (number only) ───────────────────────
+
+export async function getAvailableCredit(
+  tx: TxClient,
+  guestId: string,
+): Promise<number> {
+  const agg = await tx.guestCredit.aggregate({
+    where: { guestId, status: 'active', remainingAmount: { gt: 0 } },
+    _sum:  { remainingAmount: true },
+  });
+  return Number(agg._sum.remainingAmount ?? 0);
+}
+
+// ─── Expire / forfeit a single credit ────────────────────────────────────────
+//
+// When a credit expires (past expiresAt) or a manager forfeits it manually
+// at fiscal close, the hotel's liability turns into recognized revenue:
+//
+//     DR GUEST_CREDIT_LIABILITY   / CR Forfeited Revenue (4140-01)
+//
+// for the REMAINING amount (already-consumed portion is not affected — the
+// guest already used it). Sets status='expired' and zeroes remainingAmount.
+
+export interface ExpireGuestCreditInput {
+  creditId:    string;
+  reason:      string;
+  expiredBy:   string;
+  /**
+   * Status to set. Defaults to 'expired'. Use 'revoked' for manager-driven
+   * revocation (e.g. wrongly issued); the ledger leg is identical but the
+   * audit trail differentiates intent.
+   */
+  finalStatus?: 'expired' | 'revoked';
+}
+
+export async function expireGuestCredit(
+  tx: TxClient,
+  input: ExpireGuestCreditInput,
+): Promise<{ amountForfeited: number }> {
+  const credit = await tx.guestCredit.findUniqueOrThrow({
+    where: { id: input.creditId },
+    select: {
+      id: true, creditNumber: true,
+      status: true, remainingAmount: true,
+    },
+  });
+  if (credit.status !== 'active') {
+    throw new Error('GUEST_CREDIT_NOT_ACTIVE');
+  }
+  const remaining = Number(credit.remainingAmount);
+  if (remaining <= 0) {
+    // Already fully consumed — just flip status without ledger movement
+    await tx.guestCredit.update({
+      where: { id: credit.id },
+      data:  { status: 'consumed' },
+    });
+    return { amountForfeited: 0 };
+  }
+
+  const finalStatus: GuestCreditStatus = input.finalStatus ?? 'expired';
+
+  await tx.guestCredit.update({
+    where: { id: credit.id },
+    data: {
+      status:          finalStatus,
+      remainingAmount: new Prisma.Decimal(0),
+      notes:           input.reason,
+    },
+  });
+
+  // Resolve the FORFEITED_REVENUE FinancialAccount explicitly so the ledger
+  // CR side hits 4140-01 (Forfeited Guest Credit) instead of the default
+  // ROOM_REVENUE that the SUBKIND_FOR_LEGACY mapping would pick.
+  const { resolveAccount } = await import('./financialAccount.service');
+  let forfeitedAccountId: string | null = null;
+  try {
+    const acc = await resolveAccount(tx, { subKind: 'FORFEITED_REVENUE', explicitAccountId: null });
+    forfeitedAccountId = acc.id;
+  } catch {
+    // Seed missing — fall back to default revenue resolution.
+  }
+
+  // DR liability (releases the obligation) / CR forfeited revenue (recognized)
+  await postLedgerPair(tx, {
+    debitAccount:    LedgerAccount.GUEST_CREDIT_LIABILITY,
+    creditAccount:   LedgerAccount.REVENUE,
+    creditAccountId: forfeitedAccountId,    // route to 4140-01 not 4110-01
+    amount:          remaining,
+    referenceType:   'GuestCredit',
+    referenceId:     credit.id,
+    description:     `Guest credit ${finalStatus} ${credit.creditNumber} — ${input.reason}`,
+    createdBy:       input.expiredBy,
+  });
+
+  return { amountForfeited: remaining };
+}
+
+// ─── Bulk expire — fiscal close / year-end forfeit ───────────────────────────
+//
+// Any active credit older than `cutoffDate` (or with expiresAt <= cutoffDate)
+// gets force-expired. Returns count + total amount forfeited so finance can
+// see "we just absorbed ฿X of unclaimed credits into income".
+//
+// Admin-only — gate at the route level.
+
+export interface BulkExpireInput {
+  /** Cutoff: any credit created on/before this date is expired.
+   *  When omitted, only credits whose own expiresAt has passed are expired. */
+  cutoffDate?: Date;
+  /** Free-form reason recorded on every expired credit. */
+  reason: string;
+  expiredBy: string;
+}
+
+export async function bulkExpireGuestCredits(
+  tx: TxClient,
+  input: BulkExpireInput,
+): Promise<{ count: number; totalAmount: number; creditNumbers: string[] }> {
+  const now = new Date();
+  const where: Prisma.GuestCreditWhereInput = {
+    status:          'active',
+    remainingAmount: { gt: 0 },
+    OR: [
+      // explicit expiry already passed
+      { expiresAt: { lt: now } },
+      // manager-set cutoff
+      ...(input.cutoffDate ? [{ createdAt: { lte: input.cutoffDate } }] : []),
+    ],
+  };
+
+  const targets = await tx.guestCredit.findMany({
+    where,
+    select: { id: true, creditNumber: true, remainingAmount: true },
+  });
+
+  let totalAmount = 0;
+  const creditNumbers: string[] = [];
+  for (const c of targets) {
+    const result = await expireGuestCredit(tx, {
+      creditId:  c.id,
+      reason:    input.reason,
+      expiredBy: input.expiredBy,
+    });
+    totalAmount += result.amountForfeited;
+    creditNumbers.push(c.creditNumber);
+  }
+
+  return { count: targets.length, totalAmount, creditNumbers };
+}

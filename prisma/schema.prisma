@@ -189,6 +189,11 @@ enum AccountSubKind {
   ROOM_REVENUE
   FB_REVENUE
   PENALTY_REVENUE
+  /// Phase 3 — recognized revenue when a GuestCredit expires or is
+  /// forfeited at fiscal close. Separate from ROOM_REVENUE so finance
+  /// can report it distinctly (it's not "room sold" income — it's
+  /// "money the guest didn't claim back").
+  FORFEITED_REVENUE
   DISCOUNT_GIVEN
   CARD_FEE
   BANK_FEE
@@ -633,6 +638,7 @@ model Booking {
   housekeepingTasks HousekeepingTask[]
   cleaningSchedules CleaningSchedule[]
   contract          Contract?
+  guestCredits      GuestCredit[]
 
   @@index([cityLedgerAccountId])
   @@map("bookings")
@@ -1824,10 +1830,11 @@ model GuestCredit {
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String   @map("created_by")
 
-  guest        Guest               @relation(fields: [guestId], references: [id])
+  guest         Guest               @relation(fields: [guestId], references: [id])
+  booking       Booking?            @relation(fields: [bookingId], references: [id])
   refundRecords RefundRecord[]
   /// PaymentAllocation rows of kind='credit' that consumed this credit.
-  allocations  PaymentAllocation[]
+  allocations   PaymentAllocation[]
 
   @@index([guestId, status])
   @@index([bookingId])

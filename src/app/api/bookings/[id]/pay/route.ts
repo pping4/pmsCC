@@ -62,6 +62,14 @@ const PaySchema = z.object({
   terminalId:  z.string().uuid().optional(),
   feeAmount:   z.number().nonnegative().optional(),
   feeAccountId: z.string().uuid().optional(),
+  /**
+   * Phase 3 — apply this much GuestCredit to the invoice BEFORE collecting
+   * the cash/bank `amount`. The cashier sees the available credit in the UI
+   * and decides how much to use; the server validates against the guest's
+   * actual remaining credit balance and reduces `amount` accordingly.
+   * Set 0 (default) to skip credit application entirely.
+   */
+  applyCreditAmount: z.number().nonnegative().optional(),
 });
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
@@ -94,6 +102,7 @@ export async function POST(
     receivingAccountId, slipImageUrl, slipRefNo,
     cardBrand, cardType, cardLast4, authCode, terminalId,
     feeAmount, feeAccountId,
+    applyCreditAmount,
   } = parsed.data;
 
   // Sprint 5 — per-method guard rails (match payment.schema refines)
@@ -357,36 +366,70 @@ export async function POST(
     // diff churn stays minimal in receipt building / activity log.
     const invResult = invoicesForPayment;
 
-    // ── 8. Delegate to payment.service (single ledger chokepoint) ─────────
-    // payment.service handles: cash-session resolution, slip-refNo dedup,
-    // EDC terminal validation, payment-number generation, recon lifecycle,
-    // allocation, invoice paid-status, line-item paid flag, ledger pair
-    // (DR Cash / CR AR), folio recalc, audit log.
-    const paymentResult = await createPayment(tx, {
-      idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
-      guestId:        booking.guestId,
-      bookingId,
-      amount:         totalAmountToPay,
-      paymentMethod,
-      paymentDate:    now,
-      receivedBy:     userId,
-      notes:          notes ?? `รับชำระเงิน — ห้อง ${booking.room.number}`,
-      allocations,
-      createdBy:      userId,
-      createdByName:  userName ?? undefined,
-      // Sprint 5 — transfer/QR
-      receivingAccountId,
-      slipImageUrl,
-      slipRefNo,
-      // Sprint 5 — card
-      cardBrand,
-      cardType,
-      cardLast4,
-      authCode,
-      terminalId,
-      feeAmount:    feeAmount    ?? undefined,
-      feeAccountId: feeAccountId ?? undefined,
-    });
+    // ── 7.5 Apply guest credit before cash collection (Phase 3.next) ──────
+    // The cashier specified `applyCreditAmount` based on the guest's
+    // available credit shown in the UI. Server-side validates against the
+    // actual guest credit balance, picks credits FIFO, and posts
+    // DR GuestCreditLiability / CR AR for the consumed amount. The cash
+    // payment that follows handles whatever's left.
+    let creditApplied = 0;
+    if (applyCreditAmount && applyCreditAmount > 0) {
+      const { getAvailableCredit, consumeGuestCredit } = await import('@/services/guestCredit.service');
+      const available = await getAvailableCredit(tx, booking.guestId);
+      if (applyCreditAmount > available) {
+        throw new Error(`เครดิตไม่พอ — ลูกค้ามีเครดิตเหลือ ฿${available.toFixed(2)} เท่านั้น`);
+      }
+      // Cap by the actual outstanding so we never apply more than owed.
+      const requestApply = Math.min(applyCreditAmount, totalAmountToPay);
+      const result = await consumeGuestCredit(tx, {
+        guestId:   booking.guestId,
+        invoiceId: invResult.invoiceId,
+        maxAmount: requestApply,
+        createdBy: userId,
+      });
+      creditApplied = result.applied;
+      // Adjust outstanding + allocations so the cash payment only covers
+      // the remainder. If credit covered everything, allocations becomes
+      // empty and we skip createPayment entirely below.
+      const remaining = Math.max(0, totalAmountToPay - creditApplied);
+      totalAmountToPay = remaining;
+      allocations = remaining > 0
+        ? [{ invoiceId: invResult.invoiceId, amount: remaining }]
+        : [];
+    }
+
+    // If credit covered the whole bill, we still want a "no-op" success
+    // path: no Payment row to create, but the folio recalc + activity log
+    // + receipt should still happen.
+    // NOTE: capture booking in a local so the inner-scope narrowing
+    // survives — TypeScript can't see the line-137 null guard from inside
+    // an async sub-function.
+    const bk = booking;
+    const paymentResult = totalAmountToPay > 0
+      ? await createPayment(tx, {
+          idempotencyKey: `pay-${bookingId}-${now.getTime()}`,
+          guestId:        bk.guestId,
+          bookingId,
+          amount:         totalAmountToPay,
+          paymentMethod,
+          paymentDate:    now,
+          receivedBy:     userId,
+          notes:          notes ?? `รับชำระเงิน — ห้อง ${bk.room.number}`,
+          allocations,
+          createdBy:      userId,
+          createdByName:  userName ?? undefined,
+          receivingAccountId,
+          slipImageUrl,
+          slipRefNo,
+          cardBrand,
+          cardType,
+          cardLast4,
+          authCode,
+          terminalId,
+          feeAmount:    feeAmount    ?? undefined,
+          feeAccountId: feeAccountId ?? undefined,
+        })
+      : { paymentNumber: '', receiptNumber: '', id: '' };
     const paymentNumber = paymentResult.paymentNumber;
     const receiptNumber = paymentResult.receiptNumber;
 
