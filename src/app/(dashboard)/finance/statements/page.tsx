@@ -44,6 +44,11 @@ interface PLData {
   type: 'pl';
   window: { from: string; to: string };
   revenue: AccountRow[]; expense: AccountRow[];
+  /**
+   * Refunds netted into revenue, surfaced as a visibility line.
+   * count > 0 → render "หัก: คืนเงิน ฿X (N รายการ)" under revenue.
+   */
+  refunds?: { total: number; count: number };
   totals: { revenue: number; expense: number; netIncome: number };
 }
 
@@ -208,6 +213,26 @@ function PLTab() {
       {data && (
         <>
           <Section title="รายได้ (Revenue)" rows={data.revenue} total={data.totals.revenue} color="#166534" bg="#f0fdf4" />
+          {/* Visibility line: refunds processed in this period.  Already
+              netted into the revenue total above (DR Revenue / CR Cash) but
+              cashiers couldn't see them — surface count + amount so the
+              manager can confirm refunds happened and reconcile. */}
+          {data.refunds && data.refunds.count > 0 && (
+            <div className="pms-card pms-transition" style={{
+              padding: 12, marginTop: 8,
+              borderLeft: '4px solid #f59e0b',
+              background: '#fffbeb',
+              fontSize: 13, color: '#78350f',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <span><strong>หัก: คืนเงินที่ดำเนินการแล้ว</strong> ({data.refunds.count} รายการ)</span>
+                <span style={{ fontWeight: 700, fontFamily: 'monospace' }}>−฿{fmtBaht(data.refunds.total)}</span>
+              </div>
+              <div style={{ fontSize: 11, opacity: 0.85, marginTop: 4 }}>
+                เงินที่คืนให้ลูกค้าในช่วงนี้ — ยอดนี้ <em>ลด</em> รายได้รวมข้างบนแล้ว
+              </div>
+            </div>
+          )}
           <Section title="ค่าใช้จ่าย (Expense)" rows={data.expense} total={data.totals.expense} color="#991b1b" bg="#fee2e2" />
           <div className="pms-card pms-transition" style={{
             padding: 16, marginTop: 12,

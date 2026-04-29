@@ -103,19 +103,37 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid date' }, { status: 400 });
     }
 
-    const [revenue, expense] = await Promise.all([
+    const [revenue, expense, refundsAgg] = await Promise.all([
       computeBalances({ kind: 'REVENUE' }, { gte: from, lte: to }, false),
       computeBalances({ kind: 'EXPENSE' }, { gte: from, lte: to }, false),
+      // Refunds netted into revenue are invisible to the cashier — surface
+      // them as a separate breakdown so a manager can see "เราคืนเงินไป
+      // เท่าไหร่ในเดือนนี้" without the user having to know that revenue is
+      // already net.
+      prisma.refundRecord.aggregate({
+        where: {
+          status:      'processed' as never,
+          processedAt: { gte: from, lte: to },
+        },
+        _sum:   { amount: true },
+        _count: { _all: true },
+      }),
     ]);
 
     const totalRevenue = revenue.reduce((s, a) => s + a.balance, 0);
     const totalExpense = expense.reduce((s, a) => s + a.balance, 0);
+    const refundsTotal = Number(refundsAgg._sum.amount ?? 0);
+    const refundsCount = refundsAgg._count._all;
 
     return NextResponse.json({
       type: 'pl',
       window: { from, to },
       revenue,
       expense,
+      // Visibility line — already netted INTO `revenue` by the ledger DR/CR
+      // pair, but a separate field lets the UI show "หัก: คืนเงิน ฿X (Y รายการ)"
+      // alongside the gross-revenue breakdown.
+      refunds: { total: refundsTotal, count: refundsCount },
       totals: {
         revenue:   totalRevenue,
         expense:   totalExpense,

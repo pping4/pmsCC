@@ -849,7 +849,7 @@ export async function PATCH(request: NextRequest) {
         });
       }
 
-      // Refund obligations — Scenarios B (deposit > new rate) and C (shortening, partial paid)
+      // Refund obligations — Scenarios B (deposit > new rate) and C/D (shortening)
       // Create a PENDING refund record; actual cash-out is handled by finance later.
       if (rateResult.refundDue && rateResult.refundDue.greaterThan(0)) {
         const changedBy = session.user?.id || session.user?.email || 'system';
@@ -857,6 +857,61 @@ export async function PATCH(request: NextRequest) {
           rateResult.scenario === 'B'
             ? 'เงินมัดจำเกินกว่าอัตราใหม่ (drag-resize)'
             : `ลดการพัก ${originalNights - newNights} คืน (drag-resize)`;
+
+        // Void the FolioLineItem rows for the nights we just removed BEFORE
+        // creating the refund. Without this, folio.totalCharges still
+        // reflects the original stay (e.g. 3 × 1000 = 3000) while the
+        // booking now covers only 2 nights, so:
+        //   - the tape-chart tooltip shows  per-night = totalCharges/nights
+        //     = 3000/2 = 1500/คืน  (wrong; rate is still 1000/คืน)
+        //   - folio.balance stays 0 instead of becoming -1000 (we owe guest)
+        //   - the cashier can't see "we owe guest 1000" anywhere on /folio.
+        // Voiding the affected rows fixes all three at once.
+        // Daily bookings only — monthly stays use one big row that's harder
+        // to surgically void; the existing PENDING refund still owns it.
+        if (booking.bookingType === 'daily') {
+          const folio = await getFolioByBookingId(tx, bookingId);
+          if (folio) {
+            // Anything whose serviceDate is on/after the new checkOut is gone.
+            await tx.folioLineItem.updateMany({
+              where: {
+                folioId:    folio.folioId,
+                chargeType: 'ROOM' as never,
+                billingStatus: { not: 'VOIDED' as never },
+                serviceDate: { gte: newCheckOut },
+              },
+              data: {
+                billingStatus: 'VOIDED' as never,
+                notes:         `Voided by drag-shorten (${originalNights - newNights} คืน)`,
+              },
+            });
+            // Resync folio totals so the tooltip + folio page see the new truth.
+            const recalcRows = await tx.folioLineItem.aggregate({
+              where: {
+                folioId:    folio.folioId,
+                billingStatus: { not: 'VOIDED' as never },
+              },
+              _sum: { amount: true },
+            });
+            const allocSum = await tx.paymentAllocation.aggregate({
+              where: {
+                invoice: { folioId: folio.folioId },
+                payment: { status: 'ACTIVE' },
+              },
+              _sum: { amount: true },
+            });
+            const totalCharges  = Number(recalcRows._sum.amount  ?? 0);
+            const totalPayments = Number(allocSum._sum.amount    ?? 0);
+            await tx.folio.update({
+              where: { id: folio.folioId },
+              data: {
+                totalCharges:  totalCharges,
+                totalPayments: totalPayments,
+                balance:       totalCharges - totalPayments,
+              },
+            });
+          }
+        }
 
         await createPendingRefund(tx, {
           bookingId,
