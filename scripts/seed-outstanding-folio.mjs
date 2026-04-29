@@ -12,7 +12,9 @@ const room  = await p.room.findFirst({ where: { status: 'available' } });
 if (!admin || !guest || !room) { console.error('missing fixtures'); process.exit(1); }
 
 const result = await p.$transaction(async (tx) => {
-  const num = String(Math.floor(Math.random() * 9999)).padStart(4, '0');
+  // Numeric-only suffix — the booking-number generator's lex-desc query
+  // can't tolerate letters in the tail (see invoice-number.service.ts).
+  const num = String(Math.floor(Math.random() * 9000) + 1000).padStart(4, '0');
   const booking = await tx.booking.create({
     data: {
       bookingNumber: `BK-2026-${num}`, guestId: guest.id, roomId: room.id,

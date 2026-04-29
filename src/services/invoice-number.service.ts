@@ -70,23 +70,31 @@ async function nextSequence(
       });
       break;
     case 'booking': {
-      // Use MAX-based approach (not COUNT) to handle gaps in sequence.
-      // e.g. if BK-2026-0006..0009 were created with old format,
-      // count() would return 65 and generate BK-2026-0066 which already exists.
-      // findFirst + orderBy desc gives the true highest number.
-      const latest = await tx.booking.findFirst({
-        where: { bookingNumber: { startsWith: prefix + '-' } },
-        orderBy: { bookingNumber: 'desc' },
+      // We need the MAX numeric suffix among bookings in this year, but a
+      // lex-desc orderBy is unreliable: any malformed booking number (e.g.
+      // a test fixture with an embedded letter like "BK-2026-T0864")
+      // sorts ABOVE numeric ones because letters > digits in ASCII, so
+      // findFirst returns the malformed row, parseInt yields NaN, and the
+      // generator resets to 0001 -- colliding with the real first booking
+      // and breaking every subsequent insert with P2002.
+      //
+      // Pull the candidates and parse each suffix in JS, skipping anything
+      // that isn't a clean integer. The candidate set is bounded by the
+      // year prefix, so this stays cheap (one cashier-year is hundreds,
+      // not millions of rows).
+      const rows = await tx.booking.findMany({
+        where:  { bookingNumber: { startsWith: prefix + '-' } },
         select: { bookingNumber: true },
       });
-      if (!latest) {
-        count = 0;
-      } else {
-        // "BK-2026-0069" → split by '-' → last part → 69
-        const parts = latest.bookingNumber.split('-');
-        const seq = parseInt(parts[parts.length - 1], 10);
-        count = isNaN(seq) ? 0 : seq;
+      let maxSeq = 0;
+      for (const r of rows) {
+        const tail = r.bookingNumber.slice(prefix.length + 1);
+        if (/^\d+$/.test(tail)) {
+          const n = parseInt(tail, 10);
+          if (n > maxSeq) maxSeq = n;
+        }
       }
+      count = maxSeq;
       break;
     }
     case 'securityDeposit':
