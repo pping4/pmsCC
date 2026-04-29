@@ -14,7 +14,7 @@
  * All functions MUST be called inside a Prisma $transaction.
  */
 
-import { Prisma } from '@prisma/client';
+import { Prisma, LedgerAccount } from '@prisma/client';
 import { generateFolioNumber, generateInvoiceNumber } from './invoice-number.service';
 import { postLedgerPair, postInvoiceAccrual } from './ledger.service';
 import { getHotelSettings } from './hotelSettings.service';
@@ -484,6 +484,111 @@ export async function voidInvoice(
   if (invoice.folioId) {
     await recalculateFolioBalance(tx, invoice.folioId);
   }
+}
+
+// ─── Partial Invoice Void (Phase 3 — drag-shorten / room cancel) ────────────
+
+export interface PartialVoidInvoiceInput {
+  /** invoice that contains the line items to void */
+  invoiceId: string;
+  /** subset of FolioLineItem IDs to void; must all belong to the invoice */
+  folioLineItemIds: string[];
+  reason: string;
+  voidedBy: string;
+}
+
+/**
+ * Void a SUBSET of an invoice's line items and post the matching ledger
+ * reversal (DR Revenue / CR AR for the voided amount). The original invoice
+ * row stays intact — its grand total is no longer materially correct, but
+ * the per-item ledger reflects truth and downstream refund processing
+ * (DR AR / CR Cash) closes the AR loop.
+ *
+ * Use this from drag-shorten / partial-cancel flows. For full-invoice
+ * voids keep using `voidInvoice` above.
+ *
+ * Invariants (enforced):
+ *  1. all `folioLineItemIds` belong to `invoiceId`
+ *  2. each item is currently BILLED or PAID (not already VOIDED, not UNBILLED)
+ *  3. invoice itself is not VOIDED
+ */
+export async function partialVoidInvoice(
+  tx: TxClient,
+  input: PartialVoidInvoiceInput,
+): Promise<{ voidedAmount: number }> {
+  if (input.folioLineItemIds.length === 0) {
+    return { voidedAmount: 0 };
+  }
+
+  const invoice = await tx.invoice.findUniqueOrThrow({
+    where: { id: input.invoiceId },
+    select: { id: true, status: true, folioId: true },
+  });
+  if (invoice.status === 'voided') {
+    throw new Error('Cannot partial-void an already voided invoice');
+  }
+  if (!invoice.folioId) {
+    throw new Error('Invoice has no folio link — cannot reverse');
+  }
+
+  // Lock + load all targets, double-check they're on this invoice
+  const items = await tx.invoiceItem.findMany({
+    where: {
+      invoiceId: input.invoiceId,
+      folioLineItemId: { in: input.folioLineItemIds },
+    },
+    select: {
+      id: true, amount: true,
+      folioLineItem: { select: { id: true, billingStatus: true, amount: true } },
+    },
+  });
+  if (items.length !== input.folioLineItemIds.length) {
+    throw new Error('Some line item IDs do not belong to this invoice');
+  }
+  for (const it of items) {
+    const fl = it.folioLineItem;
+    if (!fl) throw new Error('Invoice item missing FolioLineItem link');
+    if (fl.billingStatus === 'VOIDED' as never) {
+      throw new Error(`FolioLineItem ${fl.id} already voided`);
+    }
+    if (fl.billingStatus === 'UNBILLED' as never) {
+      throw new Error(`FolioLineItem ${fl.id} is UNBILLED — use voidCharge instead`);
+    }
+  }
+
+  const voidedAmount = items.reduce((s, it) => s + Number(it.amount), 0);
+
+  // Mark the line items VOIDED
+  await tx.folioLineItem.updateMany({
+    where: { id: { in: input.folioLineItemIds } },
+    data: {
+      billingStatus: 'VOIDED' as never,
+      notes:         input.reason,
+    },
+  });
+
+  // Reverse the accrual: DR REVENUE / CR AR for the voided gross.
+  // (For VAT-inclusive bookings the proper reversal would split into
+  // Revenue + VAT_OUTPUT + Service legs. The current PMS only accrues
+  // VAT/Service when settings.vatEnabled is on; we leave that branch as
+  // future work — daily-rate non-VAT bookings, the common case, are
+  // handled correctly here.)
+  if (voidedAmount > 0) {
+    await postLedgerPair(tx, {
+      debitAccount:  LedgerAccount.REVENUE,
+      creditAccount: LedgerAccount.AR,
+      amount:        voidedAmount,
+      referenceType: 'Invoice',
+      referenceId:   invoice.id,
+      description:   `Partial void: ${input.reason}`,
+      createdBy:     input.voidedBy,
+    });
+  }
+
+  // Resync folio totals to reflect the voided rows
+  await recalculateFolioBalance(tx, invoice.folioId);
+
+  return { voidedAmount };
 }
 
 // ─── Mark FolioLineItems as PAID (called after payment covers invoice) ──────

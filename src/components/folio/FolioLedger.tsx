@@ -352,17 +352,43 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
             ฿{fmtBaht(Number(folio.totalPayments))}
           </p>
         </div>
+        {/* Phase 3 — three-state balance display.
+            balance > 0  : guest still owes us → red "ยอดค้างชำระ"
+            balance == 0 : settled            → grey "ชำระครบ"
+            balance < 0  : we owe guest       → orange "ต้องคืนให้ลูกค้า"
+            The old code used Math.abs() and labelled negative balance as
+            "ยอดคงเหลือ" — to a Thai accountant that reads as "available
+            cash on hand". Wrong direction. */}
         <div className={`rounded-lg border p-3 text-center ${
           balance > 0
             ? 'bg-red-50 border-red-200'
-            : 'bg-blue-50 border-blue-200'
+            : balance < 0
+              ? 'bg-orange-50 border-orange-300'
+              : 'bg-gray-50 border-gray-200'
         }`}>
-          <p className={`text-xs mb-1 ${balance > 0 ? 'text-red-600' : 'text-blue-600'}`}>
-            {balance > 0 ? 'ยอดค้างชำระ' : 'ยอดคงเหลือ'}
+          <p className={`text-xs mb-1 ${
+            balance > 0 ? 'text-red-600'
+              : balance < 0 ? 'text-orange-700'
+              : 'text-gray-600'
+          }`}>
+            {balance > 0
+              ? 'ยอดค้างชำระ'
+              : balance < 0
+                ? '⚠ ต้องคืนให้ลูกค้า'
+                : 'ชำระครบ'}
           </p>
-          <p className={`text-lg font-bold ${balance > 0 ? 'text-red-700' : 'text-blue-700'}`}>
+          <p className={`text-lg font-bold ${
+            balance > 0 ? 'text-red-700'
+              : balance < 0 ? 'text-orange-800'
+              : 'text-gray-700'
+          }`}>
             ฿{fmtBaht(Math.abs(balance))}
           </p>
+          {balance < 0 && (
+            <p className="text-[10px] text-orange-700 mt-1">
+              รอดำเนินการคืนเงิน — ดูหน้า /refunds
+            </p>
+          )}
         </div>
       </div>
 

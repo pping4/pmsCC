@@ -146,6 +146,13 @@ enum LedgerAccount {
   AR_CORPORATE // City Ledger — ลูกหนี้องค์กร
   REVENUE
   DEPOSIT_LIABILITY
+  /// Phase 3 — เงินรับล่วงหน้า/เครดิตคงเหลือของแขก:
+  /// when a refund is taken as credit-on-account instead of cash, the
+  /// hotel still owes that money to the guest. Posted as DR AR /
+  /// CR GUEST_CREDIT_LIABILITY at refund time, then DR
+  /// GUEST_CREDIT_LIABILITY / CR AR when the credit is consumed by a
+  /// future booking.
+  GUEST_CREDIT_LIABILITY
   PENALTY_REVENUE
   EXPENSE
   DISCOUNT_GIVEN
@@ -174,6 +181,7 @@ enum AccountSubKind {
   AR                     // guest receivable
   AR_CORPORATE           // city ledger
   DEPOSIT_LIABILITY      // guest deposits held
+  GUEST_CREDIT           // เงินรับล่วงหน้า/เครดิตคงเหลือของแขก (Phase 3)
   AGENT_PAYABLE          // OTA commission payable
   VAT_OUTPUT
   VAT_INPUT
@@ -574,6 +582,7 @@ model Guest {
   invoices     Invoice[]
   activityLogs ActivityLog[]
   contracts    Contract[]
+  guestCredits GuestCredit[]
 
   @@map("guests")
 }
@@ -1071,6 +1080,13 @@ model Payment {
   // Idempotency — UUID sent from client, prevents double-submit
   idempotencyKey String @unique @map("idempotency_key")
 
+  // Phase 3 — running tally of how much of this payment has been
+  // reversed via refunds. Cash receipts stay status='ACTIVE' (a real
+  // transaction is historical fact), but partial refunds use this
+  // counter so we know how much of the original is still "live".
+  // Invariant: refundedAmount <= amount.
+  refundedAmount Decimal @default(0) @map("refunded_amount") @db.Decimal(12, 2)
+
   createdAt DateTime @default(now()) @map("created_at")
   createdBy String   @map("created_by")
 
@@ -1129,6 +1145,21 @@ model Payment {
   @@map("payments")
 }
 
+/// Phase 3 — discriminator for PaymentAllocation rows.
+///
+/// Original allocations made when a payment is collected use `payment`.
+/// When a refund is processed, the original Payment row stays ACTIVE
+/// (cash receipts are historical fact) but a `reversal` allocation row
+/// is added with NEGATIVE amount, so the folio's totalPayments sum
+/// drops to match the ledger Cash balance.  When a previously-issued
+/// GuestCredit is consumed by a future invoice, a `credit` allocation
+/// row is added with POSITIVE amount and `guestCreditId` set.
+enum PaymentAllocationKind {
+  payment   // original allocation when payment received
+  reversal  // negative allocation from refund processing
+  credit    // positive allocation from consuming a GuestCredit
+}
+
 model PaymentAllocation {
   id          String   @id @default(uuid())
   paymentId   String   @map("payment_id")
@@ -1136,11 +1167,26 @@ model PaymentAllocation {
   amount      Decimal  @db.Decimal(12, 2)
   allocatedAt DateTime @default(now()) @map("allocated_at")
 
-  payment Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  invoice Invoice @relation(fields: [invoiceId], references: [id])
+  /// Phase 3 — discriminator (default 'payment' keeps legacy rows correct)
+  kind PaymentAllocationKind @default(payment)
+  /// For 'reversal' rows — the refund that produced this row
+  refundRecordId String? @map("refund_record_id")
+  /// For 'credit' rows — the GuestCredit consumed
+  guestCreditId  String? @map("guest_credit_id")
 
-  @@unique([paymentId, invoiceId])
+  payment      Payment       @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoice      Invoice       @relation(fields: [invoiceId], references: [id])
+  refundRecord RefundRecord? @relation("RefundReversalAlloc", fields: [refundRecordId], references: [id])
+  guestCredit  GuestCredit?  @relation(fields: [guestCreditId], references: [id])
+
+  // Allow ONE row per (paymentId, invoiceId, kind).  The original positive
+  // allocation has kind='payment'; a partial refund adds another row with
+  // kind='reversal' and negative amount.  Same pair of payment+invoice
+  // can't have two positive 'payment' allocations though.
+  @@unique([paymentId, invoiceId, kind])
   @@index([invoiceId])
+  @@index([refundRecordId])
+  @@index([guestCreditId])
   @@map("payment_allocations")
 }
 
@@ -1655,6 +1701,17 @@ enum RefundStatus {
   cancelled
 }
 
+/// Phase 3 — refund mode picked by the cashier when processing.
+///   - cash:   full pay-out via cash/transfer/card (DR AR / CR Cash|Bank)
+///   - credit: keep money on guest account for future stays
+///             (DR AR / CR GuestCreditLiability)
+///   - split:  partial cash + remaining credit
+enum RefundMode {
+  cash
+  credit
+  split
+}
+
 model RefundRecord {
   id           String @id @default(uuid())
   refundNumber String @unique @map("refund_number") // RFD-YYYYMMDD-NNNN
@@ -1666,6 +1723,20 @@ model RefundRecord {
   reason String
   method PaymentMethod? // pending refunds may not have method chosen yet
   status RefundStatus   @default(pending)
+
+  /// Phase 3 — three-mode refund (cash / credit / split). Set at process
+  /// time; null while the record is still pending.
+  mode RefundMode?
+
+  /// Phase 3 — for split mode: how much was paid back as cash/transfer
+  /// vs how much was kept as guest credit. cashAmount + creditAmount =
+  /// amount. For mode=cash: cashAmount=amount, creditAmount=0. For
+  /// mode=credit: cashAmount=0, creditAmount=amount.
+  cashAmount   Decimal? @map("cash_amount")   @db.Decimal(12, 2)
+  creditAmount Decimal? @map("credit_amount") @db.Decimal(12, 2)
+  /// The GuestCredit issued for the credit portion (modes credit/split).
+  guestCreditId String?      @map("guest_credit_id")
+  guestCredit   GuestCredit? @relation(fields: [guestCreditId], references: [id])
 
   // Link to the event that created this refund obligation
   referenceType String? @map("reference_type") // 'Booking' | 'Invoice' | 'SecurityDeposit'
@@ -1701,12 +1772,66 @@ model RefundRecord {
   createdBy String   @map("created_by")
 
   booking Booking @relation(fields: [bookingId], references: [id])
+  /// Phase 3 — reversal allocation rows pointing back at this refund
+  reversalAllocations PaymentAllocation[] @relation("RefundReversalAlloc")
 
   @@index([bookingId])
   @@index([status])
   @@index([referenceType, referenceId])
   @@index([financialAccountId])
   @@map("refund_records")
+}
+
+/// Phase 3 — เครดิตคงเหลือของแขกผู้เข้าพัก
+///
+/// Issued whenever a refund is taken as `credit` (or the credit portion
+/// of a `split`). The hotel HOLDS the money — guest can apply it to a
+/// future booking or convert to cash later.
+///
+/// Lifecycle:
+///   active → consumed       (fully applied to invoices)
+///         → refunded_out    (later converted to cash)
+///         → expired         (past expiresAt with remainingAmount > 0)
+///         → revoked         (manually revoked by manager)
+enum GuestCreditStatus {
+  active
+  consumed
+  refunded_out
+  expired
+  revoked
+}
+
+model GuestCredit {
+  id           String  @id @default(uuid())
+  creditNumber String  @unique @map("credit_number") // GC-YYYYMMDD-NNNN
+  guestId      String  @map("guest_id")
+  /// Booking that produced this credit (for traceability only).
+  /// Null is allowed for manually-issued credits.
+  bookingId    String? @map("booking_id")
+
+  /// Original credit amount issued.
+  amount Decimal @db.Decimal(12, 2)
+  /// Remaining balance available to apply to future invoices.
+  /// Decremented as the guest consumes the credit.
+  remainingAmount Decimal @map("remaining_amount") @db.Decimal(12, 2)
+
+  status GuestCreditStatus @default(active)
+
+  /// Optional expiry — null = no expiry.
+  expiresAt DateTime? @map("expires_at")
+
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  createdBy String   @map("created_by")
+
+  guest        Guest               @relation(fields: [guestId], references: [id])
+  refundRecords RefundRecord[]
+  /// PaymentAllocation rows of kind='credit' that consumed this credit.
+  allocations  PaymentAllocation[]
+
+  @@index([guestId, status])
+  @@index([bookingId])
+  @@map("guest_credits")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

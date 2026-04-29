@@ -72,6 +72,10 @@ interface SessionSummary {
   totalTransactions:    number;
   totalCollected:       number;
   breakdown:            Record<string, number>;
+  // Phase 3 — refund attribution to this shift
+  refundCashOut?:       number;
+  refundCreditIssued?:  number;
+  refundCount?:         number;
 }
 
 // Row shape for the "Recent Payments" data table on the shift dashboard.
@@ -758,6 +762,35 @@ export default function CashierPage() {
                       .reduce((s, [, v]) => s + v, 0)
                   )}
                 </p>
+              </div>
+            </div>
+          )}
+
+          {/* Phase 3 — Refund activity for this shift.
+              Only renders when there's been any refund activity, so a normal
+              shift with no refunds keeps the dashboard tight. */}
+          {sessionDetail && ((sessionDetail.refundCashOut ?? 0) > 0 || (sessionDetail.refundCreditIssued ?? 0) > 0) && (
+            <div className="grid grid-cols-3 gap-2">
+              <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 text-center">
+                <p className="text-xs text-orange-700">เงินสดคืน (refund out)</p>
+                <p className="text-xl font-bold text-orange-700">
+                  −฿{baht(sessionDetail.refundCashOut ?? 0)}
+                </p>
+                <p className="text-[10px] text-orange-600 mt-1">{sessionDetail.refundCount ?? 0} รายการ</p>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-center">
+                <p className="text-xs text-amber-800">เครดิตที่ออกให้</p>
+                <p className="text-xl font-bold text-amber-800">
+                  ฿{baht(sessionDetail.refundCreditIssued ?? 0)}
+                </p>
+                <p className="text-[10px] text-amber-700 mt-1">เก็บเป็น Guest Credit</p>
+              </div>
+              <div className="bg-rose-50 border border-rose-200 rounded-lg p-3 text-center">
+                <p className="text-xs text-rose-700">รวมยอดคืนทั้งหมด</p>
+                <p className="text-xl font-bold text-rose-700">
+                  ฿{baht((sessionDetail.refundCashOut ?? 0) + (sessionDetail.refundCreditIssued ?? 0))}
+                </p>
+                <p className="text-[10px] text-rose-600 mt-1">cash + credit</p>
               </div>
             </div>
           )}

@@ -89,7 +89,18 @@ export async function createPendingRefund(
 
 export interface ProcessRefundInput {
   refundId: string;
-  method: PaymentMethod;
+  /**
+   * Phase 3 — three-mode refund picker:
+   *   - cash:   pay back the full amount via cash/transfer/card
+   *   - credit: keep all on guest account as credit (no money out)
+   *   - split:  partial cash + remaining credit
+   */
+  mode: 'cash' | 'credit' | 'split';
+  /** Required for mode='cash' or 'split'; ignored for 'credit'. */
+  method?: PaymentMethod;
+  /** For mode='split': how much paid back as cash/transfer. The rest
+   *  becomes guest credit. Must be > 0 and < total amount. */
+  cashAmount?: number;
   bankName?: string;
   bankAccount?: string;
   bankAccountName?: string;
@@ -105,6 +116,8 @@ export interface ProcessRefundInput {
   // provided we auto-pick the most recent ACTIVE payment on the booking
   // whose remaining balance can absorb the refund.
   reversesPaymentId?: string;
+  /** For mode='credit' / 'split' — optional expiry on the issued credit. */
+  creditExpiresAt?: Date | null;
 }
 
 /**
@@ -123,27 +136,42 @@ export async function processRefund(
   const rec = await tx.refundRecord.findUnique({
     where: { id: input.refundId },
     select: {
-      id: true,
-      bookingId: true,
-      amount: true,
-      source: true,
-      status: true,
-      referenceType: true,
-      referenceId: true,
+      id: true, guestId: true,
+      bookingId: true, amount: true, source: true, status: true,
+      referenceType: true, referenceId: true,
     },
   });
-
   if (!rec) throw new Error('REFUND_NOT_FOUND');
   if (rec.status !== RefundStatus.pending) {
     throw new Error('REFUND_ALREADY_FINALIZED');
   }
 
-  // ── Phase B: cash refunds must come out of an OPEN session ─────────────────
-  let cashSessionId: string | null = null;
-  if (input.method === 'cash') {
-    if (!input.cashSessionId) {
-      throw new Error('CASH_REFUND_REQUIRES_SESSION');
+  // ── Phase 3 — Decide cash + credit split based on mode ────────────────────
+  const total = Number(rec.amount);
+  let cashAmt   = 0;
+  let creditAmt = 0;
+  if (input.mode === 'cash') {
+    cashAmt   = total;
+    creditAmt = 0;
+    if (!input.method) throw new Error('REFUND_METHOD_REQUIRED');
+  } else if (input.mode === 'credit') {
+    cashAmt   = 0;
+    creditAmt = total;
+  } else if (input.mode === 'split') {
+    if (!input.method) throw new Error('REFUND_METHOD_REQUIRED');
+    if (input.cashAmount == null || input.cashAmount <= 0 || input.cashAmount >= total) {
+      throw new Error('SPLIT_CASH_AMOUNT_INVALID');
     }
+    cashAmt   = input.cashAmount;
+    creditAmt = total - input.cashAmount;
+  } else {
+    throw new Error('REFUND_MODE_UNSUPPORTED');
+  }
+
+  // ── Phase B: cash refunds must come out of an OPEN session ────────────────
+  let cashSessionId: string | null = null;
+  if (cashAmt > 0 && input.method === 'cash') {
+    if (!input.cashSessionId) throw new Error('CASH_REFUND_REQUIRES_SESSION');
     const session = await tx.cashSession.findUnique({
       where: { id: input.cashSessionId },
       select: { id: true, status: true },
@@ -154,43 +182,23 @@ export async function processRefund(
     cashSessionId = session.id;
   }
 
-  const creditAccount = ['transfer', 'promptpay', 'credit_card'].includes(input.method)
-    ? LedgerAccount.BANK
-    : LedgerAccount.CASH;
-
-  let debitAccount: LedgerAccount;
-  switch (rec.source) {
-    case RefundSource.deposit:
-      debitAccount = LedgerAccount.DEPOSIT_LIABILITY;
-      break;
-    case RefundSource.overpayment:
-      debitAccount = LedgerAccount.AR;
-      break;
-    case RefundSource.rate_adjustment:
-    case RefundSource.cancellation:
-      debitAccount = LedgerAccount.REVENUE;
-      break;
-    default:
-      throw new Error('REFUND_SOURCE_UNSUPPORTED');
-  }
-
-  // Phase A: resolve which physical FinancialAccount the money comes out of.
+  // Resolve cash/bank account (only relevant for cashAmt > 0)
   const { subKindForPaymentMethod, resolveAccount } = await import('./financialAccount.service');
   let financialAccountId: string | null = null;
-  try {
-    const acc = await resolveAccount(tx, {
-      subKind: subKindForPaymentMethod(input.method),
-      explicitAccountId: input.financialAccountId ?? null,
-    });
-    financialAccountId = acc.id;
-  } catch {
-    // seed missing — keep processing, accountId stays null and can be backfilled
+  if (cashAmt > 0 && input.method) {
+    try {
+      const acc = await resolveAccount(tx, {
+        subKind: subKindForPaymentMethod(input.method),
+        explicitAccountId: input.financialAccountId ?? null,
+      });
+      financialAccountId = acc.id;
+    } catch {
+      // seed missing — keep going with null
+    }
   }
 
-  // ── Phase B: link to the original Payment this refund reverses ─────────────
-  // Priority: caller-provided id > most recent ACTIVE payment on the booking.
-  // Does NOT void the Payment — a Payment that was received is historical fact.
-  // The link is purely for traceability; net-cash reporting uses the ledger.
+  // ── Pick the original Payment to reverse against ──────────────────────────
+  // Used for the kind='reversal' allocation row + Payment.refundedAmount.
   let reversesPaymentId: string | null = input.reversesPaymentId ?? null;
   if (!reversesPaymentId && rec.bookingId) {
     const candidate = await tx.payment.findFirst({
@@ -201,33 +209,124 @@ export async function processRefund(
     reversesPaymentId = candidate?.id ?? null;
   }
 
+  // ── Mode-specific ledger postings ─────────────────────────────────────────
+  // For source='rate_adjustment' / 'cancellation' the upstream caller is
+  // expected to have invoked partialVoidInvoice() FIRST, which posted
+  // DR Revenue / CR AR for the voided line items. So here, the AR balance
+  // is "owed back to guest" -- we close it via:
+  //   cash leg:   DR AR / CR Cash|Bank
+  //   credit leg: DR AR / CR GuestCreditLiability  (handled inside issueGuestCredit)
+  //
+  // For source='deposit' / 'overpayment' AR/Liability handling stays as-is.
+
+  let debitForCash: LedgerAccount;
+  switch (rec.source) {
+    case RefundSource.deposit:        debitForCash = LedgerAccount.DEPOSIT_LIABILITY; break;
+    case RefundSource.overpayment:
+    case RefundSource.rate_adjustment:
+    case RefundSource.cancellation:   debitForCash = LedgerAccount.AR; break;
+    default: throw new Error('REFUND_SOURCE_UNSUPPORTED');
+  }
+
+  if (cashAmt > 0 && input.method) {
+    const creditAccount = ['transfer', 'promptpay', 'credit_card'].includes(input.method)
+      ? LedgerAccount.BANK
+      : LedgerAccount.CASH;
+    await postLedgerPair(tx, {
+      debitAccount:    debitForCash,
+      creditAccount,
+      creditAccountId: financialAccountId,
+      amount:          cashAmt,
+      referenceType:   'RefundRecord',
+      referenceId:     rec.id,
+      description:     `Refund processed (${rec.source}) via ${input.method}`,
+      createdBy:       input.processedBy,
+    });
+  }
+
+  // Issue guest credit for the credit portion (covers mode='credit' AND
+  // 'split' second leg). The service posts DR AR / CR GUEST_CREDIT_LIABILITY.
+  let issuedCreditId: string | null = null;
+  if (creditAmt > 0) {
+    if (rec.source === RefundSource.deposit) {
+      // Deposit refunds shouldn't park as guest credit by default — the
+      // money was already a liability of a different type. Refuse to mix.
+      throw new Error('DEPOSIT_REFUND_AS_CREDIT_NOT_SUPPORTED');
+    }
+    const { issueGuestCredit } = await import('./guestCredit.service');
+    const credit = await issueGuestCredit(tx, {
+      guestId:    rec.guestId,
+      bookingId:  rec.bookingId ?? undefined,
+      amount:     creditAmt,
+      expiresAt:  input.creditExpiresAt ?? null,
+      notes:      `From refund ${rec.id} (${rec.source})`,
+      createdBy:  input.processedBy,
+    });
+    issuedCreditId = credit.id;
+  }
+
+  // ── Reversal allocation against the original Payment ──────────────────────
+  // Without this, folio.totalPayments stays at the original amount forever
+  // and balance never reflects the refund. The allocation amount is
+  // NEGATIVE (the existing aggregator just sums); we pin it to the
+  // first ACTIVE invoice we can find for the booking so the FK stays valid.
+  if (reversesPaymentId && rec.bookingId) {
+    const targetInvoice = await tx.invoice.findFirst({
+      where: { bookingId: rec.bookingId },
+      orderBy: { issueDate: 'asc' },
+      select: { id: true },
+    });
+    if (targetInvoice) {
+      await tx.paymentAllocation.create({
+        data: {
+          paymentId:      reversesPaymentId,
+          invoiceId:      targetInvoice.id,
+          amount:         new Prisma.Decimal(-total),
+          kind:           'reversal' as never,
+          refundRecordId: rec.id,
+        },
+      });
+    }
+    // Bump Payment.refundedAmount counter for "remaining reversible" lookups
+    await tx.payment.update({
+      where: { id: reversesPaymentId },
+      data:  { refundedAmount: { increment: new Prisma.Decimal(total) } },
+    });
+  }
+
+  // ── Mark refund record processed ──────────────────────────────────────────
   await tx.refundRecord.update({
     where: { id: input.refundId },
     data: {
-      status: RefundStatus.processed,
-      method: input.method,
-      bankName: input.bankName ?? null,
-      bankAccount: input.bankAccount ?? null,
+      status:          RefundStatus.processed,
+      mode:            input.mode as never,
+      method:          input.method ?? null,
+      cashAmount:      cashAmt   > 0 ? new Prisma.Decimal(cashAmt)   : null,
+      creditAmount:    creditAmt > 0 ? new Prisma.Decimal(creditAmt) : null,
+      guestCreditId:   issuedCreditId,
+      bankName:        input.bankName ?? null,
+      bankAccount:     input.bankAccount ?? null,
       bankAccountName: input.bankAccountName ?? null,
-      notes: input.notes ?? undefined,
-      processedAt: new Date(),
-      processedBy: input.processedBy,
+      notes:           input.notes ?? undefined,
+      processedAt:     new Date(),
+      processedBy:     input.processedBy,
       financialAccountId,
       cashSessionId,
       reversesPaymentId,
     },
   });
 
-  await postLedgerPair(tx, {
-    debitAccount,
-    creditAccount,
-    creditAccountId: financialAccountId, // stamp chosen account on the CR leg
-    amount: rec.amount,
-    referenceType: 'RefundRecord',
-    referenceId: rec.id,
-    description: `Refund processed (${rec.source}) via ${input.method}`,
-    createdBy: input.processedBy,
-  });
+  // Recalc folio so the cashier-facing balance reflects the refund
+  if (rec.bookingId) {
+    const folio = await tx.folio.findUnique({
+      where: { bookingId: rec.bookingId },
+      select: { id: true },
+    });
+    if (folio) {
+      const { recalculateFolioBalance } = await import('./folio.service');
+      await recalculateFolioBalance(tx, folio.id);
+    }
+  }
 }
 
 /**

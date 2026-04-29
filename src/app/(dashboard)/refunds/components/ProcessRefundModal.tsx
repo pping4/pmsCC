@@ -1,21 +1,32 @@
 'use client';
 
 /**
- * ProcessRefundModal — confirms method + bank details, then fires onConfirm.
- * Purely presentational; server validates + posts ledger.
+ * ProcessRefundModal — Phase 3 three-mode refund picker.
+ *
+ * Operator picks ONE of three modes, then provides the necessary supporting
+ * fields. The server validates again + posts the matching ledger pair(s) +
+ * issues a GuestCredit when the credit portion > 0.
+ *
+ *   1. cash    — pay back the full amount via cash/transfer/card
+ *   2. credit  — keep all on guest account as GuestCredit (no money out)
+ *   3. split   — partial cash + remaining credit
  */
 
 import { useState } from 'react';
 import { fmtBaht } from '@/lib/date-format';
 
 type PaymentMethod = 'cash' | 'transfer' | 'credit_card' | 'promptpay' | 'ota_collect';
+type RefundMode    = 'cash' | 'credit' | 'split';
 
 export interface RefundProcessInput {
-  method:          PaymentMethod;
-  bankName?:       string;
-  bankAccount?:    string;
+  mode:             RefundMode;
+  method?:          PaymentMethod;       // required for cash/split
+  cashAmount?:      number;              // required for split
+  bankName?:        string;
+  bankAccount?:     string;
   bankAccountName?: string;
-  notes?:          string;
+  notes?:           string;
+  creditExpiresAt?: string;              // ISO datetime
 }
 
 interface Props {
@@ -40,15 +51,27 @@ const METHOD_OPTIONS: Array<{ value: PaymentMethod; label: string; bank: boolean
   { value: 'credit_card', label: '💳 บัตรเครดิต',    bank: false },
 ];
 
-export default function ProcessRefundModal({ refund, submitting, onCancel, onConfirm }: Props) {
-  const [method, setMethod] = useState<PaymentMethod>('transfer');
-  const [bankName, setBankName] = useState('');
-  const [bankAccount, setBankAccount] = useState('');
-  const [bankAccountName, setBankAccountName] = useState('');
-  const [notes, setNotes] = useState('');
-  const [error, setError] = useState('');
+const MODE_OPTIONS: Array<{ value: RefundMode; label: string; sub: string; emoji: string }> = [
+  { value: 'cash',   emoji: '💵', label: 'คืนเงินทั้งหมด',          sub: 'จ่ายเงินสด/โอนคืนเต็มจำนวน' },
+  { value: 'credit', emoji: '🎫', label: 'เก็บเป็นเครดิต',           sub: 'ไม่จ่ายเงิน — เก็บไว้ในบัญชีลูกค้า' },
+  { value: 'split',  emoji: '✂️', label: 'คืนบางส่วน + เก็บเครดิต',  sub: 'แบ่งเป็น 2 ส่วน' },
+];
 
-  const needsBank = METHOD_OPTIONS.find(o => o.value === method)?.bank ?? false;
+export default function ProcessRefundModal({ refund, submitting, onCancel, onConfirm }: Props) {
+  const [mode, setMode]                       = useState<RefundMode>('cash');
+  const [method, setMethod]                   = useState<PaymentMethod>('transfer');
+  const [cashAmount, setCashAmount]           = useState<string>('');
+  const [bankName, setBankName]               = useState('');
+  const [bankAccount, setBankAccount]         = useState('');
+  const [bankAccountName, setBankAccountName] = useState('');
+  const [notes, setNotes]                     = useState('');
+  const [error, setError]                     = useState('');
+
+  const needsBank   = (mode === 'cash' || mode === 'split') &&
+                      (METHOD_OPTIONS.find(o => o.value === method)?.bank ?? false);
+  const needsMethod = mode === 'cash' || mode === 'split';
+  const cashNum     = Number(cashAmount) || 0;
+  const creditPart  = mode === 'split' ? Math.max(0, refund.amount - cashNum) : 0;
 
   function handleSubmit() {
     setError('');
@@ -56,8 +79,14 @@ export default function ProcessRefundModal({ refund, submitting, onCancel, onCon
       setError('กรุณาระบุเลขบัญชีปลายทาง');
       return;
     }
+    if (mode === 'split') {
+      if (cashNum <= 0)              { setError('จำนวนเงินที่คืนสด ต้องมากกว่า 0'); return; }
+      if (cashNum >= refund.amount)  { setError('จำนวนเงินที่คืนสด ต้องน้อยกว่ายอดรวม (ใช้ "คืนเงินทั้งหมด" แทน)'); return; }
+    }
     onConfirm({
-      method,
+      mode,
+      method:          needsMethod ? method : undefined,
+      cashAmount:      mode === 'split' ? cashNum : undefined,
       bankName:        needsBank ? bankName.trim()        || undefined : undefined,
       bankAccount:     needsBank ? bankAccount.trim()     || undefined : undefined,
       bankAccountName: needsBank ? bankAccountName.trim() || undefined : undefined,
@@ -77,7 +106,7 @@ export default function ProcessRefundModal({ refund, submitting, onCancel, onCon
         onClick={e => e.stopPropagation()}
         style={{
           background: '#fff', borderRadius: 12, padding: 24,
-          width: 520, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto',
+          width: 580, maxWidth: '95vw', maxHeight: '90vh', overflowY: 'auto',
           boxShadow: '0 20px 25px rgba(0,0,0,0.15)',
         }}
       >
@@ -115,34 +144,104 @@ export default function ProcessRefundModal({ refund, submitting, onCancel, onCon
           </div>
         )}
 
-        {/* Method */}
+        {/* ── Mode picker ─────────────────────────────────────────────────── */}
         <div style={{ marginBottom: 14 }}>
           <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6 }}>
-            วิธีคืนเงิน
+            ผู้มีอำนาจเลือกวิธีการ
           </label>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-            {METHOD_OPTIONS.map(o => (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+            {MODE_OPTIONS.map(m => (
               <button
-                key={o.value}
+                key={m.value}
                 type="button"
-                onClick={() => setMethod(o.value)}
+                onClick={() => setMode(m.value)}
                 disabled={submitting}
                 style={{
-                  padding: '10px 12px',
+                  padding: '10px 14px',
                   borderRadius: 8,
-                  border: `1px solid ${method === o.value ? '#2563eb' : '#d1d5db'}`,
-                  background: method === o.value ? '#eff6ff' : '#fff',
-                  color: method === o.value ? '#1e40af' : '#374151',
-                  fontSize: 13, fontWeight: 600,
+                  border: `2px solid ${mode === m.value ? '#2563eb' : '#e5e7eb'}`,
+                  background: mode === m.value ? '#eff6ff' : '#fff',
                   cursor: submitting ? 'not-allowed' : 'pointer',
                   textAlign: 'left',
+                  display: 'flex', alignItems: 'center', gap: 10,
                 }}
               >
-                {o.label}
+                <span style={{ fontSize: 22 }}>{m.emoji}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: mode === m.value ? '#1e40af' : '#111827' }}>
+                    {m.label}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{m.sub}</div>
+                </div>
+                {mode === m.value && (
+                  <span style={{ color: '#2563eb', fontSize: 14, fontWeight: 700 }}>✓</span>
+                )}
               </button>
             ))}
           </div>
         </div>
+
+        {/* ── Cash split breakdown (mode=split only) ──────────────────────── */}
+        {mode === 'split' && (
+          <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 8, padding: 12, marginBottom: 14 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#0c4a6e', marginBottom: 6 }}>
+              จำนวนเงินที่คืนสด/โอน (ที่เหลือจะเก็บเป็นเครดิต)
+            </label>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <span style={{ fontSize: 14, color: '#0c4a6e' }}>฿</span>
+              <input
+                type="number"
+                value={cashAmount}
+                onChange={e => setCashAmount(e.target.value)}
+                disabled={submitting}
+                min={1}
+                max={refund.amount - 1}
+                step="0.01"
+                style={{
+                  flex: 1, padding: '8px 10px', border: '1px solid #d1d5db', borderRadius: 6,
+                  fontSize: 14, fontFamily: 'ui-monospace, monospace', boxSizing: 'border-box',
+                }}
+                placeholder={`มากกว่า 0 น้อยกว่า ${fmtBaht(refund.amount)}`}
+              />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: '#0c4a6e' }}>
+              คืนสด: <strong style={{ fontFamily: 'ui-monospace, monospace' }}>฿{fmtBaht(cashNum)}</strong>
+              <span style={{ margin: '0 8px', color: '#94a3b8' }}>•</span>
+              เก็บเป็นเครดิต: <strong style={{ fontFamily: 'ui-monospace, monospace' }}>฿{fmtBaht(creditPart)}</strong>
+            </div>
+          </div>
+        )}
+
+        {/* ── Method picker (cash + split only) ───────────────────────────── */}
+        {needsMethod && (
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6 }}>
+              ช่องทางคืนเงิน {mode === 'split' && <span style={{ color: '#6b7280', fontWeight: 400 }}>(สำหรับเงินสดส่วน)</span>}
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              {METHOD_OPTIONS.map(o => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => setMethod(o.value)}
+                  disabled={submitting}
+                  style={{
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    border: `1px solid ${method === o.value ? '#2563eb' : '#d1d5db'}`,
+                    background: method === o.value ? '#eff6ff' : '#fff',
+                    color: method === o.value ? '#1e40af' : '#374151',
+                    fontSize: 13, fontWeight: 600,
+                    cursor: submitting ? 'not-allowed' : 'pointer',
+                    textAlign: 'left',
+                  }}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Bank fields */}
         {needsBank && (
@@ -152,6 +251,13 @@ export default function ProcessRefundModal({ refund, submitting, onCancel, onCon
             <div style={{ gridColumn: 'span 2' }}>
               <Field label="ชื่อบัญชี" value={bankAccountName} onChange={setBankAccountName} disabled={submitting} />
             </div>
+          </div>
+        )}
+
+        {/* Credit info banner (mode=credit / split) */}
+        {(mode === 'credit' || mode === 'split') && (
+          <div style={{ background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, padding: '8px 12px', marginBottom: 14, fontSize: 12, color: '#166534' }}>
+            🎫 จะออก <strong>เครดิตคงเหลือ</strong> ฿{fmtBaht(mode === 'credit' ? refund.amount : creditPart)} ให้ลูกค้า — สามารถใช้ในการจองครั้งถัดไป
           </div>
         )}
 
@@ -197,7 +303,7 @@ export default function ProcessRefundModal({ refund, submitting, onCancel, onCon
                 borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin 0.6s linear infinite',
               }} />
             )}
-            ยืนยันจ่ายคืน
+            ✓ ยืนยันดำเนินการ
           </button>
         </div>
 

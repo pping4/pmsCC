@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { recalculateRate, RateCalculationContext } from '@/services/bookingRate.service';
 import { logActivity } from '@/services/activityLog.service';
-import { addCharge, addNightlyRoomCharges, createInvoiceFromFolio, getFolioByBookingId } from '@/services/folio.service';
+import { addCharge, addNightlyRoomCharges, createInvoiceFromFolio, getFolioByBookingId, partialVoidInvoice, voidCharge } from '@/services/folio.service';
 import { createPendingRefund } from '@/services/refund.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 import { z } from 'zod';
@@ -858,58 +858,55 @@ export async function PATCH(request: NextRequest) {
             ? 'เงินมัดจำเกินกว่าอัตราใหม่ (drag-resize)'
             : `ลดการพัก ${originalNights - newNights} คืน (drag-resize)`;
 
-        // Void the FolioLineItem rows for the nights we just removed BEFORE
-        // creating the refund. Without this, folio.totalCharges still
-        // reflects the original stay (e.g. 3 × 1000 = 3000) while the
-        // booking now covers only 2 nights, so:
-        //   - the tape-chart tooltip shows  per-night = totalCharges/nights
-        //     = 3000/2 = 1500/คืน  (wrong; rate is still 1000/คืน)
-        //   - folio.balance stays 0 instead of becoming -1000 (we owe guest)
-        //   - the cashier can't see "we owe guest 1000" anywhere on /folio.
-        // Voiding the affected rows fixes all three at once.
-        // Daily bookings only — monthly stays use one big row that's harder
-        // to surgically void; the existing PENDING refund still owns it.
+        // Phase 3 — properly void the affected line items via the
+        // partialVoidInvoice helper. This (a) marks the right rows VOIDED,
+        // (b) posts DR Revenue / CR AR ledger reversal so subledger and
+        // GL stay in sync, (c) resyncs folio totals.  Old code did a raw
+        // updateMany + manual recalc which left ledger and folio out of
+        // sync (folio.totalCharges dropped, but no ledger reversal was
+        // posted -- so the GL still showed the original revenue).
         if (booking.bookingType === 'daily') {
           const folio = await getFolioByBookingId(tx, bookingId);
           if (folio) {
-            // Anything whose serviceDate is on/after the new checkOut is gone.
-            await tx.folioLineItem.updateMany({
+            // Find the folio line items for the now-removed nights, grouped
+            // by their parent invoice so we can call partialVoidInvoice
+            // once per invoice.
+            const orphans = await tx.folioLineItem.findMany({
               where: {
                 folioId:    folio.folioId,
                 chargeType: 'ROOM' as never,
                 billingStatus: { not: 'VOIDED' as never },
                 serviceDate: { gte: newCheckOut },
               },
-              data: {
-                billingStatus: 'VOIDED' as never,
-                notes:         `Voided by drag-shorten (${originalNights - newNights} คืน)`,
+              select: {
+                id: true,
+                invoiceItem: { select: { invoiceId: true } },
               },
             });
-            // Resync folio totals so the tooltip + folio page see the new truth.
-            const recalcRows = await tx.folioLineItem.aggregate({
-              where: {
-                folioId:    folio.folioId,
-                billingStatus: { not: 'VOIDED' as never },
-              },
-              _sum: { amount: true },
-            });
-            const allocSum = await tx.paymentAllocation.aggregate({
-              where: {
-                invoice: { folioId: folio.folioId },
-                payment: { status: 'ACTIVE' },
-              },
-              _sum: { amount: true },
-            });
-            const totalCharges  = Number(recalcRows._sum.amount  ?? 0);
-            const totalPayments = Number(allocSum._sum.amount    ?? 0);
-            await tx.folio.update({
-              where: { id: folio.folioId },
-              data: {
-                totalCharges:  totalCharges,
-                totalPayments: totalPayments,
-                balance:       totalCharges - totalPayments,
-              },
-            });
+            const byInvoice = new Map<string, string[]>();
+            for (const o of orphans) {
+              const invId = o.invoiceItem?.invoiceId;
+              if (!invId) continue; // unbilled — can be voided directly via voidCharge
+              const list = byInvoice.get(invId) ?? [];
+              list.push(o.id);
+              byInvoice.set(invId, list);
+            }
+            const reason = `Voided by drag-shorten (${originalNights - newNights} คืน)`;
+            for (const [invId, ids] of byInvoice) {
+              await partialVoidInvoice(tx, {
+                invoiceId:        invId,
+                folioLineItemIds: ids,
+                reason,
+                voidedBy:         changedBy,
+              });
+            }
+            // Any UNBILLED orphans (extension nights that never made it to
+            // an invoice) — void each via the existing voidCharge helper.
+            for (const o of orphans) {
+              if (!o.invoiceItem?.invoiceId) {
+                await voidCharge(tx, o.id);
+              }
+            }
           }
         }
 

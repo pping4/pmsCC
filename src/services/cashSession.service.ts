@@ -629,6 +629,40 @@ export async function getSessionSummary(tx: TxClient, sessionId: string) {
 
   const totalCollected = session.payments.reduce((sum, p) => sum + Number(p.amount), 0);
 
+  // Phase 3 — refund activity attributed to this shift.
+  // - cashOut:       cash refunds processed against this session
+  // - creditIssued:  amount kept as guest credit (mode credit + split's credit leg)
+  //                  (matched by created_at within shift window since GuestCredits
+  //                   themselves don't carry a session id)
+  // The `created_at` window vs paymentDate is fine here: refunds are issued
+  // synchronously from the cashier's UI within the shift.
+  const refunds = await tx.refundRecord.findMany({
+    where:  { cashSessionId: sessionId },
+    select: { amount: true, mode: true, cashAmount: true, creditAmount: true, processedAt: true },
+  });
+  let refundCashOut    = 0;
+  let refundCreditIssued = 0;
+  for (const r of refunds) {
+    refundCashOut      += Number(r.cashAmount   ?? r.amount);
+    refundCreditIssued += Number(r.creditAmount ?? 0);
+  }
+  // Credit-only refunds aren't attached to a cashSession (no money out),
+  // so include them by created-at window matching this shift's open period.
+  if (session.status === 'OPEN' || session.status === 'CLOSED') {
+    const fromAt = session.openedAt;
+    const toAt   = session.closedAt ?? new Date();
+    const creditOnly = await tx.refundRecord.aggregate({
+      where: {
+        cashSessionId: null,
+        mode:          'credit',
+        status:        'processed',
+        processedAt:   { gte: fromAt, lte: toAt },
+      },
+      _sum: { creditAmount: true, amount: true },
+    });
+    refundCreditIssued += Number(creditOnly._sum.creditAmount ?? creditOnly._sum.amount ?? 0);
+  }
+
   return {
     id:                   session.id,
     status:               session.status,
@@ -650,5 +684,9 @@ export async function getSessionSummary(tx: TxClient, sessionId: string) {
     totalTransactions:    session.payments.length,
     totalCollected,
     breakdown,
+    // Phase 3 — refund activity for this shift
+    refundCashOut,
+    refundCreditIssued,
+    refundCount: refunds.length,
   };
 }

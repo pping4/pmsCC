@@ -14,13 +14,26 @@ import { PaymentMethod } from '@prisma/client';
 import { z, ZodError } from 'zod';
 
 const ProcessSchema = z.object({
-  method:             z.nativeEnum(PaymentMethod),
+  /** Phase 3 — three-mode refund. Defaults to 'cash' for backward compat. */
+  mode:               z.enum(['cash', 'credit', 'split']).default('cash'),
+  /** Required when mode='cash' or 'split'; ignored for 'credit'. */
+  method:             z.nativeEnum(PaymentMethod).optional(),
+  /** For mode='split' — cash portion (rest becomes guest credit). */
+  cashAmount:         z.number().positive().optional(),
   bankName:           z.string().trim().max(80).optional(),
   bankAccount:        z.string().trim().max(40).optional(),
   bankAccountName:    z.string().trim().max(120).optional(),
   notes:              z.string().trim().max(500).optional(),
   financialAccountId: z.string().uuid().optional(),
-});
+  /** ISO date string — optional expiry for the issued credit. */
+  creditExpiresAt:    z.string().datetime().optional(),
+}).refine(
+  (d) => d.mode === 'credit' || d.method !== undefined,
+  { message: 'method is required when mode=cash or split' },
+).refine(
+  (d) => d.mode !== 'split' || (d.cashAmount !== undefined && d.cashAmount > 0),
+  { message: 'cashAmount is required for mode=split', path: ['cashAmount'] },
+);
 
 export async function POST(
   request: NextRequest,
@@ -60,8 +73,10 @@ export async function POST(
     await prisma.$transaction(async (tx) => {
       // Sprint 4B: auto-resolve cash session from the caller's open shift when
       // paying a cash refund. Never trust a client-sent id.
+      const needsCashLeg =
+        (input.mode === 'cash' || input.mode === 'split') && input.method === 'cash';
       let cashSessionId: string | undefined;
-      if (input.method === 'cash') {
+      if (needsCashLeg) {
         const active = await getActiveSessionForUser(tx, userId);
         if (!active) throw new Error('CASH_SESSION_NOT_OPEN');
         cashSessionId = active.id;
@@ -69,7 +84,9 @@ export async function POST(
 
       await processRefund(tx, {
         refundId:           params.id,
+        mode:               input.mode,
         method:             input.method,
+        cashAmount:         input.cashAmount,
         bankName:           input.bankName,
         bankAccount:        input.bankAccount,
         bankAccountName:    input.bankAccountName,
@@ -77,6 +94,7 @@ export async function POST(
         processedBy:        userId,
         financialAccountId: input.financialAccountId,
         cashSessionId,
+        creditExpiresAt:    input.creditExpiresAt ? new Date(input.creditExpiresAt) : null,
       });
     });
 

@@ -37,6 +37,7 @@ const DEFAULT_ACCOUNTS: SeedAccount[] = [
 
   // Liabilities
   { code: '2110-01', name: 'เงินมัดจำลูกค้า',           nameEN: 'Guest Deposits Payable',     kind: 'LIABILITY', subKind: 'DEPOSIT_LIABILITY', isDefault: true },
+  { code: '2115-01', name: 'เครดิตคงเหลือลูกค้า',       nameEN: 'Guest Credit Liability',     kind: 'LIABILITY', subKind: 'GUEST_CREDIT',      isDefault: true },
   { code: '2120-01', name: 'ค่าคอมมิชชั่น OTA ค้างจ่าย', nameEN: 'OTA Commission Payable',    kind: 'LIABILITY', subKind: 'AGENT_PAYABLE',     isDefault: true },
   { code: '2130-01', name: 'ภาษีขาย (VAT output)',      nameEN: 'VAT Output Payable',         kind: 'LIABILITY', subKind: 'VAT_OUTPUT',        isDefault: true },
   { code: '2131-01', name: 'ค่าบริการ 10% ค้างจ่าย',    nameEN: 'Service Charge Payable',     kind: 'LIABILITY', subKind: 'SERVICE_CHARGE_PAYABLE', isDefault: true },
