@@ -53,6 +53,12 @@ export interface CreateDepositInput {
    * transfer-deposit hits the system-default BANK account.
    */
   receivingAccountId?: string;
+  /** Phase 4 — credit-card EDC fields when paymentMethod='credit_card'. */
+  terminalId?: string;
+  cardBrand?: string;
+  cardType?: string;
+  cardLast4?: string;
+  authCode?: string;
 }
 
 export async function createSecurityDeposit(tx: TxClient, input: CreateDepositInput) {
@@ -146,6 +152,12 @@ export async function createSecurityDeposit(tx: TxClient, input: CreateDepositIn
       // cashier shift dashboard and money-overview can attribute it
       // correctly when the deposit was paid via transfer.
       receivingAccountId: input.receivingAccountId ?? null,
+      // Phase 4 — credit-card metadata
+      terminalId: input.terminalId ?? null,
+      cardBrand:  (input.cardBrand ?? null) as never,
+      cardType:   (input.cardType  ?? null) as never,
+      cardLast4:  input.cardLast4 ?? null,
+      authCode:   input.authCode  ?? null,
     },
   });
 

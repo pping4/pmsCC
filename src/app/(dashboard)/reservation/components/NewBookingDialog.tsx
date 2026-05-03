@@ -10,6 +10,7 @@ import { fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
 import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
+import { CardTerminalPicker } from '@/components/payment/CardTerminalPicker';
 
 interface NewBookingDialogProps {
   isOpen: boolean;
@@ -75,6 +76,12 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
   // Transfer / promptpay — receiving bank account. Auto-defaulted by the
   // picker so most cashiers never see it; required by the API though.
   const [receivingAccountId, setReceivingAccountId] = useState<string | undefined>();
+
+  // Credit card — EDC terminal + brand are server-required; type/last4/authCode optional
+  const [cardState, setCardState] = useState<{
+    terminalId?: string; cardBrand?: string; cardType?: string;
+    cardLast4?: string;  authCode?: string;
+  }>({});
 
   // ─── Guest ────────────────────────────────────────────────────────────────────
   const [selectedGuest, setSelectedGuest] = useState<GuestSearchResult | null>(null);
@@ -428,8 +435,8 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
       toast.warning('กรุณาเลือกบัญชีที่รับเงิน'); return;
     }
     if (collectPayment && paymentMethod === 'credit_card') {
-      toast.warning('บัตรเครดิตต้องระบุเครื่อง EDC — ใช้ฟอร์มเก็บเงินที่หน้า Guest Folio แทน');
-      return;
+      if (!cardState.terminalId) { toast.warning('กรุณาเลือกเครื่อง EDC'); return; }
+      if (!cardState.cardBrand)  { toast.warning('กรุณาเลือกแบรนด์บัตร');  return; }
     }
 
     setIsLoading(true);
@@ -454,6 +461,14 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
           // BANK account in the chart of accounts.
           ...(collectPayment && paymentMethod === 'transfer' && receivingAccountId
             ? { receivingAccountId } : {}),
+          // Credit card — EDC + brand are server-required; the rest are optional
+          ...(collectPayment && paymentMethod === 'credit_card' ? {
+            terminalId: cardState.terminalId,
+            cardBrand:  cardState.cardBrand,
+            ...(cardState.cardType  ? { cardType:  cardState.cardType  } : {}),
+            ...(cardState.cardLast4 ? { cardLast4: cardState.cardLast4 } : {}),
+            ...(cardState.authCode  ? { authCode:  cardState.authCode  } : {}),
+          } : {}),
         }),
       });
       if (!r.ok) {
@@ -1094,12 +1109,16 @@ const NewBookingDialog: React.FC<NewBookingDialogProps> = ({
                       </div>
                     )}
                     {paymentMethod === 'credit_card' && (
-                      <div style={{
-                        marginTop: 10, padding: '8px 12px',
-                        backgroundColor: '#eff6ff', borderRadius: 6,
-                        fontSize: 12, color: '#1e40af',
-                      }}>
-                        ℹ️ บัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเก็บเงินเต็มที่หน้า Guest Folio แทน
+                      <div style={{ marginTop: 10 }}>
+                        <CardTerminalPicker
+                          terminalId={cardState.terminalId}
+                          cardBrand={cardState.cardBrand}
+                          cardType={cardState.cardType}
+                          cardLast4={cardState.cardLast4}
+                          authCode={cardState.authCode}
+                          onChange={(v) => setCardState(v)}
+                          disabled={isLoading}
+                        />
                       </div>
                     )}
 

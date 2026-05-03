@@ -48,6 +48,12 @@ const CheckoutSchema = z.object({
   paymentMethod:   z.enum(['cash', 'transfer', 'credit_card']).optional(),
   /** Bank account that received the transfer (when paymentMethod=transfer). */
   receivingAccountId: z.string().min(1).optional(),
+  /** Phase 4 — credit-card EDC fields (when paymentMethod=credit_card). */
+  terminalId: z.string().uuid().optional(),
+  cardBrand:  z.enum(['VISA', 'MASTER', 'JCB', 'UNIONPAY', 'AMEX', 'OTHER']).optional(),
+  cardType:   z.enum(['NORMAL', 'PREMIUM', 'CORPORATE', 'UNKNOWN']).optional(),
+  cardLast4:  z.string().regex(/^\d{4}$/).optional(),
+  authCode:   z.string().trim().max(12).optional(),
   // Sprint 4B: cashSessionId removed from schema — server resolves it from
   // the authenticated user's open shift via getActiveSessionForUser.
 }).refine(
@@ -82,9 +88,15 @@ export async function POST(request: Request) {
     );
   }
 
-  const { bookingId, notes, badDebt, badDebtNote, paymentMethod, receivingAccountId } = parsed.data;
+  const {
+    bookingId, notes, badDebt, badDebtNote, paymentMethod,
+    receivingAccountId, terminalId, cardBrand, cardType, cardLast4, authCode,
+  } = parsed.data;
   if (paymentMethod === 'transfer' && !receivingAccountId) {
     return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
+  }
+  if (paymentMethod === 'credit_card' && (!terminalId || !cardBrand)) {
+    return NextResponse.json({ error: 'กรุณาเลือกเครื่อง EDC + แบรนด์บัตร' }, { status: 422 });
   }
   const userId   = authSession.user.id ?? authSession.user.email ?? 'system';
 
@@ -408,6 +420,11 @@ export async function POST(request: Request) {
             allocations:    [{ invoiceId: coResult.invoiceId, amount: coResult.grandTotal }],
             createdBy:      userId,
             receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
+            terminalId: paymentMethod === 'credit_card' ? terminalId : undefined,
+            cardBrand:  paymentMethod === 'credit_card' ? cardBrand  as never : undefined,
+            cardType:   paymentMethod === 'credit_card' ? cardType   as never : undefined,
+            cardLast4:  paymentMethod === 'credit_card' ? cardLast4  : undefined,
+            authCode:   paymentMethod === 'credit_card' ? authCode   : undefined,
           });
           coPayNum = coPaymentResult.paymentNumber;
           coRcpNum = coPaymentResult.receiptNumber;

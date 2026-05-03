@@ -8,6 +8,7 @@ import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 import ReceiptModal from '@/components/receipt/ReceiptModal';
 import type { ReceiptData } from '@/components/receipt/types';
 import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
+import { CardTerminalPicker } from '@/components/payment/CardTerminalPicker';
 import InvoiceModal from '@/components/invoice/InvoiceModal';
 import MoveRoomDialog from './MoveRoomDialog';
 import SplitSegmentDialog from './SplitSegmentDialog';
@@ -188,6 +189,8 @@ export default function DetailPanel({
   // Auto-defaulted by ReceivingAccountPicker when there's only one bank
   // account (or one is flagged isDefault).
   const [billingReceivingAccountId, setBillingReceivingAccountId] = useState<string | undefined>();
+  // Phase 4 — Credit-card EDC for the bill-tab quick-pay form.
+  const [billingCard, setBillingCard] = useState<{ terminalId?: string; cardBrand?: string; cardType?: string; cardLast4?: string; authCode?: string }>({});
 
   // ── Check-in payment step ─────────────────────────────────────────────────
   // 'idle'     → show normal action buttons
@@ -206,6 +209,13 @@ export default function DetailPanel({
   // Same idea for the extend / checkout / checkout-collect flows below.
   const [extendReceivingAccountId,  setExtendReceivingAccountId]  = useState<string | undefined>();
   const [checkoutReceivingAccountId, setCheckoutReceivingAccountId] = useState<string | undefined>();
+  // Phase 4 — Credit-card EDC pickers (one per flow).  Stays empty unless
+  // method=credit_card, in which case the picker auto-populates terminal +
+  // brand and the rest is optional.
+  type CardFields = { terminalId?: string; cardBrand?: string; cardType?: string; cardLast4?: string; authCode?: string };
+  const [checkinCard,  setCheckinCard]  = useState<CardFields>({});
+  const [extendCard,   setExtendCard]   = useState<CardFields>({});
+  const [checkoutCard, setCheckoutCard] = useState<CardFields>({});
 
   // ── Check-out payment step ────────────────────────────────────────────────
   // 'idle'      → normal action buttons
@@ -541,6 +551,12 @@ export default function DetailPanel({
         setError('กรุณาเลือกบัญชีที่รับเงิน');
         return;
       }
+      if (billingPayMethod === 'credit_card'
+          && (!billingCard.terminalId || !billingCard.cardBrand)) {
+        setBillingPayLoading(false);
+        setError('กรุณาเลือกเครื่อง EDC + แบรนด์บัตร');
+        return;
+      }
       const res  = await fetch(`/api/bookings/${booking.id}/pay`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -557,6 +573,14 @@ export default function DetailPanel({
           // Sprint 5: bank-transfer fields
           ...(billingPayMethod === 'transfer' || billingPayMethod === 'promptpay'
             ? { receivingAccountId: billingReceivingAccountId } : {}),
+          // Phase 4: credit-card fields
+          ...(billingPayMethod === 'credit_card' ? {
+            terminalId: billingCard.terminalId,
+            cardBrand:  billingCard.cardBrand,
+            ...(billingCard.cardType  ? { cardType:  billingCard.cardType  } : {}),
+            ...(billingCard.cardLast4 ? { cardLast4: billingCard.cardLast4 } : {}),
+            ...(billingCard.authCode  ? { authCode:  billingCard.authCode  } : {}),
+          } : {}),
         }),
       });
       const data = await res.json() as { success?: boolean; error?: string; receipt?: ReceiptData };
@@ -641,6 +665,16 @@ export default function DetailPanel({
           && checkinReceivingAccountId) {
         payload.receivingAccountId = checkinReceivingAccountId;
       }
+      // Phase 4 — Same idea for credit_card: send EDC + brand for whichever
+      // legs need them.  Server validates per-leg.
+      if ((depositMethod === 'credit_card' || upfrontMethod === 'credit_card')
+          && checkinCard.terminalId && checkinCard.cardBrand) {
+        payload.terminalId = checkinCard.terminalId;
+        payload.cardBrand  = checkinCard.cardBrand;
+        if (checkinCard.cardType)  payload.cardType  = checkinCard.cardType;
+        if (checkinCard.cardLast4) payload.cardLast4 = checkinCard.cardLast4;
+        if (checkinCard.authCode)  payload.authCode  = checkinCard.authCode;
+      }
 
       const res = await fetch('/api/checkin', {
         method: 'POST',
@@ -692,6 +726,13 @@ export default function DetailPanel({
         payload.paymentMethod = extendPayMethod;
         if (extendPayMethod === 'transfer' && extendReceivingAccountId) {
           payload.receivingAccountId = extendReceivingAccountId;
+        }
+        if (extendPayMethod === 'credit_card' && extendCard.terminalId && extendCard.cardBrand) {
+          payload.terminalId = extendCard.terminalId;
+          payload.cardBrand  = extendCard.cardBrand;
+          if (extendCard.cardType)  payload.cardType  = extendCard.cardType;
+          if (extendCard.cardLast4) payload.cardLast4 = extendCard.cardLast4;
+          if (extendCard.authCode)  payload.authCode  = extendCard.authCode;
         }
       }
 
@@ -811,6 +852,13 @@ export default function DetailPanel({
         payload.paymentMethod = checkoutPayMethod;
         if (checkoutPayMethod === 'transfer' && checkoutReceivingAccountId) {
           payload.receivingAccountId = checkoutReceivingAccountId;
+        }
+        if (checkoutPayMethod === 'credit_card' && checkoutCard.terminalId && checkoutCard.cardBrand) {
+          payload.terminalId = checkoutCard.terminalId;
+          payload.cardBrand  = checkoutCard.cardBrand;
+          if (checkoutCard.cardType)  payload.cardType  = checkoutCard.cardType;
+          if (checkoutCard.cardLast4) payload.cardLast4 = checkoutCard.cardLast4;
+          if (checkoutCard.authCode)  payload.authCode  = checkoutCard.authCode;
         }
       }
 
@@ -1157,6 +1205,18 @@ export default function DetailPanel({
                               />
                             </div>
                           )}
+                          {upfrontMethod === 'credit_card' && (
+                            <div style={{ marginTop: 8 }}>
+                              <CardTerminalPicker
+                                terminalId={checkinCard.terminalId}
+                                cardBrand={checkinCard.cardBrand}
+                                cardType={checkinCard.cardType}
+                                cardLast4={checkinCard.cardLast4}
+                                authCode={checkinCard.authCode}
+                                onChange={(v) => setCheckinCard(v)}
+                              />
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1234,6 +1294,18 @@ export default function DetailPanel({
                               receivingAccountId={checkinReceivingAccountId}
                               onChange={setCheckinReceivingAccountId}
                               label="บัญชีที่รับเงินมัดจำ"
+                            />
+                          </div>
+                        )}
+                        {depositMethod === 'credit_card' && (
+                          <div style={{ marginTop: 8 }}>
+                            <CardTerminalPicker
+                              terminalId={checkinCard.terminalId}
+                              cardBrand={checkinCard.cardBrand}
+                              cardType={checkinCard.cardType}
+                              cardLast4={checkinCard.cardLast4}
+                              authCode={checkinCard.authCode}
+                              onChange={(v) => setCheckinCard(v)}
                             />
                           </div>
                         )}
@@ -1436,6 +1508,18 @@ export default function DetailPanel({
                             receivingAccountId={checkoutReceivingAccountId}
                             onChange={setCheckoutReceivingAccountId}
                             label="บัญชีที่รับเงิน (โอน)"
+                          />
+                        </div>
+                      )}
+                      {checkoutPayMethod === 'credit_card' && (
+                        <div style={{ marginTop: 10 }}>
+                          <CardTerminalPicker
+                            terminalId={checkoutCard.terminalId}
+                            cardBrand={checkoutCard.cardBrand}
+                            cardType={checkoutCard.cardType}
+                            cardLast4={checkoutCard.cardLast4}
+                            authCode={checkoutCard.authCode}
+                            onChange={(v) => setCheckoutCard(v)}
                           />
                         </div>
                       )}
@@ -1786,6 +1870,18 @@ export default function DetailPanel({
                                   receivingAccountId={extendReceivingAccountId}
                                   onChange={setExtendReceivingAccountId}
                                   label="บัญชีที่รับเงิน (โอน)"
+                                />
+                              </div>
+                            )}
+                            {extendPayMethod === 'credit_card' && (
+                              <div style={{ marginTop: 10 }}>
+                                <CardTerminalPicker
+                                  terminalId={extendCard.terminalId}
+                                  cardBrand={extendCard.cardBrand}
+                                  cardType={extendCard.cardType}
+                                  cardLast4={extendCard.cardLast4}
+                                  authCode={extendCard.authCode}
+                                  onChange={(v) => setExtendCard(v)}
                                 />
                               </div>
                             )}
@@ -2668,8 +2764,16 @@ export default function DetailPanel({
                                   </div>
                                 )}
                                 {billingPayMethod === 'credit_card' && (
-                                  <div style={{ marginBottom: 8, fontSize: 11, color: '#1e40af', padding: '6px 8px', background: '#eff6ff', borderRadius: 6, border: '1px solid #bfdbfe' }}>
-                                    ℹ️ การรับชำระบัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเต็มที่หน้า Guest Folio แทน
+                                  <div style={{ marginBottom: 8 }}>
+                                    <CardTerminalPicker
+                                      terminalId={billingCard.terminalId}
+                                      cardBrand={billingCard.cardBrand}
+                                      cardType={billingCard.cardType}
+                                      cardLast4={billingCard.cardLast4}
+                                      authCode={billingCard.authCode}
+                                      onChange={(v) => setBillingCard(v)}
+                                      disabled={billingPayLoading}
+                                    />
                                   </div>
                                 )}
                                 {error && (
@@ -2691,7 +2795,7 @@ export default function DetailPanel({
                                       billingPayLoading ||
                                       (billingPayMethod === 'cash' && !billingCashSessId) ||
                                       ((billingPayMethod === 'transfer' || billingPayMethod === 'promptpay') && !billingReceivingAccountId) ||
-                                      billingPayMethod === 'credit_card'
+                                      (billingPayMethod === 'credit_card' && (!billingCard.terminalId || !billingCard.cardBrand))
                                     }
                                     style={{
                                       flex: 2, padding: '7px', borderRadius: 6, border: 'none',

@@ -21,6 +21,7 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { fmtDate, fmtDateTime, fmtBaht } from '@/lib/date-format';
 import { useToast, ConfirmDialog } from '@/components/ui';
 import { ReceivingAccountPicker } from '@/components/payment/ReceivingAccountPicker';
+import { CardTerminalPicker } from '@/components/payment/CardTerminalPicker';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -189,6 +190,8 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
   const [payMethod,      setPayMethod]      = useState<'cash' | 'transfer' | 'credit_card'>('cash');
   const [payRecvAccount, setPayRecvAccount] = useState<string | undefined>();
   const [paySubmitting,  setPaySubmitting]  = useState(false);
+  // Phase 4 — Credit-card EDC for the folio quick-pay form.
+  const [payCard, setPayCard] = useState<{ terminalId?: string; cardBrand?: string; cardType?: string; cardLast4?: string; authCode?: string }>({});
 
   // ─── Phase 3.next — Available guest credit ───────────────────────────────
   // Pulled when the pay panel opens. The cashier sees the available balance
@@ -218,9 +221,9 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
     if (cashRequired > 0 && payMethod === 'transfer' && !payRecvAccount) {
       toast.error('กรุณาเลือกบัญชีที่รับเงิน'); return;
     }
-    if (cashRequired > 0 && payMethod === 'credit_card') {
-      toast.error('บัตรเครดิตต้องระบุเครื่อง EDC — ใช้หน้า Guest Folio ของผู้เข้าพักหรือ DetailPanel แทน');
-      return;
+    if (cashRequired > 0 && payMethod === 'credit_card'
+        && (!payCard.terminalId || !payCard.cardBrand)) {
+      toast.error('กรุณาเลือกเครื่อง EDC + แบรนด์บัตร'); return;
     }
     setPaySubmitting(true);
     try {
@@ -234,6 +237,13 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
           ...(credit > 0 ? { applyCreditAmount: credit } : {}),
           ...(payMethod === 'transfer' && payRecvAccount
               ? { receivingAccountId: payRecvAccount } : {}),
+          ...(payMethod === 'credit_card' && cashRequired > 0 ? {
+            terminalId: payCard.terminalId,
+            cardBrand:  payCard.cardBrand,
+            ...(payCard.cardType  ? { cardType:  payCard.cardType  } : {}),
+            ...(payCard.cardLast4 ? { cardLast4: payCard.cardLast4 } : {}),
+            ...(payCard.authCode  ? { authCode:  payCard.authCode  } : {}),
+          } : {}),
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -252,7 +262,7 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
       setPaySubmitting(false);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [folio, payMethod, payRecvAccount, paySubmitting, bookingId, onRefresh, applyCreditAmount, availableCredit]);
+  }, [folio, payMethod, payRecvAccount, payCard, paySubmitting, bookingId, onRefresh, applyCreditAmount, availableCredit]);
 
   const handleRefund = useCallback(async () => {
     if (!refundTarget || refunding) return;
@@ -528,9 +538,15 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
                 />
               )}
               {payMethod === 'credit_card' && (
-                <div className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1.5">
-                  ℹ️ บัตรเครดิตต้องระบุเครื่อง EDC + แบรนด์บัตร — ใช้ฟอร์มเก็บเงินที่ tab บิลในหน้าตารางจองแทน
-                </div>
+                <CardTerminalPicker
+                  terminalId={payCard.terminalId}
+                  cardBrand={payCard.cardBrand}
+                  cardType={payCard.cardType}
+                  cardLast4={payCard.cardLast4}
+                  authCode={payCard.authCode}
+                  onChange={(v) => setPayCard(v)}
+                  disabled={paySubmitting}
+                />
               )}
 
               <div className="flex gap-2 pt-1 border-t border-gray-100">
@@ -549,8 +565,8 @@ export default function FolioLedger({ bookingId, onRefresh, onVoidInvoice, compa
                     paySubmitting ||
                     // Cash leg validation only when there IS a cash leg
                     (balance - applyCreditAmount > 0 && (
-                      payMethod === 'credit_card' ||
-                      (payMethod === 'transfer' && !payRecvAccount)
+                      (payMethod === 'transfer' && !payRecvAccount) ||
+                      (payMethod === 'credit_card' && (!payCard.terminalId || !payCard.cardBrand))
                     ))
                   }
                   className="flex-[2] text-xs font-semibold px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"

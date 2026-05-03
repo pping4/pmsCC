@@ -157,6 +157,24 @@ export async function POST(request: NextRequest) {
         { status: 422 }
       );
     }
+    // Phase 4 — credit_card needs terminalId + cardBrand. The picker auto-
+    // populates them on the client; we re-validate here so direct API calls
+    // can't bypass.
+    const cardFields = paymentMethod === 'credit_card' ? {
+      terminalId: data.terminalId as string | undefined,
+      cardBrand:  data.cardBrand  as string | undefined,
+      cardType:   data.cardType   as string | undefined,
+      cardLast4:  data.cardLast4  as string | undefined,
+      authCode:   data.authCode   as string | undefined,
+    } : null;
+    if (paymentMethod === 'credit_card') {
+      if (!cardFields?.terminalId || !cardFields?.cardBrand) {
+        return NextResponse.json(
+          { error: 'กรุณาเลือกเครื่อง EDC และแบรนด์บัตร' },
+          { status: 422 }
+        );
+      }
+    }
     const now = new Date();
 
     // Sprint 4B: resolve userId (id takes priority over email — cashSession.openedBy stores id)
@@ -346,6 +364,11 @@ export async function POST(request: NextRequest) {
               // Route the ledger DEBIT to the bank account picked by the cashier
               // (transfer/promptpay). null for cash → resolveMoneyAccount default.
               receivingAccountId: receivingAccountId ?? undefined,
+              terminalId: cardFields?.terminalId,
+              cardBrand:  cardFields?.cardBrand as never,
+              cardType:   cardFields?.cardType as never,
+              cardLast4:  cardFields?.cardLast4,
+              authCode:   cardFields?.authCode,
             });
             const payNum = bkResult.paymentNumber;
             const rcpNum = bkResult.receiptNumber;
@@ -455,6 +478,11 @@ export async function POST(request: NextRequest) {
               createdBy:      session?.user?.email ?? 'system',
               createdByName:  session?.user?.name ?? undefined,
               receivingAccountId: receivingAccountId ?? undefined,
+              terminalId: cardFields?.terminalId,
+              cardBrand:  cardFields?.cardBrand as never,
+              cardType:   cardFields?.cardType as never,
+              cardLast4:  cardFields?.cardLast4,
+              authCode:   cardFields?.authCode,
             });
             const payNum = depResult.paymentNumber;
             const rcpNum = depResult.receiptNumber;

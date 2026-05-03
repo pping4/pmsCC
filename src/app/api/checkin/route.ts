@@ -47,6 +47,13 @@ const CheckinSchema = z.object({
   // legs).  Required by the server when ANY transfer is involved; otherwise
   // optional.  Validation per-leg happens inside payment.service.
   receivingAccountId:    z.string().min(1).optional(),
+  // Phase 4 — credit-card EDC fields (shared by deposit + upfront legs).
+  // Required when either leg is method='credit_card'.
+  terminalId:            z.string().uuid().optional(),
+  cardBrand:             z.enum(['VISA', 'MASTER', 'JCB', 'UNIONPAY', 'AMEX', 'OTHER']).optional(),
+  cardType:              z.enum(['NORMAL', 'PREMIUM', 'CORPORATE', 'UNKNOWN']).optional(),
+  cardLast4:             z.string().regex(/^\d{4}$/).optional(),
+  authCode:              z.string().trim().max(12).optional(),
   // Sprint 4B: cashSessionId / depositCashSessionId are NOT accepted from the
   // client. For cash payments, the server looks up the caller's open shift.
 });
@@ -81,6 +88,7 @@ export async function POST(request: Request) {
     collectUpfront,
     upfrontPaymentMethod,
     receivingAccountId,
+    terminalId, cardBrand, cardType, cardLast4, authCode,
   } = parsed.data;
 
   // Server-side guard: every transfer leg needs a receivingAccountId so the
@@ -91,6 +99,12 @@ export async function POST(request: Request) {
     upfrontPaymentMethod === 'transfer' || upfrontPaymentMethod === 'promptpay';
   if (needsReceiving && !receivingAccountId) {
     return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
+  }
+  // Phase 4 — credit_card needs EDC + brand
+  const needsCard =
+    depositPaymentMethod === 'credit_card' || upfrontPaymentMethod === 'credit_card';
+  if (needsCard && (!terminalId || !cardBrand)) {
+    return NextResponse.json({ error: 'กรุณาเลือกเครื่อง EDC + แบรนด์บัตร' }, { status: 422 });
   }
 
   // ── Fetch booking ─────────────────────────────────────────────────────────
@@ -377,6 +391,13 @@ export async function POST(request: Request) {
         // is a transfer. Null for cash → resolveMoneyAccount picks default.
         receivingAccountId: depositPaymentMethod === 'transfer' || depositPaymentMethod === 'promptpay'
           ? receivingAccountId : undefined,
+        // Phase 4: forward credit-card fields when method=credit_card. Will
+        // be ignored for other methods inside the service.
+        terminalId: depositPaymentMethod === 'credit_card' ? terminalId : undefined,
+        cardBrand:  depositPaymentMethod === 'credit_card' ? cardBrand  as never : undefined,
+        cardType:   depositPaymentMethod === 'credit_card' ? cardType   as never : undefined,
+        cardLast4:  depositPaymentMethod === 'credit_card' ? cardLast4  : undefined,
+        authCode:   depositPaymentMethod === 'credit_card' ? authCode   : undefined,
       });
       securityDepositId = depResult.depositId;
 
@@ -449,6 +470,11 @@ export async function POST(request: Request) {
         createdByName:  userName ?? undefined,
         receivingAccountId: upfrontPaymentMethod === 'transfer' || upfrontPaymentMethod === 'promptpay'
           ? receivingAccountId : undefined,
+        terminalId: upfrontPaymentMethod === 'credit_card' ? terminalId : undefined,
+        cardBrand:  upfrontPaymentMethod === 'credit_card' ? cardBrand  as never : undefined,
+        cardType:   upfrontPaymentMethod === 'credit_card' ? cardType   as never : undefined,
+        cardLast4:  upfrontPaymentMethod === 'credit_card' ? cardLast4  : undefined,
+        authCode:   upfrontPaymentMethod === 'credit_card' ? authCode   : undefined,
       });
       const paymentNumber = upfrontResult.paymentNumber;
       const receiptNumber = upfrontResult.receiptNumber;
