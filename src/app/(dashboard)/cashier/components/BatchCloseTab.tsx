@@ -14,6 +14,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useSession } from 'next-auth/react';
 import { fmtBaht, fmtDate, toDateStr } from '@/lib/date-format';
 import { useToast } from '@/components/ui';
 
@@ -53,6 +54,8 @@ interface BatchRow {
 
 export function BatchCloseTab() {
   const toast = useToast();
+  const { data: session } = useSession();
+  const isAdmin = (session?.user as { role?: string } | undefined)?.role === 'admin';
 
   const [terminals, setTerminals] = useState<Terminal[]>([]);
   const [terminalId, setTerminalId] = useState('');
@@ -89,6 +92,49 @@ export function BatchCloseTab() {
     setSettleRefNo('');
     setSettleNote('');
     setSettleError(null);
+  };
+
+  // Phase 6.6 — Void batch (admin only)
+  const [voidTarget, setVoidTarget] = useState<BatchRow | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidSubmitting, setVoidSubmitting] = useState(false);
+  const [voidError, setVoidError] = useState<string | null>(null);
+
+  const openVoid = (b: BatchRow) => {
+    setVoidTarget(b);
+    setVoidReason('');
+    setVoidError(null);
+  };
+
+  const handleVoid = async () => {
+    if (!voidTarget || voidSubmitting) return;
+    if (voidReason.trim().length < 5) {
+      setVoidError('กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
+      return;
+    }
+    setVoidSubmitting(true);
+    setVoidError(null);
+    try {
+      const res = await fetch(`/api/card-batches/${voidTarget.id}/void`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: voidReason.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      toast.success(
+        'VOID batch สำเร็จ',
+        data.reversedLedger
+          ? `กลับรายการ ledger · ปลดล็อค ${data.unstampedCount} payment(s)`
+          : `ปลดล็อค ${data.unstampedCount} payment(s)`,
+      );
+      setVoidTarget(null);
+      setHistoryRefresh((n) => n + 1);
+    } catch (e) {
+      setVoidError(e instanceof Error ? e.message : 'VOID ไม่สำเร็จ');
+    } finally {
+      setVoidSubmitting(false);
+    }
   };
 
   const handleSettle = async () => {
@@ -417,15 +463,29 @@ export function BatchCloseTab() {
                         {b.feeAmount != null ? `฿${fmtBaht(b.feeAmount)}` : '—'}
                       </td>
                       <td className="px-3 py-2 text-center">
-                        {b.status === 'CLOSED' && (
-                          <button
-                            onClick={() => openSettle(b)}
-                            className="px-3 py-1 rounded text-xs font-semibold"
-                            style={{ background: '#2563eb', color: '#fff' }}
-                          >
-                            🏦 บันทึกเงินเข้า
-                          </button>
-                        )}
+                        <div className="flex gap-1 justify-center">
+                          {b.status === 'CLOSED' && (
+                            <button
+                              onClick={() => openSettle(b)}
+                              className="px-3 py-1 rounded text-xs font-semibold"
+                              style={{ background: '#2563eb', color: '#fff' }}
+                            >
+                              🏦 บันทึกเงินเข้า
+                            </button>
+                          )}
+                          {isAdmin && b.status !== 'VOIDED' && (
+                            <button
+                              onClick={() => openVoid(b)}
+                              className="px-2 py-1 rounded text-xs font-semibold border"
+                              style={{ borderColor: '#fca5a5', color: '#991b1b' }}
+                              title={b.status === 'SETTLED'
+                                ? 'VOID — กลับรายการฝากเงินและปลดล็อค payment'
+                                : 'VOID — ปลดล็อค payment ให้ batch ใหม่ได้'}
+                            >
+                              🚫 VOID
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -562,6 +622,98 @@ export function BatchCloseTab() {
                 className="flex-[2] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed text-white text-sm font-semibold"
               >
                 {settleSubmitting ? '⏳ กำลังบันทึก…' : '✓ ยืนยันการ Settle'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Phase 6.6 — VOID Batch Modal ───────────────────────────────── */}
+      {voidTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1100,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)' }}
+            onClick={() => !voidSubmitting && setVoidTarget(null)}
+          />
+          <div
+            className="pms-card"
+            style={{
+              position: 'relative', zIndex: 1, width: '100%', maxWidth: 500,
+              background: 'var(--surface-card)', borderRadius: 12, padding: 20,
+              boxShadow: '0 20px 25px rgba(0,0,0,0.15)',
+            }}
+          >
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: '#991b1b', marginBottom: 4 }}>
+              🚫 VOID Card Batch
+            </h3>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+              {voidTarget.status === 'SETTLED'
+                ? 'ระบบจะกลับรายการ ledger (DR Clearing / CR Bank + CR CardFee) และปลดล็อค payment เพื่อสร้าง batch ใหม่ได้'
+                : 'ระบบจะปลดล็อค payment ทั้งหมดใน batch นี้ เพื่อให้ batch ใหม่ดึงไปจับคู่ได้'}
+            </p>
+
+            <div style={{
+              background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 8,
+              padding: 10, marginBottom: 14, fontSize: 12, color: '#991b1b',
+            }}>
+              <div><strong>Batch:</strong> <span className="font-mono">{voidTarget.batchNo}</span> · {voidTarget.terminalCode}</div>
+              <div><strong>ยอด:</strong> <span className="font-mono">฿{fmtBaht(voidTarget.totalAmount)}</span> ({voidTarget.txCount} รายการ)</div>
+              {voidTarget.status === 'SETTLED' && voidTarget.bankDepositAmount != null && (
+                <div><strong>ฝากเข้า:</strong> <span className="font-mono">฿{fmtBaht(voidTarget.bankDepositAmount)}</span></div>
+              )}
+              <div style={{ marginTop: 4 }}>⚠️ การกระทำนี้ไม่สามารถเลิกได้</div>
+            </div>
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+              เหตุผล * (อย่างน้อย 5 ตัวอักษร)
+            </label>
+            <textarea
+              value={voidReason}
+              onChange={(e) => setVoidReason(e.target.value)}
+              disabled={voidSubmitting}
+              rows={3}
+              placeholder="เช่น ป้อนยอดผิด / batch ซ้ำ / ธนาคารแก้ไขยอดฝาก"
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)', fontSize: 13,
+                resize: 'vertical', boxSizing: 'border-box',
+              }}
+            />
+
+            {voidError && (
+              <div style={{
+                marginTop: 10, padding: '8px 10px', background: '#fef2f2', borderRadius: 6,
+                border: '1px solid #fca5a5', fontSize: 12, color: '#b91c1c',
+              }}>
+                {voidError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={() => setVoidTarget(null)}
+                disabled={voidSubmitting}
+                className="flex-1 px-4 py-2 rounded-lg border text-sm disabled:opacity-50"
+                style={{ borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              >
+                ปิด
+              </button>
+              <button
+                type="button"
+                onClick={handleVoid}
+                disabled={voidSubmitting || voidReason.trim().length < 5}
+                className="flex-[2] px-4 py-2 rounded-lg disabled:opacity-50 text-white text-sm font-semibold"
+                style={{ background: '#dc2626' }}
+              >
+                {voidSubmitting ? '⏳ กำลังบันทึก…' : '✓ ยืนยัน VOID'}
               </button>
             </div>
           </div>

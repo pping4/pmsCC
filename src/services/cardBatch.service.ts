@@ -438,3 +438,163 @@ export async function settleBatch(tx: TxClient, input: SettleBatchInput) {
     clearedCount: cleared.count,
   };
 }
+
+// ─── Phase 6.6: Void a batch (undo close — or undo settlement) ──────────────
+
+export interface VoidBatchInput {
+  batchId:        string;
+  reason:         string;
+  voidedByUserId: string;
+}
+
+export interface VoidBatchResult {
+  batch:           { id: string; batchNo: string; status: 'VOIDED' };
+  reversedLedger:  boolean;      // true if the batch was SETTLED before void
+  unstampedCount:  number;       // payments whose batchNo cleared
+  resetReconCount: number;       // payments whose reconStatus flipped back
+  netDeposit:      number;       // 0 when no ledger to reverse
+  fee:             number;
+}
+
+/**
+ * Void a CardBatchReport.
+ *
+ *   CLOSED  → VOIDED : free the payments so they can be batched again
+ *                       (no ledger movement happened on close).
+ *   SETTLED → VOIDED : reverse both ledger pairs from settleBatch AND
+ *                       free the payments (reconStatus CLEARED→RECEIVED,
+ *                       batchNo cleared). The reversal posts mirror pairs
+ *                       so the trial balance returns to pre-settlement
+ *                       state.
+ *
+ * VOIDED is terminal — calling voidBatch on a VOIDED batch is a 409.
+ *
+ * Security: caller (route handler) MUST enforce admin-only. This service
+ * does not check roles.
+ */
+export async function voidBatch(
+  tx: TxClient,
+  input: VoidBatchInput,
+): Promise<VoidBatchResult> {
+  const batch = await tx.cardBatchReport.findUnique({
+    where: { id: input.batchId },
+    select: {
+      id: true, batchNo: true, terminalId: true, totalAmount: true,
+      status: true, bankDepositAmount: true, feeAmount: true,
+      bankAccountId: true,
+      terminal: { select: { code: true, clearingAccountId: true } },
+    },
+  });
+  if (!batch) throw new Error('BATCH_NOT_FOUND');
+  if (batch.status === 'VOIDED') throw new Error('BATCH_ALREADY_VOIDED');
+
+  const wasSettled = batch.status === 'SETTLED';
+  const net = wasSettled ? Number(batch.bankDepositAmount ?? 0) : 0;
+  const fee = wasSettled ? Number(batch.feeAmount ?? 0)         : 0;
+
+  // 1) Reverse the settlement ledger pairs (mirror of settleBatch).
+  //    DR Card Clearing / CR Bank   for the net
+  //    DR Card Clearing / CR Card Fee for the fee
+  //    These two together undo the original pair-of-pairs cleanly.
+  if (wasSettled && (net > 0 || fee > 0)) {
+    const { resolveAccount } = await import('./financialAccount.service');
+    const clearingAccountId = batch.terminal.clearingAccountId ?? null;
+    if (net > 0) {
+      const bankAccId = batch.bankAccountId ??
+        (await resolveAccount(tx, { subKind: 'BANK', explicitAccountId: null })).id;
+      await postLedgerPair(tx, {
+        debitAccount:    LedgerAccount.BANK,    // legacy placeholder for clearing
+        creditAccount:   LedgerAccount.BANK,
+        debitAccountId:  clearingAccountId,
+        creditAccountId: bankAccId,
+        amount:          net,
+        referenceType:   'CardBatchReport',
+        referenceId:     batch.id,
+        description:     `Card batch VOID — reverse deposit · ${batch.terminal.code} #${batch.batchNo} — ${input.reason}`,
+        createdBy:       input.voidedByUserId,
+      });
+    }
+    if (fee > 0) {
+      const feeAcc = await resolveAccount(tx, { subKind: 'CARD_FEE', explicitAccountId: null });
+      await postLedgerPair(tx, {
+        debitAccount:    LedgerAccount.BANK,    // legacy placeholder for clearing
+        creditAccount:   LedgerAccount.EXPENSE,
+        debitAccountId:  clearingAccountId,
+        creditAccountId: feeAcc.id,
+        amount:          fee,
+        referenceType:   'CardBatchReport',
+        referenceId:     batch.id,
+        description:     `Card batch VOID — reverse fee · ${batch.terminal.code} #${batch.batchNo} — ${input.reason}`,
+        createdBy:       input.voidedByUserId,
+      });
+    }
+  }
+
+  // 2) Reset Payment rows. We must flip reconStatus BEFORE clearing
+  //    batchNo, otherwise the WHERE matcher in the second updateMany has
+  //    nothing to find.
+  let resetRecon = 0;
+  if (wasSettled) {
+    const r = await tx.payment.updateMany({
+      where: {
+        terminalId:  batch.terminalId,
+        batchNo:     batch.batchNo,
+        reconStatus: 'CLEARED' as never,
+      },
+      data: {
+        reconStatus: 'RECEIVED' as never,
+        clearedAt:   null,
+        clearedBy:   null,
+      },
+    });
+    resetRecon = r.count;
+  }
+  // Unstamp batchNo so the payments are eligible for a new (corrected) batch.
+  const unstamp = await tx.payment.updateMany({
+    where: {
+      terminalId: batch.terminalId,
+      batchNo:    batch.batchNo,
+    },
+    data: { batchNo: null },
+  });
+
+  // 3) Flip the batch to VOIDED.
+  const updated = await tx.cardBatchReport.update({
+    where: { id: input.batchId },
+    data: {
+      status: 'VOIDED',
+      note:   input.reason,
+    },
+    select: { id: true, batchNo: true, status: true },
+  });
+
+  // 4) Audit log
+  await tx.activityLog.create({
+    data: {
+      userId:   input.voidedByUserId,
+      action:   'CARD_BATCH_VOIDED',
+      category: 'cashier',
+      description: `VOID batch ${batch.batchNo} เครื่อง ${batch.terminal.code} — ${input.reason}`,
+      icon: '🚫',
+      severity: 'warning',
+      metadata: {
+        batchId:      batch.id,
+        batchNo:      batch.batchNo,
+        wasSettled,
+        netDeposit:   net,
+        fee,
+        unstamped:    unstamp.count,
+        resetRecon,
+      },
+    },
+  });
+
+  return {
+    batch:           updated as { id: string; batchNo: string; status: 'VOIDED' },
+    reversedLedger:  wasSettled,
+    unstampedCount:  unstamp.count,
+    resetReconCount: resetRecon,
+    netDeposit:      net,
+    fee,
+  };
+}
