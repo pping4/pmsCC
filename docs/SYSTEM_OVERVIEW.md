@@ -490,11 +490,12 @@ Grouped by feature:
 
 ## 15. Current Development State (as of 2026-05-11)
 
-> **Active branch:** `feat/receipt-standardization` is 27 commits ahead of `feat/consolidation`.
-> Phases 1–5 (receipt standardization, cashier recent-payments + void, 3-mode refund,
-> Guest Credit lifecycle, EDC picker rollout, card-batch settlement) are **complete + E2E-verified**.
+> **Active branch:** `feat/receipt-standardization` is 32 commits ahead of `feat/consolidation`.
+> Phases 1–5 + the entire Phase 6 cleanup pass (cancel-after-checkin, inline refund picker on
+> drag-resize, manager gate, `/finance/guest-credits` UI, money-overview liability card,
+> card-batch VOID) are **complete + E2E-verified** (5 harnesses, ~105 assertions total).
 > See [`PHASE_HANDOFF.md`](./PHASE_HANDOFF.md) for the canonical phase summary, ledger invariants,
-> schema additions, and remaining Phase 6 backlog.
+> schema additions, and what shipped in each Phase 6 commit.
 
 ### ✅ Production-ready
 - Booking flow (check-in → check-out → folio → invoice → payment → receipt)
@@ -551,11 +552,13 @@ Grouped by feature:
 ## 16. Backlog & Next Work (prioritized)
 
 ### 🔴 P0 — Financial correctness / data integrity
-1. **Phase 6 — Cancel-after-checkin redesign** — current code hardblocks cancellation after check-in; needs to be replaced with the same 3-mode refund picker as `/refunds`. See `PHASE_HANDOFF.md` §5.1.
-2. **Phase 6 — Drag-shorten confirm dialog gets refund-mode picker inline** — currently always defaults to cash refund. See `PHASE_HANDOFF.md` §5.2.
-3. **Rate recalculation on resize** — see `PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
-4. **Double-booking guard on drag/resize** — `/api/reservation` PATCH should reject overlapping bookings (currently may allow).
-5. **Timezone consistency** — API uses `T00:00:00.000Z` but UI parses as local — audit for off-by-one-day bugs.
+1. **Rate recalculation on resize** — see `PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
+2. **Double-booking guard on drag/resize** — `/api/reservation` PATCH should reject overlapping bookings (currently may allow).
+3. **Timezone consistency** — API uses `T00:00:00.000Z` but UI parses as local — audit for off-by-one-day bugs.
+
+> Phase 6 work (cancel-after-checkin, inline refund picker, manager gate,
+> `/finance/guest-credits`, money-overview liability card, card-batch VOID)
+> has shipped — see `PHASE_HANDOFF.md` §5 for what landed.
 
 ### 🟠 P1 — Feature completion
 4. **City Ledger phase 4–8** — detail 4-tab, `receiveCityLedgerPayment` UI, monthly statement PDF, credit hold on new booking, aging report, bad debt write-off (see `CityLedger_Implementation_Plan_FINAL.md`).
