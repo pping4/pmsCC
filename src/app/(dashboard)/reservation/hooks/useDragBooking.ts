@@ -57,6 +57,19 @@ export interface PendingMove {
   targetRoomId:   string;
 }
 
+/**
+ * Phase 6.2 — refund info forwarded with the PATCH so a shorten resize
+ * finalizes both the date change AND the refund in one transaction.
+ */
+export interface ResizeRefundPatch {
+  mode:             'cash' | 'credit' | 'split';
+  method?:          'cash' | 'transfer' | 'credit_card' | 'promptpay';
+  cashAmount?:      number;
+  bankName?:        string;
+  bankAccount?:     string;
+  bankAccountName?: string;
+}
+
 interface UseDragBookingReturn {
   dragState: DragState | null;
   // NOTE: consumer should apply `style={{ touchAction: 'none' }}` to the draggable
@@ -67,7 +80,7 @@ interface UseDragBookingReturn {
   isDragging: (bookingId: string) => boolean;
   getDragDelta: (bookingId: string) => { deltaX: number; targetRoomId: string };
   confirmState: ConfirmState | null;
-  handleConfirm: () => Promise<void>;
+  handleConfirm: (refund?: ResizeRefundPatch) => Promise<void>;
   handleCancelConfirm: () => void;
   isPatching: boolean;
   pendingMove: PendingMove | null;
@@ -94,7 +107,8 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
       checkOut: string,
       roomId: string,
       expectedVersion: number,
-      idempotencyKey?: string
+      idempotencyKey?: string,
+      refund?: ResizeRefundPatch
     ) => {
       setIsPatching(true);
       try {
@@ -108,6 +122,16 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
             roomId,
             expectedVersion,
             idempotencyKey,
+            // Phase 6.2 — when shortening, the dialog collects refund details
+            // and we forward them so the server finalizes in the same tx.
+            ...(refund ? {
+              refundMode:            refund.mode,
+              refundMethod:          refund.method,
+              refundCashAmount:      refund.cashAmount,
+              refundBankName:        refund.bankName,
+              refundBankAccount:     refund.bankAccount,
+              refundBankAccountName: refund.bankAccountName,
+            } : {}),
           }),
         });
 
@@ -364,7 +388,7 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
     return { deltaX: dragState.currentDeltaX, targetRoomId: dragState.targetRoomId };
   }, [dragState]);
 
-  const handleConfirm = useCallback(async () => {
+  const handleConfirm = useCallback(async (refund?: ResizeRefundPatch) => {
     if (!confirmState) return;
     const { pendingPatch } = confirmState;
     await performPatch(
@@ -373,7 +397,8 @@ export function useDragBooking({ flatRooms, rangeStart, onDragEnd }: UseDragBook
       pendingPatch.checkOut,
       pendingPatch.roomId,
       pendingPatch.expectedVersion,
-      pendingPatch.idempotencyKey
+      pendingPatch.idempotencyKey,
+      refund,
     );
     setConfirmState(null);
     setDragState(null);

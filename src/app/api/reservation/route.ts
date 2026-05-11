@@ -5,8 +5,10 @@ import { prisma } from '@/lib/prisma';
 import { recalculateRate, RateCalculationContext } from '@/services/bookingRate.service';
 import { logActivity } from '@/services/activityLog.service';
 import { addCharge, addNightlyRoomCharges, createInvoiceFromFolio, getFolioByBookingId, partialVoidInvoice, voidCharge } from '@/services/folio.service';
-import { createPendingRefund } from '@/services/refund.service';
+import { createPendingRefund, processRefund } from '@/services/refund.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
+import { PaymentMethod } from '@prisma/client';
 import { z } from 'zod';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -56,7 +58,24 @@ const ReservationUpdateSchema = z.object({
   roomId: z.string().optional(),
   expectedVersion: z.number().int().min(1),
   idempotencyKey: z.string().min(1),
-});
+  // Phase 6.2 — optional refund fields. When `refundMode` is supplied AND the
+  // resize produces a refund, the server finalizes the pending refund in the
+  // same transaction (DR REVENUE / CR AR via partialVoidInvoice has already
+  // run; processRefund posts the matching cash/credit leg). Omitting these
+  // preserves the legacy PENDING-then-finish-at-/refunds flow.
+  refundMode:            z.enum(['cash', 'credit', 'split']).optional(),
+  refundMethod:          z.nativeEnum(PaymentMethod).optional(),
+  refundCashAmount:      z.number().positive().optional(),
+  refundBankName:        z.string().trim().max(80).optional(),
+  refundBankAccount:     z.string().trim().max(40).optional(),
+  refundBankAccountName: z.string().trim().max(120).optional(),
+}).refine(
+  (d) => !d.refundMode || d.refundMode === 'credit' || d.refundMethod !== undefined,
+  { message: 'refundMethod required when refundMode=cash or split', path: ['refundMethod'] },
+).refine(
+  (d) => d.refundMode !== 'split' || (d.refundCashAmount !== undefined && d.refundCashAmount > 0),
+  { message: 'refundCashAmount required for refundMode=split', path: ['refundCashAmount'] },
+);
 
 // ─── GET /api/reservation ─────────────────────────────────────────────────────
 
@@ -499,6 +518,18 @@ export async function PATCH(request: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  // Phase 6.5 — drag-resize can now trigger refunds + invoice voids; gate
+  // behind manager+ to match /api/payments/[id]/void and the security
+  // posture of /api/refunds/[id]/process. front-desk staff who need date
+  // tweaks should go through a manager.
+  const role = (session.user as { role?: string })?.role;
+  if (!['admin', 'manager'].includes(role ?? '')) {
+    return NextResponse.json(
+      { error: 'Forbidden: Manager or Admin role required to edit bookings' },
+      { status: 403 },
+    );
+  }
+
   try {
     const body = await request.json();
     const parsed = ReservationUpdateSchema.safeParse(body);
@@ -509,7 +540,11 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const { bookingId, checkIn, checkOut, roomId, expectedVersion, idempotencyKey } = parsed.data;
+    const {
+      bookingId, checkIn, checkOut, roomId, expectedVersion, idempotencyKey,
+      refundMode, refundMethod, refundCashAmount,
+      refundBankName, refundBankAccount, refundBankAccountName,
+    } = parsed.data;
 
     const newCheckIn = toUTCMidnight(checkIn);
     const newCheckOut = toUTCMidnight(checkOut);
@@ -910,7 +945,7 @@ export async function PATCH(request: NextRequest) {
           }
         }
 
-        await createPendingRefund(tx, {
+        const refund = await createPendingRefund(tx, {
           bookingId,
           guestId: booking.guestId,
           amount: rateResult.refundDue,
@@ -921,6 +956,32 @@ export async function PATCH(request: NextRequest) {
           notes: rateResult.userMessage,
           createdBy: changedBy,
         });
+
+        // Phase 6.2 — finalize the refund in the same tx if the cashier
+        // picked a mode in the resize dialog. Without this, drag-shorten
+        // always leaves a PENDING refund for the cashier to finish at
+        // /refunds (legacy path stays alive if the field is omitted).
+        if (refundMode) {
+          const needsCashLeg =
+            (refundMode === 'cash' || refundMode === 'split') && refundMethod === 'cash';
+          let cashSessionId: string | undefined;
+          if (needsCashLeg) {
+            const active = await getActiveSessionForUser(tx, changedBy);
+            if (!active) throw new Error('CASH_SESSION_NOT_OPEN');
+            cashSessionId = active.id;
+          }
+          await processRefund(tx, {
+            refundId:        refund.refundId,
+            mode:            refundMode,
+            method:          refundMethod,
+            cashAmount:      refundMode === 'split' ? refundCashAmount : undefined,
+            bankName:        refundBankName,
+            bankAccount:     refundBankAccount,
+            bankAccountName: refundBankAccountName,
+            processedBy:     changedBy,
+            cashSessionId,
+          });
+        }
       }
 
       // Handle room status changes
@@ -1027,6 +1088,12 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json(
         { error: 'ไม่พบ Folio สำหรับการจองนี้ กรุณาติดต่อผู้ดูแลระบบ' },
         { status: 500 }
+      );
+    }
+    if (error instanceof Error && error.message === 'CASH_SESSION_NOT_OPEN') {
+      return NextResponse.json(
+        { error: 'ไม่พบกะที่เปิดอยู่ — กรุณาเปิดกะก่อนคืนเงินสด' },
+        { status: 409 }
       );
     }
     console.error('PATCH /api/reservation error:', error);
