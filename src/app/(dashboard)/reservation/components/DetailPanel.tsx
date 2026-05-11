@@ -27,7 +27,8 @@ interface DetailPanelProps {
 }
 
 interface ApiError {
-  message: string;
+  message?: string;
+  error?:   string;
 }
 
 interface ActivityLogEntry {
@@ -922,13 +923,9 @@ export default function DetailPanel({
 
   const handleCancelClick = (): void => {
     if (!booking) return;
-    if (booking.status === 'checked_in') {
-      toast.info(
-        'ไม่สามารถยกเลิกการจองที่เช็คอินแล้ว',
-        'กรุณาใช้ "เช็คเอาท์" หรือลากขอบขวาในตารางเพื่อย่นวันพัก',
-      );
-      return;
-    }
+    // Phase 6.1: checked-in cancels are now supported via the in-dialog
+    // mode picker. Server voids invoiced line items + processes the refund
+    // in one tx so GL stays balanced. (Removed: hardblock toast.)
     setCancelConfirmOpen(true);
   };
 
@@ -942,26 +939,37 @@ export default function DetailPanel({
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          action: 'cancel',
-          refundAmount: input.refundAmount,
-          reason: input.reason,
+          action:          'cancel',
+          refundAmount:    input.refundAmount,
+          reason:          input.reason,
+          // Phase 6.1 — forward mode info so server finalizes refund in same tx
+          mode:            input.mode,
+          method:          input.method,
+          cashAmount:      input.cashAmount,
+          bankName:        input.bankName,
+          bankAccount:     input.bankAccount,
+          bankAccountName: input.bankAccountName,
         }),
       });
       if (!response.ok) {
         let errMsg = `ข้อผิดพลาด HTTP ${response.status}`;
         try {
           const data: ApiError = await response.json();
-          errMsg = data.message || errMsg;
+          errMsg = data.message || data.error || errMsg;
         } catch { /* non-JSON */ }
         throw new Error(errMsg);
       }
+      const result = (await response.json()) as { refund?: { processed?: boolean } };
       setLoading(false);
       onClose();
       onRefresh();
+      const processed = result.refund?.processed;
       toast.success(
         'ยกเลิกการจองสำเร็จ',
         input.refundAmount > 0
-          ? `สร้างรายการคืนเงิน ฿${fmtBaht(input.refundAmount)} รอดำเนินการ`
+          ? processed
+            ? `คืนเงิน ฿${fmtBaht(input.refundAmount)} เรียบร้อย`
+            : `สร้างรายการคืนเงิน ฿${fmtBaht(input.refundAmount)} รอดำเนินการ`
           : undefined,
       );
     } catch (err: unknown) {
@@ -2996,10 +3004,11 @@ export default function DetailPanel({
         onSplit={onRefresh}
       />
 
-      {/* Cancel booking — with cancellation-policy selector */}
+      {/* Cancel booking — policy + 3-mode refund picker (Phase 6.1) */}
       <CancelBookingDialog
         open={cancelConfirmOpen}
         bookingNumber={booking?.bookingNumber ?? ''}
+        bookingStatus={booking?.status}
         totalPaid={booking?.totalPaid ?? 0}
         loading={loading}
         onConfirm={handleCancelConfirm}

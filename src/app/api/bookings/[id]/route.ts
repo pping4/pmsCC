@@ -3,10 +3,12 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { logActivity } from '@/services/activityLog.service';
-import { createPendingRefund } from '@/services/refund.service';
+import { createPendingRefund, processRefund } from '@/services/refund.service';
+import { partialVoidInvoice, voidCharge } from '@/services/folio.service';
+import { getActiveSessionForUser } from '@/services/cashSession.service';
 import { transitionRoom, canTransition, RoomTransitionError } from '@/services/roomStatus.service';
 import { createCheckoutCleaningTask } from '@/services/housekeeping.service';
-import { Prisma, PaymentStatus, RefundSource } from '@prisma/client';
+import { Prisma, PaymentMethod, PaymentStatus, RefundSource } from '@prisma/client';
 
 export async function GET(request: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -269,26 +271,20 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
     }
 
     // ── Cancel Booking ─────────────────────────────────────────────────────
+    // Phase 6.1: hardblock on `checked_in` removed. Cashier can cancel any
+    // active booking and pick the refund policy + mode in one dialog. Server
+    // reverses revenue accruals via partialVoidInvoice so GL stays clean.
     if (data.action === 'cancel') {
       const booking = await prisma.booking.findUnique({
         where: { id: params.id },
       });
       if (!booking) return NextResponse.json({ error: 'ไม่พบข้อมูลการจอง' }, { status: 404 });
 
-      // Guard: checked_in bookings must shorten via resize / checkout — not raw cancel
-      if (booking.status === 'checked_in') {
-        return NextResponse.json(
-          {
-            error: 'ไม่สามารถยกเลิกการจองที่เช็คอินแล้ว',
-            message: 'กรุณาใช้ "เช็คเอาท์" หรือย่นวันพัก (ลากขอบใน tape chart) แทน',
-          },
-          { status: 409 },
-        );
-      }
-
       if (booking.status === 'cancelled' || booking.status === 'checked_out') {
         return NextResponse.json({ error: 'การจองนี้ปิดไปแล้ว' }, { status: 409 });
       }
+
+      const wasCheckedIn = booking.status === 'checked_in';
 
       // Compute total paid by summing ACTIVE payments for this booking
       const paidAgg = await prisma.payment.aggregate({
@@ -322,75 +318,208 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
         );
       }
 
+      // Phase 6.1 — optional 3-mode picker. When provided, the refund is
+      // finalized in the same transaction (no PENDING leftover). When omitted
+      // we keep the legacy behaviour (PENDING refund for cashier to finish at
+      // /refunds), so old callers still work.
+      const mode = data.mode as 'cash' | 'credit' | 'split' | undefined;
+      if (mode && !['cash', 'credit', 'split'].includes(mode)) {
+        return NextResponse.json({ error: 'mode must be cash|credit|split' }, { status: 400 });
+      }
+      const method = data.method as PaymentMethod | undefined;
+      if (mode && mode !== 'credit' && !method) {
+        return NextResponse.json(
+          { error: 'method required when mode=cash or split' },
+          { status: 400 },
+        );
+      }
+      if (mode === 'split') {
+        const splitCash = Number(data.cashAmount);
+        if (!Number.isFinite(splitCash) || splitCash <= 0 || splitCash >= Number(requestedRefund)) {
+          return NextResponse.json(
+            { error: 'cashAmount must be > 0 and < refundAmount when mode=split' },
+            { status: 400 },
+          );
+        }
+      }
+
       const reason: string =
         typeof data.reason === 'string' && data.reason.trim()
           ? data.reason.trim()
           : `ยกเลิกการจอง ${booking.bookingNumber}`;
+      const changedBy = session.user?.email ?? 'system';
 
       const result = await prisma.$transaction(async (tx) => {
-        const updated = await tx.booking.update({
-          where: { id: params.id },
-          data: { status: 'cancelled' },
-          select: { id: true, bookingNumber: true, status: true, guestId: true },
-        });
-        // Only free the room if it was actually held by this booking.
-        // A cancellation shouldn't override a room currently occupied by a
-        // different guest (edge case: future-dated booking cancelled while
-        // room is in use).
-        const liveRoom = await tx.room.findUniqueOrThrow({
-          where: { id: booking.roomId },
-          select: { status: true, currentBookingId: true },
-        });
-        if (
-          liveRoom.currentBookingId === params.id &&
-          canTransition(liveRoom.status, 'available')
-        ) {
-          await transitionRoom(tx, {
-            roomId:           booking.roomId,
-            to:               'available',
-            reason:           'booking cancelled',
-            userId:           session.user?.email ?? 'system',
-            userName:         session.user?.name ?? undefined,
-            bookingId:        params.id,
-            currentBookingId: null,
+        // 1) Reverse the revenue accrual for the refunded portion BEFORE
+        //    flipping booking status. We void FolioLineItem rows newest-first
+        //    until the accumulated amount covers `requestedRefund`. This keeps
+        //    AR balanced after the refund cash leg lands:
+        //      void X:    DR Revenue / CR AR  → AR has credit -X
+        //      refund X:  DR AR     / CR Cash → AR back to 0
+        //    Forfeit (refund=0) skips this block — revenue stays as is.
+        let voidedAmount = new Prisma.Decimal(0);
+        if (requestedRefund.greaterThan(0)) {
+          const folio = await tx.folio.findUnique({
+            where:  { bookingId: params.id },
+            select: { id: true },
           });
+          if (folio) {
+            const items = await tx.folioLineItem.findMany({
+              where: {
+                folioId:       folio.id,
+                billingStatus: { not: 'VOIDED' as never },
+              },
+              orderBy: [{ serviceDate: 'desc' }, { createdAt: 'desc' }],
+              select: {
+                id:            true,
+                amount:        true,
+                billingStatus: true,
+                invoiceItem:   { select: { invoiceId: true } },
+              },
+            });
+
+            const byInvoice = new Map<string, string[]>();
+            const unbilledIds: string[] = [];
+            for (const it of items) {
+              if (voidedAmount.greaterThanOrEqualTo(requestedRefund)) break;
+              voidedAmount = voidedAmount.plus(it.amount);
+              if (it.billingStatus === ('UNBILLED' as never)) {
+                unbilledIds.push(it.id);
+              } else if (it.invoiceItem?.invoiceId) {
+                const arr = byInvoice.get(it.invoiceItem.invoiceId) ?? [];
+                arr.push(it.id);
+                byInvoice.set(it.invoiceItem.invoiceId, arr);
+              }
+            }
+            const voidReason = `Cancellation: ${reason}`;
+            for (const [invId, ids] of byInvoice) {
+              await partialVoidInvoice(tx, {
+                invoiceId:        invId,
+                folioLineItemIds: ids,
+                reason:           voidReason,
+                voidedBy:         changedBy,
+              });
+            }
+            for (const id of unbilledIds) {
+              await voidCharge(tx, id);
+            }
+          }
         }
 
+        // 2) Flip booking status
+        const updated = await tx.booking.update({
+          where: { id: params.id },
+          data:  { status: 'cancelled' },
+          select: { id: true, bookingNumber: true, status: true, guestId: true },
+        });
+
+        // 3) Room transition. Only act when this booking actually holds the
+        // room (a future-dated cancel mustn't override the live occupant).
+        // checked_in cancels follow the checkout lifecycle (cleaning task +
+        // currentBookingId cleared) so housekeeping can pick the room up.
+        const liveRoom = await tx.room.findUniqueOrThrow({
+          where:  { id: booking.roomId },
+          select: { status: true, currentBookingId: true },
+        });
+        if (liveRoom.currentBookingId === params.id) {
+          if (wasCheckedIn) {
+            if (canTransition(liveRoom.status, 'cleaning')) {
+              await transitionRoom(tx, {
+                roomId:           booking.roomId,
+                to:               'cleaning',
+                reason:           'booking cancelled (was checked-in)',
+                userId:           changedBy,
+                userName:         session.user?.name ?? undefined,
+                bookingId:        params.id,
+                currentBookingId: null,
+              });
+              await createCheckoutCleaningTask(tx, {
+                roomId:    booking.roomId,
+                bookingId: params.id,
+                createdBy: changedBy,
+                notes:     `Auto-created on cancellation (booking ${booking.bookingNumber})`,
+              });
+            }
+          } else if (canTransition(liveRoom.status, 'available')) {
+            await transitionRoom(tx, {
+              roomId:           booking.roomId,
+              to:               'available',
+              reason:           'booking cancelled',
+              userId:           changedBy,
+              userName:         session.user?.name ?? undefined,
+              bookingId:        params.id,
+              currentBookingId: null,
+            });
+          }
+        }
+
+        // 4) Refund record (+ optional immediate processing).
         let refundNumber: string | null = null;
+        let processed = false;
         if (requestedRefund.greaterThan(0)) {
           const refund = await createPendingRefund(tx, {
-            bookingId: params.id,
-            guestId:   booking.guestId,
-            amount:    requestedRefund,
-            source:    RefundSource.cancellation,
+            bookingId:     params.id,
+            guestId:       booking.guestId,
+            amount:        requestedRefund,
+            source:        RefundSource.cancellation,
             reason,
             referenceType: 'Booking',
             referenceId:   params.id,
-            createdBy: session.user?.email ?? 'system',
+            createdBy:     changedBy,
           });
           refundNumber = refund.refundNumber;
+
+          if (mode) {
+            const needsCashLeg =
+              (mode === 'cash' || mode === 'split') && method === 'cash';
+            let cashSessionId: string | undefined;
+            if (needsCashLeg) {
+              const active = await getActiveSessionForUser(tx, changedBy);
+              if (!active) throw new Error('CASH_SESSION_NOT_OPEN');
+              cashSessionId = active.id;
+            }
+            await processRefund(tx, {
+              refundId:        refund.refundId,
+              mode,
+              method,
+              cashAmount:      mode === 'split' ? Number(data.cashAmount) : undefined,
+              bankName:        typeof data.bankName === 'string' ? data.bankName : undefined,
+              bankAccount:     typeof data.bankAccount === 'string' ? data.bankAccount : undefined,
+              bankAccountName: typeof data.bankAccountName === 'string' ? data.bankAccountName : undefined,
+              processedBy:     changedBy,
+              cashSessionId,
+              creditExpiresAt: typeof data.creditExpiresAt === 'string'
+                ? new Date(data.creditExpiresAt)
+                : null,
+            });
+            processed = true;
+          }
         }
 
-        return { updated, refundNumber };
+        return { updated, refundNumber, processed, voidedAmount };
       });
 
       await logActivity(prisma as any, {
         session,
         action: 'booking.cancelled',
         category: 'booking',
-        description: `ยกเลิกการจอง ${booking.bookingNumber}${result.refundNumber ? ` (สร้าง refund ${result.refundNumber})` : ''}`,
+        description: `ยกเลิกการจอง ${booking.bookingNumber}${result.refundNumber ? ` (refund ${result.refundNumber}${result.processed ? ' — processed' : ' — pending'})` : ''}`,
         bookingId: params.id,
         roomId: booking.roomId,
         guestId: booking.guestId,
         icon: '❌',
         severity: 'warning',
         metadata: {
-          before: { status: booking.status },
-          after:  { status: 'cancelled' },
-          refundNumber: result.refundNumber,
-          refundAmount: result.refundNumber ? requestedRefund.toString() : null,
-          totalPaid:    totalPaid.toString(),
-          forfeit:      totalPaid.greaterThan(0) && requestedRefund.equals(0),
+          before:          { status: booking.status },
+          after:           { status: 'cancelled' },
+          refundNumber:    result.refundNumber,
+          refundAmount:    result.refundNumber ? requestedRefund.toString() : null,
+          refundMode:      mode ?? null,
+          refundProcessed: result.processed,
+          voidedAmount:    result.voidedAmount.toString(),
+          totalPaid:       totalPaid.toString(),
+          forfeit:         totalPaid.greaterThan(0) && requestedRefund.equals(0),
+          wasCheckedIn,
           reason,
         },
       });
@@ -399,7 +528,12 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
         success: true,
         booking: result.updated,
         refund:  result.refundNumber
-          ? { refundNumber: result.refundNumber, amount: requestedRefund.toString() }
+          ? {
+              refundNumber: result.refundNumber,
+              amount:       requestedRefund.toString(),
+              processed:    result.processed,
+              voidedAmount: result.voidedAmount.toString(),
+            }
           : null,
       });
     }
@@ -423,6 +557,12 @@ async function handleUpdate(request: NextRequest, { params }: { params: { id: st
     if (error instanceof RoomTransitionError) {
       return NextResponse.json(
         { error: `ไม่สามารถเปลี่ยนสถานะห้องจาก ${error.from} → ${error.to}` },
+        { status: 409 },
+      );
+    }
+    if (error instanceof Error && error.message === 'CASH_SESSION_NOT_OPEN') {
+      return NextResponse.json(
+        { error: 'ไม่พบกะที่เปิดอยู่ — กรุณาเปิดกะก่อนคืนเงินสด' },
         { status: 409 },
       );
     }
