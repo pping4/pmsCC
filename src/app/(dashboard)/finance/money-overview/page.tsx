@@ -80,6 +80,9 @@ export default function MoneyOverviewPage() {
   const [openShifts,    setOpenShifts]    = useState<OpenShift[]>([]);
   const [recentBatches, setRecentBatches] = useState<RecentBatch[]>([]);
 
+  // Phase 6.4 — Guest Credit liability (real money the hotel still owes guests)
+  const [gcLiability, setGcLiability] = useState<{ total: number; count: number } | null>(null);
+
   // Transfer modal state
   const [showTransfer, setShowTransfer] = useState(false);
   const [tForm, setTForm] = useState({ fromAccountId: '', toAccountId: '', amount: '', notes: '' });
@@ -89,10 +92,11 @@ export default function MoneyOverviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const [balRes, shiftRes, batchRes] = await Promise.all([
+      const [balRes, shiftRes, batchRes, gcRes] = await Promise.all([
         fetch('/api/account-balances'),
         fetch('/api/cash-sessions?status=OPEN&limit=10'),
         fetch('/api/card-batches?limit=5'),
+        fetch('/api/guest-credits?status=active&limit=500'),
       ]);
       if (!balRes.ok) throw new Error(`HTTP ${balRes.status}`);
       const json = await balRes.json();
@@ -113,6 +117,16 @@ export default function MoneyOverviewPage() {
         setRecentBatches((j.batches ?? []).slice(0, 5));
       } else {
         setRecentBatches([]);
+      }
+      if (gcRes.ok) {
+        const j = await gcRes.json();
+        const rows: { remainingAmount: number }[] = j?.rows ?? [];
+        setGcLiability({
+          total: Number(j?.summary?.totalActiveLiability ?? 0),
+          count: rows.filter(r => Number(r.remainingAmount) > 0).length,
+        });
+      } else {
+        setGcLiability(null);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'โหลดไม่สำเร็จ');
@@ -208,6 +222,54 @@ export default function MoneyOverviewPage() {
           จาก {balances.length} บัญชี
         </div>
       </div>
+
+      {/* ── Phase 6.4 — Guest Credit liability ────────────────────────────────
+          Customer credits issued from refunds are real money the hotel still
+          owes; surfaces alongside the assets so the difference is visible at
+          a glance. (Other liability accounts like DEPOSIT_LIABILITY can be
+          added later through the same pattern.) */}
+      {gcLiability && gcLiability.total > 0 && (
+        <section className="pms-card pms-transition" style={{ padding: 16, marginBottom: 20 }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            padding: '6px 10px', marginBottom: 10, borderRadius: 4,
+            background: '#fef3c7', color: '#92400e',
+          }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600 }}>
+              🎫 ภาระคงค้างลูกค้า <span style={{ opacity: 0.7, fontWeight: 400 }}>({gcLiability.count})</span>
+            </h2>
+            <div style={{ fontSize: 16, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
+              ฿{fmtBaht(gcLiability.total)}
+            </div>
+          </div>
+          <Link href="/finance/guest-credits"
+            style={{ ...cardSx, display: 'block', cursor: 'pointer', textDecoration: 'none' }}
+            title="คลิกเพื่อดูรายการเครดิตทั้งหมด"
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'monospace' }}>2115-01</div>
+                <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)' }}>
+                  เครดิตคงเหลือลูกค้า
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                  GuestCredit ที่ออกจากการคืนเงิน — รอใช้ในการจองถัดไป
+                </div>
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--primary-light)' }}>จัดการ →</span>
+            </div>
+            <div style={{
+              fontSize: 22, fontWeight: 700, marginTop: 10,
+              fontVariantNumeric: 'tabular-nums', color: '#92400e',
+            }}>
+              ฿{fmtBaht(gcLiability.total)}
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 4 }}>
+              {gcLiability.count} ใบ active
+            </div>
+          </Link>
+        </section>
+      )}
 
       {/* ── Operational signals: open shifts + recent EDC batches ─────────────
           These two strips connect "money sitting in accounts" with "who is

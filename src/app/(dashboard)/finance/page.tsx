@@ -55,6 +55,7 @@ interface CollectionData {
 interface RefundsSummary { pendingCount: number; pendingTotal: number }
 interface BadDebtSummary { unpaidCount: number; totalOutstanding: number }
 interface CitySummary { totalOutstanding: number; overdueOver30: number; suspendedAccounts: number }
+interface GuestCreditSummary { activeCount: number; totalActiveLiability: number }
 
 const BOOKING_TYPE_LABELS: Record<string, string> = {
   daily:         'รายวัน',
@@ -315,6 +316,44 @@ function CityLedgerPanel() {
               ⚠️ {data.suspendedAccounts} บัญชีถูกระงับ
             </div>
           )}
+        </div>
+      )}
+    </SidePanel>
+  );
+}
+
+function GuestCreditsPanel() {
+  const [data, setData] = useState<GuestCreditSummary | null>(null);
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch('/api/guest-credits?status=active&limit=500');
+        const j   = await res.json();
+        const rows: { remainingAmount: number }[] = j?.rows ?? [];
+        const liveCount = rows.filter((r) => Number(r.remainingAmount) > 0).length;
+        setData({
+          activeCount:          liveCount,
+          totalActiveLiability: Number(j?.summary?.totalActiveLiability ?? 0),
+        });
+      } catch { /* ignore */ }
+    })();
+  }, []);
+  return (
+    <SidePanel title="เครดิตคงเหลือลูกค้า" icon="🎫"
+      footer={<Link href="/finance/guest-credits" className="text-blue-600 hover:underline">จัดการ →</Link>}>
+      {!data ? (
+        <p style={{ color: 'var(--text-muted)' }}>กำลังโหลด…</p>
+      ) : data.activeCount === 0 ? (
+        <p style={{ color: 'var(--text-muted)' }}>— ไม่มีเครดิตคงเหลือ —</p>
+      ) : (
+        <div className="space-y-1">
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold font-mono" style={{ color: '#0891b2' }}>{data.activeCount}</span>
+            <span style={{ color: 'var(--text-muted)' }}>ใบ active</span>
+          </div>
+          <div className="font-mono text-sm" style={{ color: 'var(--text-secondary)' }}>
+            ภาระคงค้าง ฿{fmtBaht(data.totalActiveLiability)}
+          </div>
         </div>
       )}
     </SidePanel>
@@ -617,6 +656,7 @@ export default function FinancePage() {
         </div>
         <aside className="space-y-3">
           <RefundsPanel />
+          <GuestCreditsPanel />
           <CityLedgerPanel />
           <BadDebtPanel />
           <NotYetInvoicedPanel data={data.notYetInvoiced} />
