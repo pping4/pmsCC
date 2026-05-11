@@ -15,7 +15,8 @@
  *  - We never mutate `reconStatus` here; clearing is Phase 7's job.
  */
 
-import { Prisma } from '@prisma/client';
+import { Prisma, LedgerAccount } from '@prisma/client';
+import { postLedgerPair } from './ledger.service';
 
 type TxClient = Prisma.TransactionClient;
 
@@ -223,15 +224,22 @@ export interface BatchListRow {
   terminalId: string;
   terminalCode: string;
   terminalName: string;
+  // Phase 5 — settlement state
+  status: 'CLOSED' | 'SETTLED' | 'VOIDED';
+  bankDepositAmount: number | null;
+  feeAmount: number | null;
+  bankReferenceNo: string | null;
+  depositedAt: Date | null;
 }
 
 export async function listBatches(
   tx: TxClient,
-  filters: { terminalId?: string; from?: Date; to?: Date } = {},
+  filters: { terminalId?: string; from?: Date; to?: Date; status?: 'CLOSED' | 'SETTLED' | 'VOIDED' } = {},
   take = 100,
 ): Promise<BatchListRow[]> {
   const where: Prisma.CardBatchReportWhereInput = {};
   if (filters.terminalId) where.terminalId = filters.terminalId;
+  if (filters.status)     where.status     = filters.status;
   if (filters.from || filters.to) {
     where.closeDate = {};
     if (filters.from) where.closeDate.gte = filters.from;
@@ -245,6 +253,8 @@ export async function listBatches(
     select: {
       id: true, batchNo: true, closeDate: true, totalAmount: true, txCount: true,
       varianceAmount: true, closedAt: true,
+      status: true, bankDepositAmount: true, feeAmount: true,
+      bankReferenceNo: true, depositedAt: true,
       terminal: { select: { id: true, code: true, name: true } },
     },
   });
@@ -260,6 +270,11 @@ export async function listBatches(
     terminalId: r.terminal.id,
     terminalCode: r.terminal.code,
     terminalName: r.terminal.name,
+    status: r.status as 'CLOSED' | 'SETTLED' | 'VOIDED',
+    bankDepositAmount: r.bankDepositAmount ? Number(r.bankDepositAmount) : null,
+    feeAmount:         r.feeAmount         ? Number(r.feeAmount)         : null,
+    bankReferenceNo:   r.bankReferenceNo,
+    depositedAt:       r.depositedAt,
   }));
 }
 
@@ -290,5 +305,136 @@ export async function getBatchDetail(tx: TxClient, id: string) {
       varianceAmount: Number(batch.varianceAmount),
     },
     payments: payments.map((p) => ({ ...p, amount: Number(p.amount) })),
+  };
+}
+
+// ─── Phase 5: Bank settlement (record incoming deposit + post ledger) ────────
+
+export interface SettleBatchInput {
+  batchId: string;
+  /** Net amount the bank actually deposited (after MDR fees deducted). */
+  bankDepositAmount: number;
+  /** Date the bank credited the account (T+1 / T+2 typical). */
+  depositedAt: Date;
+  /** Optional bank-statement reference. */
+  bankReferenceNo?: string;
+  /** Optional bank account to credit. Defaults to the system default BANK. */
+  bankAccountId?: string;
+  note?: string;
+  settledByUserId: string;
+}
+
+/**
+ * Record a bank settlement against a CLOSED batch.
+ *
+ * Posts two ledger pairs so the trial balance stays clean:
+ *   DR Bank             (bankDepositAmount)
+ *   DR Card Fee Expense (fee = totalAmount - bankDepositAmount)
+ *              CR Card Clearing   (totalAmount, split across the two pairs)
+ *
+ * Side effects:
+ *  - CardBatchReport.status: CLOSED → SETTLED + settlement fields filled
+ *  - Each Payment row in the batch flips reconStatus RECEIVED → CLEARED
+ *
+ * Idempotent: re-settling a SETTLED batch throws BATCH_ALREADY_SETTLED.
+ */
+export async function settleBatch(tx: TxClient, input: SettleBatchInput) {
+  const batch = await tx.cardBatchReport.findUnique({
+    where: { id: input.batchId },
+    select: {
+      id: true, batchNo: true, terminalId: true, totalAmount: true,
+      status: true,
+      terminal: { select: { code: true, clearingAccountId: true } },
+    },
+  });
+  if (!batch) throw new Error('BATCH_NOT_FOUND');
+  if (batch.status === 'SETTLED') throw new Error('BATCH_ALREADY_SETTLED');
+  if (batch.status === 'VOIDED')  throw new Error('BATCH_VOIDED');
+
+  const gross = Number(batch.totalAmount);
+  const net   = Number(input.bankDepositAmount);
+  if (net < 0)           throw new Error('NEGATIVE_DEPOSIT');
+  if (net > gross + 0.5) throw new Error('DEPOSIT_EXCEEDS_GROSS');
+  const fee = Math.max(0, Number((gross - net).toFixed(2)));
+
+  // Resolve target FinancialAccounts.
+  //  - Bank: caller can override, else default BANK account.
+  //  - Card Fee: always the seeded CARD_FEE expense account (5210-01).
+  //  - Card Clearing: prefer the terminal's clearing FK, else system default
+  //    CARD_CLEARING account.
+  const { resolveAccount } = await import('./financialAccount.service');
+  const bankAcc = await resolveAccount(tx, {
+    subKind: 'BANK',
+    explicitAccountId: input.bankAccountId ?? null,
+  });
+  const feeAcc = await resolveAccount(tx, { subKind: 'CARD_FEE', explicitAccountId: null });
+  const clearingAccountId = batch.terminal.clearingAccountId ?? null;
+
+  // Post 2 pairs against the same Card Clearing CR side. Two pairs (not a
+  // synthetic triple) keep us on the existing postLedgerPair contract.
+  if (net > 0) {
+    await postLedgerPair(tx, {
+      debitAccount:    LedgerAccount.BANK,
+      creditAccount:   LedgerAccount.CASH,        // legacy placeholder
+      debitAccountId:  bankAcc.id,
+      creditAccountId: clearingAccountId,         // overrides to Card Clearing
+      amount:          net,
+      referenceType:   'CardBatchReport',
+      referenceId:     batch.id,
+      description:     `Card batch settled (deposit) — ${batch.terminal.code} #${batch.batchNo}`,
+      createdBy:       input.settledByUserId,
+    });
+  }
+  if (fee > 0) {
+    await postLedgerPair(tx, {
+      debitAccount:    LedgerAccount.EXPENSE,
+      creditAccount:   LedgerAccount.CASH,
+      debitAccountId:  feeAcc.id,
+      creditAccountId: clearingAccountId,
+      amount:          fee,
+      referenceType:   'CardBatchReport',
+      referenceId:     batch.id,
+      description:     `Card batch fee (MDR) — ${batch.terminal.code} #${batch.batchNo}`,
+      createdBy:       input.settledByUserId,
+    });
+  }
+
+  // Update the batch row
+  const updated = await tx.cardBatchReport.update({
+    where: { id: input.batchId },
+    data: {
+      status:            'SETTLED',
+      bankDepositAmount: new Prisma.Decimal(net),
+      feeAmount:         new Prisma.Decimal(fee),
+      bankAccountId:     bankAcc.id,
+      bankReferenceNo:   input.bankReferenceNo ?? null,
+      depositedAt:       input.depositedAt,
+      settledByUserId:   input.settledByUserId,
+      settledAt:         new Date(),
+      note:              input.note ?? undefined,
+    },
+    select: { id: true, batchNo: true, status: true },
+  });
+
+  // Flip every payment in the batch from RECEIVED to CLEARED so /finance
+  // pendingRecon counters drop.
+  const cleared = await tx.payment.updateMany({
+    where: {
+      terminalId:  batch.terminalId,
+      batchNo:     batch.batchNo,
+      reconStatus: 'RECEIVED' as never,
+    },
+    data: {
+      reconStatus: 'CLEARED' as never,
+      clearedAt:   new Date(),
+      clearedBy:   input.settledByUserId,
+    },
+  });
+
+  return {
+    batch: updated,
+    netDeposit:   net,
+    fee,
+    clearedCount: cleared.count,
   };
 }

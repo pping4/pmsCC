@@ -159,10 +159,16 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
 
   // Credit card: terminal must be active; if it restricts brands, the brand
   // must be in the allow-list. Empty allowedBrands = accept all.
+  // Phase 5: also resolve the terminal's clearing account so the rud-bat
+  // ledger DR lands on the SAME FinancialAccount the later batch settle
+  // will CR. Otherwise rud-bat hits the default 1131-01 while settle hits
+  // the terminal-specific 1131-02 — the clearing balance never zeros out
+  // and the trial balance carries a permanent variance.
+  let terminalClearingAccountId: string | null = null;
   if (input.paymentMethod === 'credit_card' && input.terminalId) {
     const term = await tx.edcTerminal.findUnique({
       where: { id: input.terminalId },
-      select: { isActive: true, allowedBrands: true, code: true },
+      select: { isActive: true, allowedBrands: true, code: true, clearingAccountId: true },
     });
     if (!term) {
       throw new Error('ไม่พบเครื่อง EDC — กรุณาเลือกเครื่องอื่น');
@@ -177,6 +183,7 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
     ) {
       throw new Error(`เครื่อง ${term.code} ไม่รองรับบัตรแบรนด์ ${input.cardBrand}`);
     }
+    terminalClearingAccountId = term.clearingAccountId;
   }
 
   // Step 1: Generate numbers
@@ -319,7 +326,14 @@ export async function createPayment(tx: TxClient, input: CreatePaymentInput) {
     // /finance/money-overview shows ฿0 in the chosen account and the cashier
     // shift "โอน/การ์ด/อื่นๆ" KPI under-counts. Cash payments leave this
     // null; resolveMoneyAccount falls back to the cash-box / system default.
-    moneyAccountId: input.receivingAccountId ?? null,
+    //
+    // Phase 5: credit_card uses terminal.clearingAccountId so DR rud-bat
+    // matches CR batch-settle (same FinancialAccount, balance zeros out
+    // properly).
+    moneyAccountId:
+      input.paymentMethod === 'credit_card'
+        ? (terminalClearingAccountId ?? input.receivingAccountId ?? null)
+        : (input.receivingAccountId ?? null),
   });
 
   // Step 5: Post contra-revenue for discounts

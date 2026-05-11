@@ -117,6 +117,18 @@ enum ReconStatus {
   VOIDED
 }
 
+/// Phase 5 — card batch lifecycle:
+///   CLOSED  → batch closed at EDC, awaiting bank deposit
+///   SETTLED → bank deposited the net amount, ledger posted (DR Bank,
+///             DR CardFee, CR CardClearing). Payments in the batch
+///             flip reconStatus from RECEIVED to CLEARED.
+///   VOIDED  → settlement was wrong, reversed by admin
+enum CardBatchStatus {
+  CLOSED
+  SETTLED
+  VOIDED
+}
+
 enum BankAccountOwner {
   COMPANY
   PERSONAL
@@ -1247,6 +1259,9 @@ model FinancialAccount {
   paymentsReceiving Payment[]     @relation("PaymentReceivingAccount")
   edcTerminals      EdcTerminal[] @relation("TerminalClearingAccount")
 
+  // Phase 5 — card batches settled into this bank account
+  cardBatchesSettled CardBatchReport[] @relation("BatchBankAccount")
+
   @@index([kind, subKind])
   @@index([isActive])
   @@map("financial_accounts")
@@ -2118,20 +2133,39 @@ model CardFeeRate {
 
 // EDC daily batch settlement ("ส่งยอด") — one row per (terminal, batchNo)
 model CardBatchReport {
-  id             String      @id @default(uuid())
-  terminalId     String      @map("terminal_id")
-  terminal       EdcTerminal @relation(fields: [terminalId], references: [id])
-  batchNo        String      @map("batch_no")
-  closeDate      DateTime    @map("close_date")
-  totalAmount    Decimal     @db.Decimal(14, 2) @map("total_amount")
-  txCount        Int         @map("tx_count")
-  closedByUserId String      @map("closed_by_user_id")
-  closedAt       DateTime    @default(now()) @map("closed_at")
+  id             String          @id @default(uuid())
+  terminalId     String          @map("terminal_id")
+  terminal       EdcTerminal     @relation(fields: [terminalId], references: [id])
+  batchNo        String          @map("batch_no")
+  closeDate      DateTime        @map("close_date")
+  totalAmount    Decimal         @db.Decimal(14, 2) @map("total_amount")
+  txCount        Int             @map("tx_count")
+  closedByUserId String          @map("closed_by_user_id")
+  closedAt       DateTime        @default(now()) @map("closed_at")
   note           String?
-  varianceAmount Decimal     @default(0) @db.Decimal(14, 2) @map("variance_amount")
+  varianceAmount Decimal         @default(0) @db.Decimal(14, 2) @map("variance_amount")
+
+  // Phase 5 — bank settlement (when money actually lands in the bank account
+  // T+1 / T+2 after the EDC batch is closed).
+  status            CardBatchStatus @default(CLOSED)
+  /// Net amount the bank deposited (after deducting MDR fees).
+  bankDepositAmount Decimal?        @db.Decimal(14, 2) @map("bank_deposit_amount")
+  /// Computed fee = totalAmount - bankDepositAmount; cached to avoid the
+  /// subtraction every time a report renders.
+  feeAmount         Decimal?        @db.Decimal(14, 2) @map("fee_amount")
+  /// FinancialAccount the deposit landed in (1120-01 default). Stored so
+  /// money-overview can attribute the inflow correctly when the property
+  /// has multiple bank accounts.
+  bankAccountId     String?         @map("bank_account_id")
+  bankAccount       FinancialAccount? @relation("BatchBankAccount", fields: [bankAccountId], references: [id])
+  bankReferenceNo   String?         @map("bank_reference_no")
+  depositedAt       DateTime?       @map("deposited_at")
+  settledByUserId   String?         @map("settled_by_user_id")
+  settledAt         DateTime?       @map("settled_at")
 
   @@unique([terminalId, batchNo])
   @@index([closeDate])
+  @@index([status])
   @@map("card_batch_reports")
 }
 

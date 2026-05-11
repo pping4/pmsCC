@@ -43,6 +43,12 @@ interface BatchRow {
   closedAt: string;
   terminalCode: string;
   terminalName: string;
+  // Phase 5 settlement state
+  status: 'CLOSED' | 'SETTLED' | 'VOIDED';
+  bankDepositAmount: number | null;
+  feeAmount: number | null;
+  bankReferenceNo: string | null;
+  depositedAt: string | null;
 }
 
 export function BatchCloseTab() {
@@ -63,6 +69,64 @@ export function BatchCloseTab() {
 
   const [batches, setBatches] = useState<BatchRow[]>([]);
   const [historyRefresh, setHistoryRefresh] = useState(0);
+
+  // Phase 5 — settle modal state
+  const [settleTarget, setSettleTarget]       = useState<BatchRow | null>(null);
+  const [settleDeposit, setSettleDeposit]     = useState('');
+  const [settleDate, setSettleDate]           = useState(toDateStr(new Date()));
+  const [settleRefNo, setSettleRefNo]         = useState('');
+  const [settleNote, setSettleNote]           = useState('');
+  const [settleSubmitting, setSettleSubmitting] = useState(false);
+  const [settleError, setSettleError]         = useState<string | null>(null);
+  const settleFee = settleTarget && settleDeposit !== ''
+    ? Math.max(0, Number((settleTarget.totalAmount - Number(settleDeposit)).toFixed(2)))
+    : null;
+
+  const openSettle = (b: BatchRow) => {
+    setSettleTarget(b);
+    setSettleDeposit(String(b.totalAmount));  // default to gross — cashier subtracts fee
+    setSettleDate(toDateStr(new Date()));
+    setSettleRefNo('');
+    setSettleNote('');
+    setSettleError(null);
+  };
+
+  const handleSettle = async () => {
+    if (!settleTarget || settleSubmitting) return;
+    const net = Number(settleDeposit);
+    if (!Number.isFinite(net) || net < 0) {
+      setSettleError('ยอดเงินที่ธนาคารโอนต้องเป็นจำนวนบวก'); return;
+    }
+    if (net > settleTarget.totalAmount + 0.5) {
+      setSettleError('ยอดเงินที่ธนาคารโอนเกินยอด batch — ตรวจสอบอีกครั้ง'); return;
+    }
+    setSettleSubmitting(true);
+    setSettleError(null);
+    try {
+      const res = await fetch(`/api/card-batches/${settleTarget.id}/settle`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bankDepositAmount: net,
+          depositedAt:       settleDate,
+          bankReferenceNo:   settleRefNo.trim() || undefined,
+          note:              settleNote.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+      toast.success(
+        'บันทึก settle สำเร็จ',
+        `ยอดสุทธิ ฿${fmtBaht(data.netDeposit)} · ค่าธรรมเนียม ฿${fmtBaht(data.fee)}`,
+      );
+      setSettleTarget(null);
+      setHistoryRefresh((n) => n + 1);
+    } catch (e) {
+      setSettleError(e instanceof Error ? e.message : 'บันทึกไม่สำเร็จ');
+    } finally {
+      setSettleSubmitting(false);
+    }
+  };
 
   // Load terminals
   useEffect(() => {
@@ -311,6 +375,10 @@ export function BatchCloseTab() {
                   <th className="text-right px-3 py-2">ยอด EDC</th>
                   <th className="text-right px-3 py-2">รายการ</th>
                   <th className="text-right px-3 py-2">ส่วนต่าง</th>
+                  <th className="text-center px-3 py-2">สถานะ</th>
+                  <th className="text-right px-3 py-2">ฝากเข้าธนาคาร</th>
+                  <th className="text-right px-3 py-2">ค่าธรรมเนียม</th>
+                  <th className="text-center px-3 py-2"></th>
                 </tr>
               </thead>
               <tbody>
@@ -327,6 +395,38 @@ export function BatchCloseTab() {
                       <td className={`px-3 py-2 text-right font-mono ${varOk ? 'text-green-600' : 'text-yellow-700'}`}>
                         {b.varianceAmount >= 0 ? '+' : ''}{fmtBaht(b.varianceAmount)} {varOk ? '✓' : '⚠️'}
                       </td>
+                      <td className="px-3 py-2 text-center">
+                        {b.status === 'SETTLED' ? (
+                          <span className="text-xs font-semibold" style={{ color: '#15803d', background: '#dcfce7', padding: '2px 10px', borderRadius: 999 }}>
+                            ✓ ฝากแล้ว
+                          </span>
+                        ) : b.status === 'VOIDED' ? (
+                          <span className="text-xs font-semibold" style={{ color: '#6b7280', background: '#f3f4f6', padding: '2px 10px', borderRadius: 999 }}>
+                            ยกเลิก
+                          </span>
+                        ) : (
+                          <span className="text-xs font-semibold" style={{ color: '#92400e', background: '#fef3c7', padding: '2px 10px', borderRadius: 999 }}>
+                            ⏳ รอ settle
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {b.bankDepositAmount != null ? `฿${fmtBaht(b.bankDepositAmount)}` : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono" style={{ color: '#b45309' }}>
+                        {b.feeAmount != null ? `฿${fmtBaht(b.feeAmount)}` : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {b.status === 'CLOSED' && (
+                          <button
+                            onClick={() => openSettle(b)}
+                            className="px-3 py-1 rounded text-xs font-semibold"
+                            style={{ background: '#2563eb', color: '#fff' }}
+                          >
+                            🏦 บันทึกเงินเข้า
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
@@ -335,6 +435,138 @@ export function BatchCloseTab() {
           </div>
         )}
       </section>
+
+      {/* ── Phase 5 — Bank Settlement Modal ────────────────────────────── */}
+      {settleTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1100,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{ position: 'absolute', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)' }}
+            onClick={() => !settleSubmitting && setSettleTarget(null)}
+          />
+          <div
+            className="pms-card"
+            style={{
+              position: 'relative', zIndex: 1, width: '100%', maxWidth: 500,
+              background: 'var(--surface-card)', borderRadius: 12, padding: 20,
+              boxShadow: '0 20px 25px rgba(0,0,0,0.15)',
+            }}
+          >
+            <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
+              🏦 บันทึกเงินเข้าธนาคาร — Settle Batch
+            </h3>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 14 }}>
+              บันทึกยอดเงินที่ธนาคารโอนเข้าบัญชี ระบบจะคำนวณค่าธรรมเนียมและลง ledger อัตโนมัติ
+            </p>
+
+            <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: 8, padding: 10, marginBottom: 14, fontSize: 12 }}>
+              <div><strong>Batch:</strong> <span className="font-mono">{settleTarget.batchNo}</span> · {settleTarget.terminalCode}</div>
+              <div><strong>วันที่ปิด:</strong> {fmtDate(new Date(settleTarget.closeDate))}</div>
+              <div><strong>ยอดรวมจาก EDC:</strong> <span className="font-mono">฿{fmtBaht(settleTarget.totalAmount)}</span> ({settleTarget.txCount} รายการ)</div>
+            </div>
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+              ยอดเงินที่ธนาคารโอนเข้า (net) <span style={{ color: '#dc2626' }}>*</span>
+            </label>
+            <input
+              type="number"
+              value={settleDeposit}
+              onChange={(e) => setSettleDeposit(e.target.value)}
+              disabled={settleSubmitting}
+              step="0.01"
+              min={0}
+              max={settleTarget.totalAmount}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)',
+                fontFamily: 'monospace', fontSize: 14,
+              }}
+            />
+            {settleFee != null && (
+              <p style={{ fontSize: 11, color: settleFee > 0 ? '#b45309' : '#16a34a', marginTop: 4 }}>
+                {settleFee > 0
+                  ? `→ ค่าธรรมเนียมที่ระบบจะลงเป็นค่าใช้จ่าย: ฿${fmtBaht(settleFee)}`
+                  : '→ ไม่มีค่าธรรมเนียม (ยอดเต็มเข้าบัญชี)'}
+              </p>
+            )}
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginTop: 12, marginBottom: 4 }}>
+              วันที่ฝาก
+            </label>
+            <input
+              type="date"
+              value={settleDate}
+              onChange={(e) => setSettleDate(e.target.value)}
+              disabled={settleSubmitting}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)', fontSize: 13,
+              }}
+            />
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginTop: 12, marginBottom: 4 }}>
+              เลขอ้างอิงสลิป (ถ้ามี)
+            </label>
+            <input
+              type="text"
+              value={settleRefNo}
+              onChange={(e) => setSettleRefNo(e.target.value)}
+              disabled={settleSubmitting}
+              placeholder="เช่น 20260429-001"
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)', fontSize: 13, fontFamily: 'monospace',
+              }}
+            />
+
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginTop: 12, marginBottom: 4 }}>
+              หมายเหตุ
+            </label>
+            <textarea
+              value={settleNote}
+              onChange={(e) => setSettleNote(e.target.value)}
+              disabled={settleSubmitting}
+              rows={2}
+              style={{
+                width: '100%', padding: '8px 10px', borderRadius: 6,
+                border: '1px solid var(--border-default)', fontSize: 13,
+              }}
+            />
+
+            {settleError && (
+              <div style={{ marginTop: 10, padding: '8px 10px', background: '#fef2f2', borderRadius: 6, border: '1px solid #fca5a5', fontSize: 12, color: '#b91c1c' }}>
+                {settleError}
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+              <button
+                type="button"
+                onClick={() => setSettleTarget(null)}
+                disabled={settleSubmitting}
+                className="flex-1 px-4 py-2 rounded-lg border text-sm disabled:opacity-50"
+                style={{ borderColor: 'var(--border-default)', color: 'var(--text-primary)' }}
+              >
+                ปิด
+              </button>
+              <button
+                type="button"
+                onClick={handleSettle}
+                disabled={settleSubmitting || !settleDeposit}
+                className="flex-[2] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 disabled:cursor-not-allowed text-white text-sm font-semibold"
+              >
+                {settleSubmitting ? '⏳ กำลังบันทึก…' : '✓ ยืนยันการ Settle'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
