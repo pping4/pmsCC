@@ -4,6 +4,12 @@
 > **Last verified:** 2026-04-21
 > **Scope:** `C:\Users\pping\Desktop\pms\pms-next\`
 
+> **⚠️ Active-branch context:** For phase-by-phase changes on `feat/receipt-standardization`
+> (receipt standardization → 3-mode refund → Guest Credit → EDC picker → card settlement)
+> see **[`docs/PHASE_HANDOFF.md`](./PHASE_HANDOFF.md)** — that is the canonical handoff for any
+> agent picking up money-path work. Read PHASE_HANDOFF.md §1–§4 before touching
+> `refund.service.ts`, `cardBatch.service.ts`, `guestCredit.service.ts`, or cashier/billing/finance pages.
+
 > This file **replaces** the following (now stale):
 > - `PROJECT_STATUS.md` (sprint snapshot — rot fast)
 > - `PMS_SYSTEM_DOCUMENTATION.md` (parent-level master doc — overtaken by code)
@@ -11,6 +17,7 @@
 >
 > Kept as living docs (not replaced):
 > - `CLAUDE.md` — rules/standards for AI + devs
+> - `docs/PHASE_HANDOFF.md` — **active-branch handoff (read first for money-path changes)**
 > - `docs/data-table-handoff.md` — shared DataTable component
 > - `.claude/skills/*.md` — domain playbooks
 > - `PLAN-*.md` — active feature plans (rate-recalc, drag-create, reservation tape chart)
@@ -481,14 +488,25 @@ Grouped by feature:
 
 ---
 
-## 15. Current Development State (as of 2026-04-21)
+## 15. Current Development State (as of 2026-05-11)
+
+> **Active branch:** `feat/receipt-standardization` is 27 commits ahead of `feat/consolidation`.
+> Phases 1–5 (receipt standardization, cashier recent-payments + void, 3-mode refund,
+> Guest Credit lifecycle, EDC picker rollout, card-batch settlement) are **complete + E2E-verified**.
+> See [`PHASE_HANDOFF.md`](./PHASE_HANDOFF.md) for the canonical phase summary, ledger invariants,
+> schema additions, and remaining Phase 6 backlog.
 
 ### ✅ Production-ready
 - Booking flow (check-in → check-out → folio → invoice → payment → receipt)
 - Room status + room rates + utility readings
 - Guest master + TM30 fields + OCR ID capture
-- Folio-centric billing (UNBILLED → BILLED → PAID lock)
+- Folio-centric billing (UNBILLED → BILLED → PAID lock) — **per-night FolioLineItem rows (Phase 1)**
 - Payment capture + allocation + double-entry ledger
+- **Three-mode refund (cash / credit / split)** — kind='reversal' PaymentAllocation + partial invoice void (Phase 3)
+- **Guest Credit lifecycle** — issue / FIFO consume / single + bulk expire to FORFEITED_REVENUE (Phase 3.next)
+- **EDC terminal picker** on every quick-pay surface (booking, check-in, extend, checkout, folio, bill-tab) (Phase 4)
+- **Card-batch settlement** — bank deposit → DR Bank + DR CardFee / CR CardClearing; Payment RECEIVED→CLEARED (Phase 5)
+- **Cashier Recent Payments** DataTable with per-row void (Phase 2)
 - Security deposit lifecycle
 - City Ledger / AR (credit check, posting, aging, statement)
 - Cash session open/close
@@ -533,9 +551,11 @@ Grouped by feature:
 ## 16. Backlog & Next Work (prioritized)
 
 ### 🔴 P0 — Financial correctness / data integrity
-1. **Rate recalculation on resize** — see `PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
-2. **Double-booking guard on drag/resize** — `/api/reservation` PATCH should reject overlapping bookings (currently may allow).
-3. **Timezone consistency** — API uses `T00:00:00.000Z` but UI parses as local — audit for off-by-one-day bugs.
+1. **Phase 6 — Cancel-after-checkin redesign** — current code hardblocks cancellation after check-in; needs to be replaced with the same 3-mode refund picker as `/refunds`. See `PHASE_HANDOFF.md` §5.1.
+2. **Phase 6 — Drag-shorten confirm dialog gets refund-mode picker inline** — currently always defaults to cash refund. See `PHASE_HANDOFF.md` §5.2.
+3. **Rate recalculation on resize** — see `PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
+4. **Double-booking guard on drag/resize** — `/api/reservation` PATCH should reject overlapping bookings (currently may allow).
+5. **Timezone consistency** — API uses `T00:00:00.000Z` but UI parses as local — audit for off-by-one-day bugs.
 
 ### 🟠 P1 — Feature completion
 4. **City Ledger phase 4–8** — detail 4-tab, `receiveCityLedgerPayment` UI, monthly statement PDF, credit hold on new booking, aging report, bad debt write-off (see `CityLedger_Implementation_Plan_FINAL.md`).

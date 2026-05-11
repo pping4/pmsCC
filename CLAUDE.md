@@ -146,6 +146,29 @@ Before outputting any code, you MUST mentally verify the following checklist:
 - [ ] **Completeness:** Does it handle edge cases (e.g., concurrent bookings)?
 - [ ] **Date formatting:** Am I using `fmtDate` / `fmtDateTime` / `fmtBaht` from `@/lib/date-format`? (No `th-TH` locale.)
 
+## 8. Active-Branch Handoff (READ FIRST for money-path work)
+
+The `feat/receipt-standardization` branch landed a multi-phase accounting redesign
+(receipt standardization → 3-mode refund → Guest Credit lifecycle → EDC picker rollout →
+card-batch settlement). It introduced new enums (`RefundMode`, `PaymentAllocationKind`,
+`GuestCreditStatus`, `CardBatchStatus`), new models (`GuestCredit`), and 7 mandatory
+ledger invariants that future PRs must preserve.
+
+**Before touching any of the following, read [`docs/PHASE_HANDOFF.md`](./docs/PHASE_HANDOFF.md) §1–§4:**
+- `src/services/refund.service.ts`
+- `src/services/cardBatch.service.ts`
+- `src/services/guestCredit.service.ts`
+- `src/services/payment.service.ts` (terminal.clearingAccountId resolution)
+- `src/services/folio.service.ts` (`addNightlyRoomCharges`, `partialVoidInvoice`, `recalculateFolioBalance`)
+- Cashier pages (`src/app/(dashboard)/cashier/**`)
+- Refund modal (`src/app/(dashboard)/refunds/components/ProcessRefundModal.tsx`)
+- Folio ledger UI (`src/components/folio/FolioLedger.tsx`)
+- Any new ledger-posting call site (everything must funnel through `postLedgerPair`)
+
+For a broader system inventory see [`docs/SYSTEM_OVERVIEW.md`](./docs/SYSTEM_OVERVIEW.md).
+Phase 6 backlog (cancel-after-checkin redesign, drag-shorten mode picker, `/finance`
+Guest Credits UI, card-batch VOID, etc.) is listed in `PHASE_HANDOFF.md` §5.
+
 # Response Format
 - Provide clean, well-documented, production-ready code.
 - Briefly explain *why* specific Prisma or architectural decisions were made.
