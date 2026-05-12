@@ -178,7 +178,10 @@ export default function DetailPanel({
   const [invoiceDoc,   setInvoiceDoc]         = useState<InvoiceDocumentData | null>(null);
 
   // ── Billing tab: inline payment form ──────────────────────────────────────
-  const [billingPayOpen,    setBillingPayOpen]    = useState(false);
+  // Phase 6.8 — track WHICH invoice is currently being paid (was a single
+  // boolean before, which expanded the form on every unpaid card simultaneously
+  // when one was clicked). null = no form open.
+  const [billingPayInvoiceId, setBillingPayInvoiceId] = useState<string | null>(null);
   const [billingPayMethod,  setBillingPayMethod]  = useState<string>('cash');
   const [billingCashSessId, setBillingCashSessId] = useState<string | null>(null);
   // Tracks whether the /api/cash-sessions/current fetch has resolved at least
@@ -318,7 +321,7 @@ export default function DetailPanel({
     setReprintData(null);
     setInvoiceDoc(null);
     setBillingInvoices([]);
-    setBillingPayOpen(false);
+    setBillingPayInvoiceId(null);
     setBillingPayMethod('cash');
     setBillingCashSessId(null);
     setError('');
@@ -524,7 +527,7 @@ export default function DetailPanel({
 
   // Auto-fetch cash session when billing pay form is open with cash method
   useEffect(() => {
-    if (!billingPayOpen || billingPayMethod !== 'cash') {
+    if (!billingPayInvoiceId || billingPayMethod !== 'cash') {
       setBillingCashSessId(null);
       setBillingCashSessChecked(false);
       return;
@@ -536,10 +539,13 @@ export default function DetailPanel({
       .catch(() => setBillingCashSessId(null))
       .finally(() => setBillingCashSessChecked(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [billingPayOpen, billingPayMethod, booking?.id]);
+  }, [billingPayInvoiceId, billingPayMethod, booking?.id]);
 
-  /** Collect payment from billing tab — works for confirmed or checked_in bookings. */
-  const handleBillingPay = async () => {
+  /** Collect payment from billing tab — works for confirmed or checked_in bookings.
+   *  Phase 6.8: scoped per-invoice. `targetInvoice` carries the row the cashier
+   *  clicked; we send invoiceId + that invoice's outstanding to the server so
+   *  only THAT invoice flips paid (no more "all invoices active at once"). */
+  const handleBillingPay = async (targetInvoice: BillingInvoice) => {
     if (!booking || billingPayLoading) return;
     setBillingPayLoading(true);
     setError('');
@@ -558,17 +564,26 @@ export default function DetailPanel({
         setError('กรุณาเลือกเครื่อง EDC + แบรนด์บัตร');
         return;
       }
-      const res  = await fetch(`/api/bookings/${booking.id}/pay`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount:        booking.rate * Math.max(
+      // Proforma rows carry bookingId as id (not a real Invoice.id) and have
+      // grandTotal=0 — fall back to the legacy "pay everything outstanding"
+      // path that uses the booking total. Real invoice rows scope to themselves.
+      const isProformaRow = !!targetInvoice.isProforma;
+      const outstandingForRow = isProformaRow
+        ? booking.rate * Math.max(
             1,
             Math.ceil(
               (new Date(booking.checkOut).getTime() - new Date(booking.checkIn).getTime()) /
                 (1000 * 60 * 60 * 24),
             ),
-          ),
+          )
+        : Math.max(0, Number(targetInvoice.grandTotal) - Number(targetInvoice.paidAmount ?? 0));
+      const res  = await fetch(`/api/bookings/${booking.id}/pay`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          // Phase 6.8 — pay this specific invoice only (skip for proforma)
+          ...(isProformaRow ? {} : { invoiceId: targetInvoice.id }),
+          amount:        outstandingForRow,
           // Sprint 4B: cashSessionId resolved server-side from caller's shift.
           paymentMethod: billingPayMethod,
           // Sprint 5: bank-transfer fields
@@ -586,7 +601,7 @@ export default function DetailPanel({
       });
       const data = await res.json() as { success?: boolean; error?: string; receipt?: ReceiptData };
       if (!res.ok || !data.success) throw new Error(data.error ?? `HTTP ${res.status}`);
-      setBillingPayOpen(false);
+      setBillingPayInvoiceId(null);
       onRefresh();
       // Reload billing tab invoices & show receipt
       await loadBillingInvoices(booking.id);
@@ -2692,14 +2707,16 @@ export default function DetailPanel({
                               {/* Pay now — shown on proforma (confirmed, unpaid) or unpaid real invoice */}
                               {(inv.isProforma || inv.status === 'unpaid') && (
                                 <button
-                                  onClick={() => setBillingPayOpen(o => !o)}
+                                  onClick={() => setBillingPayInvoiceId(
+                                    prev => prev === inv.id ? null : inv.id
+                                  )}
                                   style={{
                                     flex: 1,
                                     padding: '5px 0',
                                     fontSize: 11, fontWeight: 600,
                                     borderRadius: 6,
                                     border: '1.5px solid #16a34a',
-                                    background: billingPayOpen ? '#dcfce7' : '#f0fdf4',
+                                    background: billingPayInvoiceId === inv.id ? '#dcfce7' : '#f0fdf4',
                                     color: '#15803d',
                                     cursor: 'pointer',
                                     fontFamily: FONT,
@@ -2732,8 +2749,8 @@ export default function DetailPanel({
                               )}
                             </div>
 
-                            {/* ── Inline payment form (shared across all cards, only one open) ── */}
-                            {(inv.isProforma || inv.status === 'unpaid') && billingPayOpen && (
+                            {/* ── Inline payment form (Phase 6.8: scoped per-invoice row) ── */}
+                            {(inv.isProforma || inv.status === 'unpaid') && billingPayInvoiceId === inv.id && (
                               <div style={{ marginTop: 10, padding: '10px 12px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #86efac' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#166534', marginBottom: 8 }}>💳 เลือกช่องทางชำระเงิน</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
@@ -2791,14 +2808,14 @@ export default function DetailPanel({
                                 )}
                                 <div style={{ display: 'flex', gap: 6 }}>
                                   <button
-                                    onClick={() => { setBillingPayOpen(false); setError(''); }}
+                                    onClick={() => { setBillingPayInvoiceId(null); setError(''); }}
                                     disabled={billingPayLoading}
                                     style={{ flex: 1, padding: '7px', borderRadius: 6, border: '1.5px solid #e5e7eb', background: '#fff', color: '#374151', fontSize: 11, fontWeight: 500, cursor: 'pointer', fontFamily: FONT }}
                                   >
                                     ยกเลิก
                                   </button>
                                   <button
-                                    onClick={handleBillingPay}
+                                    onClick={() => handleBillingPay(inv)}
                                     disabled={
                                       billingPayLoading ||
                                       (billingPayMethod === 'cash' && !billingCashSessId) ||

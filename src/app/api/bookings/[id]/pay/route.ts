@@ -70,6 +70,13 @@ const PaySchema = z.object({
    * Set 0 (default) to skip credit application entirely.
    */
   applyCreditAmount: z.number().nonnegative().optional(),
+  /**
+   * Phase 6.8 — pay this SPECIFIC invoice only (per-invoice flow from the bill
+   * tab). When omitted the legacy "pay all outstanding, allocate oldest-first"
+   * behavior is preserved (used by FolioLedger quick-pay and bulk-pay flows).
+   * Must belong to this booking; server validates ownership.
+   */
+  invoiceId: z.string().uuid().optional(),
 });
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
@@ -103,6 +110,7 @@ export async function POST(
     cardBrand, cardType, cardLast4, authCode, terminalId,
     feeAmount, feeAccountId,
     applyCreditAmount,
+    invoiceId: targetInvoiceId,
   } = parsed.data;
 
   // Sprint 5 — per-method guard rails (match payment.schema refines)
@@ -291,9 +299,14 @@ export async function POST(
     const isMonthly =
       booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
 
+    // Phase 6.8 — when caller passes targetInvoiceId, restrict allocation to
+    // THAT invoice only (per-invoice bill-tab flow). Otherwise the legacy
+    // "pay all outstanding oldest-first" behavior stays intact (used by
+    // FolioLedger quick-pay panel and the booking-level pay button).
     const existingUnpaid = await tx.invoice.findMany({
       where: {
         bookingId,
+        ...(targetInvoiceId ? { id: targetInvoiceId } : {}),
         status: { in: ['unpaid', 'overdue', 'partial'] as never[] },
       },
       orderBy: { issueDate: 'asc' },
@@ -302,6 +315,9 @@ export async function POST(
         grandTotal: true, paidAmount: true,
       },
     });
+    if (targetInvoiceId && existingUnpaid.length === 0) {
+      throw new Error('ใบแจ้งหนี้ที่ระบุไม่พบหรือชำระเรียบร้อยแล้ว');
+    }
 
     type InvoiceForPayment = {
       invoiceId: string;
