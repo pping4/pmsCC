@@ -255,96 +255,104 @@ export async function POST(
       let invoiceId: string | undefined;
       let paymentId: string | undefined;
 
-      // ── c. Collect payment now (optional) ──────────────────────────────────
-      if (collectNow && extraCharge > 0 && paymentMethod) {
+      // ── c. Always create the extension invoice (Phase 6.7) ────────────────
+      // Before this fix the invoice was created ONLY when collectNow=true,
+      // so picking "เก็บเงินภายหลัง" left the extension as UNBILLED FolioLineItem
+      // rows with no invoice — the bill tab had nothing to show and the cashier
+      // couldn't collect later. The toast text already promised the opposite:
+      //   "ค่าใช้จ่ายจะถูกบันทึกในโฟลิโอ และสามารถเก็บเงินได้ทีหลังจากแท็บ บิล"
+      // Now the INV-EX is always cut (status=unpaid when pay-later) so the
+      // existing quick-pay button on the bill tab works without UI changes.
+      // Drag-resize already follows this pattern in /api/reservation route.
+      const invResult = extraCharge > 0
+        ? await createInvoiceFromFolio(tx, {
+            folioId:     folio.folioId,
+            guestId:     booking.guestId,
+            bookingId:   params.id,
+            invoiceType: 'GN',               // General / extension invoice
+            dueDate:     new Date(),
+            notes:       notes ?? `ต่ออายุการจอง BK-${booking.bookingNumber}`,
+            createdBy:   userId,
+            lineItemIds: newLineItemIds,        // bill all new extension nights/rows
+          })
+        : null;
+      if (invResult) {
+        invoiceId = invResult.invoiceId;
+      }
 
-        // Create invoice for ONLY the new extension line item
-        const invResult = await createInvoiceFromFolio(tx, {
-          folioId:     folio.folioId,
-          guestId:     booking.guestId,
-          bookingId:   params.id,
-          invoiceType: 'GN',               // General / extension invoice
-          dueDate:     new Date(),
-          notes:       notes ?? `ต่ออายุการจอง BK-${booking.bookingNumber}`,
-          createdBy:   userId,
-          lineItemIds: newLineItemIds,        // bill all new extension nights/rows
+      // ── d. Collect payment now (optional) ──────────────────────────────────
+      if (collectNow && invResult && paymentMethod) {
+        // Single chokepoint: payment.service handles cash-session
+        // resolution, invoice paid-status update, line-item paid flag,
+        // ledger pair (DR Cash / CR AR), and audit log.
+        const result = await createPayment(tx, {
+          idempotencyKey: `extend-${params.id}-${newCheckOutStr}`,
+          guestId:        booking.guestId,
+          bookingId:      params.id,
+          amount:         invResult.grandTotal,
+          paymentMethod,
+          paymentDate:    new Date(),
+          receivedBy:     userId,
+          notes:          notes ?? `ต่ออายุการจอง +${extraDays} วัน`,
+          allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+          createdBy:      userId,
+          createdByName:  userName ?? undefined,
+          receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
+          terminalId: paymentMethod === 'credit_card' ? terminalId : undefined,
+          cardBrand:  paymentMethod === 'credit_card' ? cardBrand  as never : undefined,
+          cardType:   paymentMethod === 'credit_card' ? cardType   as never : undefined,
+          cardLast4:  paymentMethod === 'credit_card' ? cardLast4  : undefined,
+          authCode:   paymentMethod === 'credit_card' ? authCode   : undefined,
         });
+        paymentId = result.id;
 
-        if (invResult) {
-          invoiceId = invResult.invoiceId;
+        // Receipt-Standardization: build per-night receipt for the extension.
+        // Mirror the line items we just persisted via addNightlyRoomCharges.
+        const receiptItems: ReceiptData['items'] =
+          booking.bookingType === 'daily'
+            ? Array.from({ length: extraDays }, (_, i) => {
+                const ns = new Date(oldCheckOut);
+                ns.setUTCHours(0, 0, 0, 0);
+                ns.setUTCDate(ns.getUTCDate() + i);
+                const ne = new Date(ns);
+                ne.setUTCDate(ne.getUTCDate() + 1);
+                return {
+                  description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+                  quantity:    1,
+                  unitPrice:   effectiveRate,
+                  amount:      effectiveRate,
+                  periodStart: fmtDate(ns),
+                  periodEnd:   fmtDate(ne),
+                };
+              })
+            : [{
+                description: `ค่าเช่าเพิ่มเติม — ห้อง ${booking.room.number}`,
+                amount:      extraCharge,
+                periodStart: fmtDate(oldCheckOut),
+                periodEnd:   fmtDate(newCheckOut),
+              }];
 
-          // Single chokepoint: payment.service handles cash-session
-          // resolution, invoice paid-status update, line-item paid flag,
-          // ledger pair (DR Cash / CR AR), and audit log.
-          const result = await createPayment(tx, {
-            idempotencyKey: `extend-${params.id}-${newCheckOutStr}`,
-            guestId:        booking.guestId,
-            bookingId:      params.id,
-            amount:         invResult.grandTotal,
-            paymentMethod,
-            paymentDate:    new Date(),
-            receivedBy:     userId,
-            notes:          notes ?? `ต่ออายุการจอง +${extraDays} วัน`,
-            allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
-            createdBy:      userId,
-            createdByName:  userName ?? undefined,
-            receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
-            terminalId: paymentMethod === 'credit_card' ? terminalId : undefined,
-            cardBrand:  paymentMethod === 'credit_card' ? cardBrand  as never : undefined,
-            cardType:   paymentMethod === 'credit_card' ? cardType   as never : undefined,
-            cardLast4:  paymentMethod === 'credit_card' ? cardLast4  : undefined,
-            authCode:   paymentMethod === 'credit_card' ? authCode   : undefined,
-          });
-          paymentId = result.id;
-
-          // Receipt-Standardization: build per-night receipt for the extension.
-          // Mirror the line items we just persisted via addNightlyRoomCharges.
-          const receiptItems: ReceiptData['items'] =
-            booking.bookingType === 'daily'
-              ? Array.from({ length: extraDays }, (_, i) => {
-                  const ns = new Date(oldCheckOut);
-                  ns.setUTCHours(0, 0, 0, 0);
-                  ns.setUTCDate(ns.getUTCDate() + i);
-                  const ne = new Date(ns);
-                  ne.setUTCDate(ne.getUTCDate() + 1);
-                  return {
-                    description: `ค่าห้องพัก — ห้อง ${booking.room.number}`,
-                    quantity:    1,
-                    unitPrice:   effectiveRate,
-                    amount:      effectiveRate,
-                    periodStart: fmtDate(ns),
-                    periodEnd:   fmtDate(ne),
-                  };
-                })
-              : [{
-                  description: `ค่าเช่าเพิ่มเติม — ห้อง ${booking.room.number}`,
-                  amount:      extraCharge,
-                  periodStart: fmtDate(oldCheckOut),
-                  periodEnd:   fmtDate(newCheckOut),
-                }];
-
-          extendReceipt = {
-            receiptType:   'checkout', // closest match for "extension paid now"
-            receiptNumber: result.receiptNumber,
-            paymentNumber: result.paymentNumber,
-            invoiceNumber: invResult.invoiceNumber,
-            bookingNumber: booking.bookingNumber,
-            guestName,
-            roomNumber:    booking.room.number,
-            bookingType:   booking.bookingType,
-            checkIn:       fmtDate(booking.checkIn),
-            checkOut:      fmtDate(newCheckOut),
-            items:         receiptItems,
-            subtotal:      invResult.grandTotal,
-            vatAmount:     0,
-            grandTotal:    invResult.grandTotal,
-            paymentMethod: paymentMethod!,
-            paidAmount:    invResult.grandTotal,
-            issueDate:     new Date().toISOString(),
-            cashierName:   userName,
-            notes:         `ต่ออายุการจอง +${extraDays} ${booking.bookingType === 'daily' ? 'คืน' : 'วัน'}`,
-          };
-        }
+        extendReceipt = {
+          receiptType:   'checkout', // closest match for "extension paid now"
+          receiptNumber: result.receiptNumber,
+          paymentNumber: result.paymentNumber,
+          invoiceNumber: invResult.invoiceNumber,
+          bookingNumber: booking.bookingNumber,
+          guestName,
+          roomNumber:    booking.room.number,
+          bookingType:   booking.bookingType,
+          checkIn:       fmtDate(booking.checkIn),
+          checkOut:      fmtDate(newCheckOut),
+          items:         receiptItems,
+          subtotal:      invResult.grandTotal,
+          vatAmount:     0,
+          grandTotal:    invResult.grandTotal,
+          paymentMethod: paymentMethod!,
+          paidAmount:    invResult.grandTotal,
+          issueDate:     new Date().toISOString(),
+          cashierName:   userName,
+          notes:         `ต่ออายุการจอง +${extraDays} ${booking.bookingType === 'daily' ? 'คืน' : 'วัน'}`,
+        };
       }
 
       // ── d. Recalculate folio balance ────────────────────────────────────────
