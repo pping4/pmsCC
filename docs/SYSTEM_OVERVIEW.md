@@ -557,7 +557,7 @@ Grouped by feature:
 ## 16. Backlog & Next Work (prioritized)
 
 ### 🔴 P0 — Financial correctness / data integrity
-1. **Rate recalculation on resize** — see `PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
+1. **Rate recalculation on resize** — see `docs/PLAN-RATE-RECALCULATION.md`. `/api/reservation/preview-resize` exists but execute path + RateAudit writes need completion. Critical: affects real money.
 2. **Double-booking guard on drag/resize** — `/api/reservation` PATCH should reject overlapping bookings (currently may allow).
 3. **Timezone consistency** — API uses `T00:00:00.000Z` but UI parses as local — audit for off-by-one-day bugs.
 
@@ -566,12 +566,12 @@ Grouped by feature:
 > has shipped — see `PHASE_HANDOFF.md` §5 for what landed.
 
 ### 🟠 P1 — Feature completion
-4. **City Ledger phase 4–8** — detail 4-tab, `receiveCityLedgerPayment` UI, monthly statement PDF, credit hold on new booking, aging report, bad debt write-off (see `CityLedger_Implementation_Plan_FINAL.md`).
+4. **City Ledger phase 4–8** — detail 4-tab, `receiveCityLedgerPayment` UI, monthly statement PDF, credit hold on new booking, aging report, bad debt write-off (see `docs/CityLedger_Implementation_Plan_FINAL.md`).
 5. **DataTable Phase 5 P1** — bulk actions (multi-select), inline edit, server-side pagination for >5k rows (see `docs/data-table-handoff.md` §3).
 6. **Night audit** — design real day-close logic (not just status snapshot).
 
 ### 🟡 P2 — UX polish
-7. Tape chart bug fixes B1/B2/B6 (click-vs-drag, sticky column) — see `PLAN-RESERVATION-TAPECHART.md`.
+7. Tape chart bug fixes B1/B2/B6 (click-vs-drag, sticky column) — see `docs/PLAN-RESERVATION-TAPECHART.md`.
 8. Vertical drag (move booking across rooms) on tape chart.
 9. DataTable Phase 5 P2 — pinned columns, expandable rows, conditional formatting.
 10. Migrate legacy `sales/components/GoogleSheetTable.tsx` → shared `<DataTable>`.
@@ -585,38 +585,54 @@ Grouped by feature:
 
 ---
 
-## 17. Documentation Cleanup Plan
+## 17. Documentation Layout (consolidated 2026-05-13)
 
-### Keep (living documents)
+All Markdown documentation now lives under `pms-next/docs/`. Files that must
+stay at the project root for tooling conventions (Claude harness, GitHub,
+component-scoped READMEs) are listed separately below.
+
+### Stays at project root (tooling convention)
 | File | Why |
 |---|---|
-| `pms-next/CLAUDE.md` | Rules/standards — always loaded |
-| `CLAUDE.md` (parent) | Mirror of pms-next/CLAUDE.md — keep for parent-level context |
-| `pms-next/README.md` | Project intro |
-| `pms-next/SETUP.md` | Dev setup |
-| `pms-next/docs/SYSTEM_OVERVIEW.md` | **THIS FILE — new single source of truth** |
-| `pms-next/docs/data-table-handoff.md` | Shared component handoff |
-| `pms-next/docs/data-table-roadmap.md` | DataTable long-term roadmap |
-| `pms-next/docs/ACTIVITY_LOG_IMPLEMENTATION_PLAN.md` | Reference — already implemented but useful as pattern |
-| `pms-next/PLAN-RATE-RECALCULATION.md` | ACTIVE feature plan (P0) |
-| `pms-next/PLAN-DRAG-CREATE-BOOKING.md` | Reference (partially implemented) |
-| `PLAN-RESERVATION-TAPECHART.md` (parent) | Bug/feature list still relevant |
-| `pms-next/CityLedger_Implementation_Plan_FINAL.md` | Phases 4–8 still relevant |
-| `.claude/skills/*.md` | Domain playbooks |
+| `pms-next/CLAUDE.md` | Rules/standards — Claude harness auto-loads from this path |
+| `CLAUDE.md` (parent) | Same content as pms-next/CLAUDE.md — harness also loads parent path. Candidate for "reduce to stub pointer" or delete if duplication is bothersome |
+| `pms-next/README.md` | GitHub project entry |
+| `pms-next/SETUP.md` | Dev setup instructions |
+| `pms-next/src/components/ui/README.md` | Component-scoped doc, stays next to its code |
 
-### 🗑️ Recommend DELETE (stale / replaced by this doc)
-| File | Reason |
+### Active docs in `pms-next/docs/`
+| File | Purpose |
 |---|---|
-| `pms-next/PROJECT_STATUS.md` | Sprint snapshot — rot fast, replaced by §15 |
-| `PMS_SYSTEM_DOCUMENTATION.md` (parent) | Master doc outdated — replaced by this file |
-| `blueprint.md` (parent) | Original architecture — superseded |
-| `CityLedger_Implementation_Plan_FINAL.md` (parent) | Duplicate of pms-next/ copy — keep only one |
+| `docs/SYSTEM_OVERVIEW.md` | **THIS FILE — single source of truth for codebase state** |
+| `docs/PHASE_HANDOFF.md` | Canonical handoff for `feat/receipt-standardization` branch — every Phase 1–6.11 change documented |
+| `docs/data-table-handoff.md` | Shared `<DataTable>` component handoff |
+| `docs/data-table-roadmap.md` | DataTable long-term roadmap |
+| `docs/ACTIVITY_LOG_IMPLEMENTATION_PLAN.md` | Reference — already implemented but useful as pattern |
+| `docs/PLAN-RATE-RECALCULATION.md` | ACTIVE feature plan (P0 backlog item) |
+| `docs/PLAN-DRAG-CREATE-BOOKING.md` | Reference — partially implemented |
+| `docs/PLAN-RESERVATION-TAPECHART.md` | Tape chart bug list — backlog items 7–8 in §16 |
+| `docs/CityLedger_Implementation_Plan_FINAL.md` | Reference for City Ledger phases 4–8 (backlog item 4 in §16) |
+| `.claude/skills/*.md` | Domain playbooks (separate convention path) |
 
-### 🤔 Consider consolidating
-- `PLAN-RESERVATION-TAPECHART.md` (parent) → move into `pms-next/docs/` alongside other plans
-- Two `CLAUDE.md` files: keep pms-next/ one, delete parent duplicate OR reduce parent to a stub pointer
+### Historical / superseded → `pms-next/docs/archive/`
+Sprint plans whose implementation already shipped. Kept for context only —
+do NOT implement from these documents.
 
-### Parent-level non-MD files (not touched here — user decision)
+| File | Status |
+|---|---|
+| `archive/Phase_I_Sprint_Plan.md` | Phase 1 polish sprint — done |
+| `archive/Phase_I_Sprint2b_Housekeeping_Plan.md` | Mid-stay cleaning — shipped |
+| `archive/Phase_I_Sprint3B_Renewals_Plan.md` | **SUPERSEDED** (see header) by ↓ |
+| `archive/Phase_I_Sprint3B_Contracts_Renewals_Plan.md` | Contracts + renewals — shipped |
+| `archive/Phase_I_Sprint4_Counter_Cashier_Plan.md` | Counter-centric cashier draft v1 — superseded by v2 |
+| `archive/Phase_I_Sprint4_v2_Users_Cashier_Plan.md` | Users + cashier — shipped |
+| `archive/Phase_I_Sprint5_Payment_Finance_v2_Plan.md` | Payment/finance — shipped (and extended through Phase 3–6.11 on the current branch) |
+| `archive/แผนพัฒนา.md` | Old Thai analysis doc, April 2026 |
+
+### Removed
+- `AGENTS.md` (parent) — was a byte-for-byte duplicate of `CLAUDE.md`, deleted
+
+### Parent-level non-MD files (not touched — user decision)
 - `PMS-Production-Blueprint.docx`
 - `PMS_Payment_Module_Blueprint_v1.6.docx`
 - `daily-cashbook-design.html`
