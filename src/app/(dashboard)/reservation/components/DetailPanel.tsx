@@ -125,12 +125,25 @@ const INVOICE_TYPE_TH: Record<string, string> = {
 
 const INV_STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
   unpaid:    { bg: '#fef2f2', color: '#dc2626', label: 'ค้างชำระ' },
+  overdue:   { bg: '#fef2f2', color: '#b91c1c', label: 'เกินกำหนด' },
   paid:      { bg: '#f0fdf4', color: '#16a34a', label: 'ชำระแล้ว' },
   voided:    { bg: '#f3f4f6', color: '#6b7280', label: 'ยกเลิก' },
   cancelled: { bg: '#f3f4f6', color: '#6b7280', label: 'ยกเลิก' },
   partial:   { bg: '#fffbeb', color: '#d97706', label: 'ชำระบางส่วน' },
   proforma:  { bg: '#f5f3ff', color: '#7c3aed', label: 'ล่วงหน้า' },
 };
+
+/**
+ * Phase 6.10 — derive "still owes money" from amount, not just status.
+ * /api/billing/collection auto-flips status `unpaid → overdue` past dueDate,
+ * and partial payments produce status='partial' — both still have an
+ * outstanding balance that the cashier should be able to collect. Status
+ * 'voided' / 'cancelled' are dead invoices; never collect against those.
+ */
+function isInvoiceCollectible(inv: { status: string; grandTotal: number | string; paidAmount: number | string }): boolean {
+  if (inv.status === 'voided' || inv.status === 'cancelled' || inv.status === 'paid') return false;
+  return Number(inv.grandTotal) - Number(inv.paidAmount) > 0;
+}
 
 const PAYMENT_METHODS = [
   { value: 'cash',        label: '💵 เงินสด' },
@@ -2632,9 +2645,13 @@ export default function DetailPanel({
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {billingInvoices.map((inv) => {
-                        const st     = INV_STATUS_STYLE[inv.status] ?? INV_STATUS_STYLE['unpaid'];
-                        const typeTH = INVOICE_TYPE_TH[inv.invoiceType] ?? inv.invoiceType;
-                        const isPaid = inv.status === 'paid' || inv.status === 'partial';
+                        const st          = INV_STATUS_STYLE[inv.status] ?? INV_STATUS_STYLE['unpaid'];
+                        const typeTH      = INVOICE_TYPE_TH[inv.invoiceType] ?? inv.invoiceType;
+                        // Phase 6.10 — derive UI state from outstanding amount rather than
+                        // status string alone (status may be 'unpaid' | 'overdue' | 'partial'
+                        // and all three still need the pay button shown).
+                        const collectible = isInvoiceCollectible(inv);
+                        const isFullyPaid = inv.status === 'paid';
 
                         return (
                           <div
@@ -2704,8 +2721,8 @@ export default function DetailPanel({
                                 📄 ใบแจ้งหนี้
                               </button>
 
-                              {/* Pay now — shown on proforma (confirmed, unpaid) or unpaid real invoice */}
-                              {(inv.isProforma || inv.status === 'unpaid') && (
+                              {/* Pay now — shown on proforma OR any collectible status (unpaid/overdue/partial) */}
+                              {(inv.isProforma || collectible) && (
                                 <button
                                   onClick={() => setBillingPayInvoiceId(
                                     prev => prev === inv.id ? null : inv.id
@@ -2727,8 +2744,8 @@ export default function DetailPanel({
                                 </button>
                               )}
 
-                              {/* Receipt reprint — only when actually paid; never for proforma */}
-                              {!inv.isProforma && isPaid && (
+                              {/* Receipt reprint — only when actually fully paid; never for proforma */}
+                              {!inv.isProforma && isFullyPaid && (
                                 <button
                                   onClick={() => handleReprint(inv.id)}
                                   style={{
@@ -2750,7 +2767,7 @@ export default function DetailPanel({
                             </div>
 
                             {/* ── Inline payment form (Phase 6.8: scoped per-invoice row) ── */}
-                            {(inv.isProforma || inv.status === 'unpaid') && billingPayInvoiceId === inv.id && (
+                            {(inv.isProforma || collectible) && billingPayInvoiceId === inv.id && (
                               <div style={{ marginTop: 10, padding: '10px 12px', background: '#f0fdf4', borderRadius: 8, border: '1px solid #86efac' }}>
                                 <div style={{ fontSize: 11, fontWeight: 700, color: '#166534', marginBottom: 8 }}>💳 เลือกช่องทางชำระเงิน</div>
                                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
