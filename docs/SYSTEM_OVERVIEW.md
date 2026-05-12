@@ -488,14 +488,17 @@ Grouped by feature:
 
 ---
 
-## 15. Current Development State (as of 2026-05-11)
+## 15. Current Development State (as of 2026-05-13)
 
-> **Active branch:** `feat/receipt-standardization` is 32 commits ahead of `feat/consolidation`.
+> **Active branch:** `feat/receipt-standardization` is 38 commits ahead of `feat/consolidation`.
 > Phases 1–5 + the entire Phase 6 cleanup pass (cancel-after-checkin, inline refund picker on
 > drag-resize, manager gate, `/finance/guest-credits` UI, money-overview liability card,
-> card-batch VOID) are **complete + E2E-verified** (5 harnesses, ~105 assertions total).
+> card-batch VOID) + the Phase 6.7–6.11 lazy-invoice + bill-tab UX chain (always-cut invoices
+> on extend / check-in / add-service when pay-later, per-invoice pay scope, checkout settles
+> all unpaid, button respects overdue/partial) are **complete + E2E-verified** (10 harnesses,
+> ~190 assertions total).
 > See [`PHASE_HANDOFF.md`](./PHASE_HANDOFF.md) for the canonical phase summary, ledger invariants,
-> schema additions, and what shipped in each Phase 6 commit.
+> schema additions, and what shipped in each commit.
 
 ### ✅ Production-ready
 - Booking flow (check-in → check-out → folio → invoice → payment → receipt)
@@ -508,6 +511,8 @@ Grouped by feature:
 - **EDC terminal picker** on every quick-pay surface (booking, check-in, extend, checkout, folio, bill-tab) (Phase 4)
 - **Card-batch settlement** — bank deposit → DR Bank + DR CardFee / CR CardClearing; Payment RECEIVED→CLEARED (Phase 5)
 - **Cashier Recent Payments** DataTable with per-row void (Phase 2)
+- **Bill-tab per-invoice pay + multi-invoice checkout settle** (Phase 6.8 — pay individual invoice or settle every unpaid in one Payment at checkout)
+- **Always-cut invoices on lazy paths** — extend / check-in / add-service all create INV-EX or INV-CI even when "pay later" (Phase 6.7 / 6.9 / 6.11)
 - Security deposit lifecycle
 - City Ledger / AR (credit check, posting, aging, statement)
 - Cash session open/close
