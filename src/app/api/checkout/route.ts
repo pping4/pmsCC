@@ -399,12 +399,34 @@ export async function POST(request: Request) {
             itemCount: coResult.itemCount,
           },
         });
+      }
 
-        // D: If caller provided a payment method, collect the outstanding now.
-        //    grandTotal may be 0 (fully cancelled via credits) — skip payment.
+      // D: Phase 6.8 Fix #2 — settle ALL unpaid invoices (INV-CO + any prior
+      // unpaid INV-GN/EX from pay-later extends, etc.) in ONE Payment with
+      // spread allocations. Before this fix, only the newly-created INV-CO
+      // got paid and prior unpaid invoices stayed UNPAID forever — even
+      // though the UI showed `outstanding` summed across everything.
+      if (paymentMethod) {
+        const allUnpaid = await tx.invoice.findMany({
+          where: {
+            bookingId,
+            status: { in: ['unpaid', 'overdue', 'partial'] as never[] },
+          },
+          orderBy: { issueDate: 'asc' },
+          select: { id: true, invoiceNumber: true, grandTotal: true, paidAmount: true },
+        });
+
+        const allocations = allUnpaid
+          .map(inv => ({
+            invoiceId: inv.id,
+            amount: Math.max(0, Number(inv.grandTotal) - Number(inv.paidAmount)),
+          }))
+          .filter(a => a.amount > 0);
+        const totalToPay = allocations.reduce((s, a) => s + a.amount, 0);
+
         let coPayNum: string | null = null;
         let coRcpNum: string | null = null;
-        if (paymentMethod && coResult.grandTotal > 0) {
+        if (totalToPay > 0) {
           // Single chokepoint: payment.service handles cash-session resolution,
           // payment-number generation, allocation, invoice paid-status update,
           // line-item paid flag, ledger pair (DR Cash / CR AR), folio recalc,
@@ -413,11 +435,11 @@ export async function POST(request: Request) {
             idempotencyKey: `co-${bookingId}`,
             guestId:        booking.guestId,
             bookingId,
-            amount:         coResult.grandTotal,
+            amount:         totalToPay,
             paymentMethod,
             paymentDate:    now,
             receivedBy:     userId,
-            allocations:    [{ invoiceId: coResult.invoiceId, amount: coResult.grandTotal }],
+            allocations,
             createdBy:      userId,
             receivingAccountId: paymentMethod === 'transfer' ? receivingAccountId : undefined,
             terminalId: paymentMethod === 'credit_card' ? terminalId : undefined,
@@ -429,29 +451,40 @@ export async function POST(request: Request) {
           coPayNum = coPaymentResult.paymentNumber;
           coRcpNum = coPaymentResult.receiptNumber;
 
+          // Receipt invoice number: prefer the new INV-CO header (closest
+          // to "checkout invoice"), otherwise the oldest unpaid invoice.
+          const headerInvoiceNumber = coResult?.invoiceNumber ?? allUnpaid[0]!.invoiceNumber;
+          const headerInvoiceId     = coResult?.invoiceId     ?? allUnpaid[0]!.id;
+          const paidInvoiceIds      = allocations.map(a => a.invoiceId);
+
           // ── LOG: Payment collected at checkout ────────────────────────
           await logActivity(tx, {
             userId,
             action:      'payment.checkout_collected',
             category:    'payment',
-            description: `รับชำระ ฿${coResult.grandTotal.toLocaleString()} ณ เช็คเอาท์ — ห้อง ${booking.room.number} (${paymentMethod})`,
+            description: paidInvoiceIds.length > 1
+              ? `รับชำระ ฿${totalToPay.toLocaleString()} ณ เช็คเอาท์ (${paidInvoiceIds.length} ใบ) — ห้อง ${booking.room.number} (${paymentMethod})`
+              : `รับชำระ ฿${totalToPay.toLocaleString()} ณ เช็คเอาท์ — ห้อง ${booking.room.number} (${paymentMethod})`,
             bookingId,
             guestId:  booking.guestId,
-            invoiceId: coResult.invoiceId,
+            invoiceId: headerInvoiceId,
             icon:     '💳',
             severity: 'success',
             metadata: {
-              amount: coResult.grandTotal,
+              amount: totalToPay,
               paymentMethod,
-              invoiceNumber: coResult.invoiceNumber,
+              invoiceCount:   paidInvoiceIds.length,
+              invoiceNumbers: allUnpaid.map(i => i.invoiceNumber),
             },
           });
 
           // ── Build checkout receipt ────────────────────────────────────
+          // Receipt aggregates items from ALL paid invoices so the guest sees
+          // every line item being settled, not just INV-CO.
           const guestName = `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();
-          // Re-fetch the INV-CO items with folio period dates
-          const coItems = await tx.invoiceItem.findMany({
-            where: { invoiceId: coResult.invoiceId },
+          const paidItems = await tx.invoiceItem.findMany({
+            where: { invoiceId: { in: paidInvoiceIds } },
+            orderBy: [{ invoiceId: 'asc' }, { sortOrder: 'asc' }, { id: 'asc' }],
             select: {
               description:   true,
               amount:        true,
@@ -461,7 +494,7 @@ export async function POST(request: Request) {
                   unitPrice:   true,
                   chargeType:  true,
                   serviceDate: true,
-                  periodEnd:   true,   // Receipt-Standardization
+                  periodEnd:   true,
                 },
               },
             },
@@ -470,14 +503,14 @@ export async function POST(request: Request) {
             receiptType:   'checkout',
             receiptNumber: coRcpNum ?? '',
             paymentNumber: coPayNum ?? '',
-            invoiceNumber: coResult.invoiceNumber,
+            invoiceNumber: headerInvoiceNumber,
             bookingNumber: booking.bookingNumber,
             guestName,
             roomNumber:    booking.room.number,
             bookingType:   booking.bookingType,
             checkIn:       fmtDate(booking.checkIn),
             checkOut:      fmtDate(booking.checkOut),
-            items: coItems.flatMap(i => {
+            items: paidItems.flatMap(i => {
               const fl        = i.folioLineItem;
               const unitPrice = fl?.unitPrice ? Number(fl.unitPrice) : undefined;
               const qty       = fl?.quantity ?? 1;
@@ -512,11 +545,11 @@ export async function POST(request: Request) {
                 periodEnd,
               }];
             }),
-            subtotal:      coResult.grandTotal,
+            subtotal:      totalToPay,
             vatAmount:     0,
-            grandTotal:    coResult.grandTotal,
+            grandTotal:    totalToPay,
             paymentMethod: paymentMethod!,
-            paidAmount:    coResult.grandTotal,
+            paidAmount:    totalToPay,
             issueDate:     now.toISOString(),
             cashierName:   userId,
           };
