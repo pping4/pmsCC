@@ -344,31 +344,51 @@ export async function POST(request: Request) {
       }
     }
 
-    // ── 3b. Create INV-CI and collect payment (upfront only) ─────────────────
-    if (collectUpfront && upfrontPaymentMethod && folio && !existingStayInvoice) {
+    // ── 3b. Always cut INV-CI from UNBILLED charges (Phase 6.9) ──────────────
+    // Before this fix INV-CI was created ONLY when collectUpfront=true. A
+    // walk-in / no-prepay check-in left the room nights as UNBILLED FolioLine-
+    // Item rows with no invoice. Then if the guest later extended via "pay
+    // later" (Phase 6.7), INV-GN was cut for the extension ONLY — the original
+    // stay nights stayed UNBILLED and the bill tab lost visibility of them
+    // (proforma row disappears once any real invoice exists). Hoisting the
+    // invoice creation out of the collectUpfront guard means every checked-in
+    // booking always carries an INV-CI (status=unpaid when not paid upfront)
+    // that surfaces in the bill tab with a "💳 รับชำระเงิน" button — same
+    // pattern as the Phase 6.7 fix for extend.
+    let stayInvoiceResult: { invoiceId: string; grandTotal: number; invoiceNumber: string } | null = null;
+    if (folio && !existingStayInvoice) {
       const dueDate = isMonthly
         ? new Date(now.getFullYear(), now.getMonth() + 1, 1)
         : new Date(booking.checkOut);
 
-      const invResult = await createInvoiceFromFolio(tx, {
+      stayInvoiceResult = await createInvoiceFromFolio(tx, {
         folioId:     folio.folioId,
         guestId:     booking.guestId,
         bookingId,
         invoiceType: 'CI',
         dueDate,
-        notes:       `ชำระค่าห้องพัก ณ เช็คอิน — ห้อง ${booking.room.number}`,
+        notes:       collectUpfront && upfrontPaymentMethod
+          ? `ชำระค่าห้องพัก ณ เช็คอิน — ห้อง ${booking.room.number}`
+          : `ค่าห้องพัก — ห้อง ${booking.room.number} (รอเก็บเงิน)`,
         createdBy:   userId,
       });
 
-      if (invResult) {
-        stayInvoiceId     = invResult.invoiceId;
-        ciCollectedAmount = invResult.grandTotal;   // net after deposit credit
-        await tx.invoice.update({
-          where: { id: invResult.invoiceId },
-          data:  { paidAmount: invResult.grandTotal, status: 'paid' },
-        });
-        await markLineItemsPaid(tx, invResult.invoiceId);
+      if (stayInvoiceResult) {
+        stayInvoiceId     = stayInvoiceResult.invoiceId;
+        ciCollectedAmount = stayInvoiceResult.grandTotal;   // net after deposit credit
       }
+    }
+
+    // ── 3b'. Mark paid + flip line items (only when actually collecting) ─────
+    // createPayment later (step 5) ALSO recalculates the invoice's paid
+    // status via its allocations, but we mirror the legacy preflight to
+    // keep diff churn minimal in the receipt branch.
+    if (collectUpfront && upfrontPaymentMethod && stayInvoiceResult) {
+      await tx.invoice.update({
+        where: { id: stayInvoiceResult.invoiceId },
+        data:  { paidAmount: stayInvoiceResult.grandTotal, status: 'paid' },
+      });
+      await markLineItemsPaid(tx, stayInvoiceResult.invoiceId);
     }
 
     // ── 4. Create Security Deposit via service (posts liability ledger) ────
