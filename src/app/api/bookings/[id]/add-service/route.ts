@@ -146,54 +146,63 @@ export async function POST(
 
       let invoiceId: string | undefined;
 
-      // ── 6. Collect payment now (optional) ────────────────────────────────────
-      if (collectNow && totalAmount > 0 && paymentMethod) {
+      // ── 6. Always cut INV-EX for the service charges (Phase 6.11) ────────────
+      // Before this fix the invoice was created ONLY when collectNow=true, so
+      // picking "ลงบิลไว้ก่อน" left the EXTRA_SERVICE FolioLineItem rows
+      // UNBILLED with no invoice — the bill tab never surfaced them, and the
+      // cashier had no way to collect them later short of waiting for
+      // checkout to bundle everything into INV-CO. Mirror of the Phase 6.7
+      // (extend) and 6.9 (check-in) fixes: always cut an invoice so the
+      // line items become visible in the bill tab immediately.
+      const invResult = totalAmount > 0
+        ? await createInvoiceFromFolio(tx, {
+            folioId:     folio.folioId,
+            guestId:     booking.guestId,
+            bookingId:   params.id,
+            invoiceType: 'EX',
+            dueDate:     new Date(),
+            notes:       notes ?? `บริการเสริม — BK-${booking.bookingNumber}`,
+            createdBy:   userId,
+            lineItemIds,              // all cart items billed together
+          })
+        : null;
+      if (invResult) {
+        invoiceId = invResult.invoiceId;
+      }
 
-        // Create ONE invoice covering ALL new line items
-        const invResult = await createInvoiceFromFolio(tx, {
-          folioId:     folio.folioId,
-          guestId:     booking.guestId,
-          bookingId:   params.id,
-          invoiceType: 'EX',
-          dueDate:     new Date(),
-          notes:       notes ?? `บริการเสริม — BK-${booking.bookingNumber}`,
-          createdBy:   userId,
-          lineItemIds,              // all cart items billed together
+      // ── 7. Collect payment now (optional) ────────────────────────────────────
+      if (collectNow && invResult && paymentMethod) {
+        // Mark invoice paid immediately (createPayment will re-confirm via
+        // its allocation-based recalc, but we mirror the legacy preflight
+        // so the receipt branch sees status=paid).
+        await tx.invoice.update({
+          where: { id: invResult.invoiceId },
+          data: {
+            paidAmount: new Prisma.Decimal(invResult.grandTotal),
+            status:     'paid',
+          },
         });
 
-        if (invResult) {
-          invoiceId = invResult.invoiceId;
+        // Delegate to payment.service so cash-session resolution, ledger
+        // posting (DR Cash / CR AR), folio recalc, and audit logging all
+        // happen through the single canonical chokepoint.
+        const itemSummary = items.length === 1
+          ? items[0].description
+          : `${items.length} รายการ (${items.map(i => i.description).join(', ').slice(0, 60)}${items.map(i => i.description).join(', ').length > 60 ? '…' : ''})`;
 
-          // Mark invoice paid immediately
-          await tx.invoice.update({
-            where: { id: invResult.invoiceId },
-            data: {
-              paidAmount: new Prisma.Decimal(invResult.grandTotal),
-              status:     'paid',
-            },
-          });
-
-          // Delegate to payment.service so cash-session resolution, ledger
-          // posting (DR Cash / CR AR), folio recalc, and audit logging all
-          // happen through the single canonical chokepoint.
-          const itemSummary = items.length === 1
-            ? items[0].description
-            : `${items.length} รายการ (${items.map(i => i.description).join(', ').slice(0, 60)}${items.map(i => i.description).join(', ').length > 60 ? '…' : ''})`;
-
-          await createPayment(tx, {
-            idempotencyKey: `add-service-${params.id}-${Date.now()}`,
-            guestId:        booking.guestId,
-            bookingId:      params.id,
-            amount:         invResult.grandTotal,
-            paymentMethod,
-            paymentDate:    new Date(),
-            receivedBy:     userId,
-            notes:          notes ?? `บริการเสริม — ${itemSummary}`,
-            allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
-            createdBy:      userId,
-            createdByName:  userName ?? undefined,
-          });
-        }
+        await createPayment(tx, {
+          idempotencyKey: `add-service-${params.id}-${Date.now()}`,
+          guestId:        booking.guestId,
+          bookingId:      params.id,
+          amount:         invResult.grandTotal,
+          paymentMethod,
+          paymentDate:    new Date(),
+          receivedBy:     userId,
+          notes:          notes ?? `บริการเสริม — ${itemSummary}`,
+          allocations:    [{ invoiceId: invResult.invoiceId, amount: invResult.grandTotal }],
+          createdBy:      userId,
+          createdByName:  userName ?? undefined,
+        });
       }
 
       // ── 7. Recalculate folio balance (charge-only path; collectNow path
