@@ -837,9 +837,20 @@ export async function generateDraftInvoice(
   });
   if (!invResult) throw new Error('Draft invoice creation produced no result');
 
-  // 4) Log the BillingPeriod
-  await tx.billingPeriod.create({
-    data: {
+  // 4) Log the BillingPeriod — UPSERT (not create). A prior rejected draft
+  //    leaves a BillingPeriod row with invoiceId=null (see Task 1.5); the next
+  //    cron run must reuse that row, not create a duplicate (which would
+  //    violate @@unique([bookingId, cycleIndex])).
+  await tx.billingPeriod.upsert({
+    where: { bookingId_cycleIndex: { bookingId: booking.id, cycleIndex: input.cycleIndex } },
+    update: {
+      periodStart: period.start,
+      periodEnd:   period.end,
+      isPartial:   period.isPartial,
+      isFinal:     period.isFinal,
+      invoiceId:   invResult.invoiceId,
+    },
+    create: {
       bookingId:   booking.id,
       cycleIndex:  input.cycleIndex,
       periodStart: period.start,
