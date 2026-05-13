@@ -54,6 +54,7 @@ enum BookingStatus {
 }
 
 enum InvoiceStatus {
+  draft       // NEW — Phase MB-v2; no ledger post yet
   unpaid
   partial
   paid
