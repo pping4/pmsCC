@@ -185,6 +185,17 @@ export default function DetailPanel({
   const [hkScheduleOpen,   setHkScheduleOpen]   = useState(false);
   const [hkDeclineTaskId,  setHkDeclineTaskId]  = useState<string | null>(null);
   const [hkDeclineBusy,    setHkDeclineBusy]    = useState(false);
+
+  // ── Contract (Sprint 3B) — only fetched for monthly bookings ─────────────
+  // `null`     = not yet loaded
+  // `'none'`   = fetched OK, no contract exists for this booking
+  // `'error'`  = fetch failed — distinguishes a real "no contract" from a
+  //              network/server failure so the cashier isn't shown a misleading
+  //              "✍️ สร้างสัญญา" CTA on a booking that may already have one.
+  // `{...}`    = active/draft/etc. contract summary for the badge
+  const [contractInfo, setContractInfo] = useState<
+    null | 'none' | 'error' | { id: string; contractNumber: string; status: string }
+  >(null);
   const [billingInvoices, setBillingInvoices] = useState<BillingInvoice[]>([]);
   const [billingLoading, setBillingLoading]   = useState(false);
   const [reprintData,  setReprintData]        = useState<ReceiptData | null>(null);
@@ -439,8 +450,49 @@ export default function DetailPanel({
     }
     if (booking?.id && activeTab === 'details') {
       loadHkForBooking(booking.id);
+      // Contract presence is only meaningful for monthly bookings — daily
+      // bookings can't have a Contract (BOOKING_NOT_MONTHLY rule in service).
+      if (booking.bookingType !== 'daily') {
+        loadContractForBooking(booking.id);
+      } else {
+        setContractInfo(null);
+      }
     }
-  }, [booking?.id, activeTab]);
+  }, [booking?.id, booking?.bookingType, activeTab]);
+
+  const loadContractForBooking = async (bookingId: string) => {
+    try {
+      const res = await fetch(
+        `/api/contracts?bookingId=${encodeURIComponent(bookingId)}&limit=1`,
+      );
+      if (!res.ok) {
+        console.warn(`[contract] fetch failed: HTTP ${res.status}`);
+        setContractInfo('error');
+        return;
+      }
+      const rows = (await res.json()) as Array<{
+        id: string;
+        contractNumber: string;
+        status: string;
+      }>;
+      if (Array.isArray(rows) && rows.length > 0) {
+        const r = rows[0];
+        setContractInfo({
+          id: r.id,
+          contractNumber: r.contractNumber,
+          status: r.status,
+        });
+      } else {
+        setContractInfo('none');
+      }
+    } catch (e) {
+      // Network failure / JSON parse — surface a distinct error chip so the
+      // cashier doesn't click "สร้างสัญญา" on a booking that may already have
+      // one (would 409 with BOOKING_ALREADY_HAS_CONTRACT).
+      console.warn('[contract] fetch threw:', e);
+      setContractInfo('error');
+    }
+  };
 
   const loadHkForBooking = async (bookingId: string) => {
     setHkLoading(true);
@@ -1017,7 +1069,18 @@ export default function DetailPanel({
   };
 
   const nights    = booking ? diffDays(parseUTCDate(booking.checkIn), parseUTCDate(booking.checkOut)) : 0;
-  const total     = booking ? nights * booking.rate : 0;
+  // `booking.rate` is per-night for daily bookings and per-month for monthly
+  // bookings (matches RoomRate.dailyRate / monthlyShortRate / monthlyLongRate).
+  // Computing the stay total as `nights * rate` is therefore only correct for
+  // daily — for monthly it overstates by ~30× (e.g. ฿15,000/mo × 60 nights =
+  // ฿900,000 instead of the real 2-month total ฿30,000). The authoritative
+  // stay value once charges post lives in `folio.totalCharges`; this client
+  // estimate is the pre-folio fallback shown in the booking summary card.
+  const isMonthly = booking ? booking.bookingType !== 'daily' : false;
+  const months    = booking && isMonthly ? Math.max(1, Math.round(nights / 30)) : 0;
+  const total     = booking
+    ? (isMonthly ? months * booking.rate : nights * booking.rate)
+    : 0;
   const statusStyle = booking ? STATUS_STYLE[booking.status] : null;
 
   // Outstanding balance that will be collected at checkout.
@@ -2421,7 +2484,13 @@ export default function DetailPanel({
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                         <div>
                           <div style={{ fontSize: 11, fontWeight: 600, color: '#9ca3af', marginBottom: 2 }}>ระยะเวลา</div>
-                          <div style={{ fontSize: 13, color: '#1f2937' }}>{nights} {BOOKING_TYPE_LABEL[booking.bookingType]}</div>
+                          <div style={{ fontSize: 13, color: '#1f2937' }}>
+                            {/* "~" prefix signals the months count is a rough
+                                estimate (nights / 30 rounded). Actual billing
+                                pro-rates partial months — folio.totalCharges
+                                is the authoritative number. */}
+                            {isMonthly ? `~${months} เดือน (${nights} วัน)` : `${nights} คืน`}
+                          </div>
                         </div>
                         <div>
                           <div style={{ fontSize: 11, fontWeight: 600, color: '#9ca3af', marginBottom: 2 }}>ประเภทการจอง</div>
@@ -2434,7 +2503,9 @@ export default function DetailPanel({
                       </div>
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                         <div>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: '#9ca3af', marginBottom: 2 }}>ราคา/คืน</div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: '#9ca3af', marginBottom: 2 }}>
+                            {isMonthly ? 'ราคา/เดือน' : 'ราคา/คืน'}
+                          </div>
                           <div style={{ fontSize: 13, color: '#1f2937' }}>{fmtCurrency(booking.rate)}</div>
                         </div>
                         <div>
@@ -2448,6 +2519,82 @@ export default function DetailPanel({
                       </div>
                     </div>
                   </div>
+
+                  {/* Contract (Sprint 3B) — only render for monthly bookings.
+                      Sub-states: loading (null) → blank to avoid layout jump,
+                      'none' → "ไม่มีสัญญา" with CTA to /contracts list filtered
+                      by this booking, otherwise show the contract chip + link
+                      to /contracts/[id]. */}
+                  {isMonthly && (
+                    <div style={{ marginBottom: 24 }}>
+                      <div style={{
+                        fontSize: 12, fontWeight: 700, color: '#6b7280',
+                        marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5,
+                      }}>
+                        📄 สัญญาเช่า
+                      </div>
+                      {contractInfo === null ? (
+                        <div style={{ fontSize: 12, color: '#9ca3af', padding: '8px 0' }}>
+                          กำลังตรวจสอบสัญญา…
+                        </div>
+                      ) : contractInfo === 'error' ? (
+                        <div style={{
+                          fontSize: 12, color: '#6b7280',
+                          padding: '10px 12px',
+                          backgroundColor: '#f3f4f6', border: '1px solid #e5e7eb',
+                          borderRadius: 6,
+                        }}>
+                          ⚠️ ไม่สามารถโหลดสถานะสัญญา — กรุณาลองใหม่ภายหลัง
+                        </div>
+                      ) : contractInfo === 'none' ? (
+                        <div style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                          gap: 12, padding: '10px 12px',
+                          backgroundColor: '#fef3c7', border: '1px solid #fde68a',
+                          borderRadius: 6,
+                        }}>
+                          <div style={{ fontSize: 13, color: '#92400e' }}>
+                            ⚠️ ยังไม่มีสัญญาสำหรับการจองนี้
+                          </div>
+                          <a
+                            href={`/contracts?bookingId=${encodeURIComponent(booking.id)}`}
+                            style={{
+                              fontSize: 12, fontWeight: 600,
+                              padding: '6px 12px',
+                              backgroundColor: '#7c3aed', color: '#fff',
+                              borderRadius: 4, textDecoration: 'none',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            ✍️ สร้างสัญญา
+                          </a>
+                        </div>
+                      ) : (
+                        <a
+                          href={`/contracts/${contractInfo.id}`}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            gap: 12, padding: '10px 12px',
+                            backgroundColor: '#ede9fe', border: '1px solid #ddd6fe',
+                            borderRadius: 6,
+                            textDecoration: 'none',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 700, color: '#5b21b6' }}>
+                              สัญญา {contractInfo.contractNumber}
+                            </div>
+                            <div style={{ fontSize: 11, color: '#6d28d9', marginTop: 2 }}>
+                              สถานะ: {contractInfo.status}
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 12, fontWeight: 600, color: '#5b21b6' }}>
+                            ดูสัญญา →
+                          </div>
+                        </a>
+                      )}
+                    </div>
+                  )}
 
                   {/* Notes */}
                   {booking.notes && (

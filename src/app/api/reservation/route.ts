@@ -621,41 +621,56 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    // === DOUBLE-BOOKING VALIDATION ===
-    // Segment-aware: BookingRoomSegment is authoritative for "who physically
-    // occupies this room on these dates" (see preview-resize for rationale).
-    const conflictSegment = await prisma.bookingRoomSegment.findFirst({
-      where: {
-        roomId:    targetRoomId,
-        bookingId: { not: bookingId },
-        fromDate:  { lt: newCheckOut },
-        toDate:    { gt: newCheckIn },
-        booking:   { status: { in: ['confirmed', 'checked_in'] } },
-      },
-      select: {
-        booking: {
-          select: {
-            bookingNumber: true,
-            guest: { select: { firstName: true, lastName: true, firstNameTH: true, lastNameTH: true } },
+    // === TRANSACTION: Update booking + handle financial adjustments ===
+    // NOTE on concurrency: the double-booking conflict check MUST live inside
+    // this transaction (it used to run as a separate pre-tx query, which left a
+    // TOCTOU window where a competing PATCH could write an overlapping segment
+    // between our check and our update). We additionally take a row-level
+    // `SELECT ... FOR UPDATE` lock on the target room so concurrent writers
+    // hitting the same room serialize — Postgres default READ COMMITTED would
+    // otherwise let another tx commit an overlapping segment after our check.
+    const updated = await prisma.$transaction(async (tx) => {
+      // 1. Lock the destination room row. This blocks any other tx that runs
+      //    the same SELECT FOR UPDATE on this room until we commit, which is
+      //    the serialization point for "who owns this room on these dates".
+      //    All future segment-mutating routes must take this lock too.
+      //    Raw SQL because Prisma doesn't expose FOR UPDATE. The table name
+      //    `rooms` is the Prisma `@@map` for model `Room` — if the model is
+      //    ever renamed/remapped, this lock silently breaks. Keep in sync.
+      await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${targetRoomId} FOR UPDATE`;
+
+      // 2. Conflict check AFTER acquiring the lock — any segment another tx
+      //    committed between the pre-tx rate calc and now is visible here.
+      // Segment-aware: BookingRoomSegment is authoritative for "who physically
+      // occupies this room on these dates" (see preview-resize for rationale).
+      const conflictSegment = await tx.bookingRoomSegment.findFirst({
+        where: {
+          roomId:    targetRoomId,
+          bookingId: { not: bookingId },
+          fromDate:  { lt: newCheckOut },
+          toDate:    { gt: newCheckIn },
+          booking:   { status: { in: ['confirmed', 'checked_in'] } },
+        },
+        select: {
+          booking: {
+            select: {
+              bookingNumber: true,
+              guest: { select: { firstName: true, lastName: true, firstNameTH: true, lastNameTH: true } },
+            },
           },
         },
-      },
-    });
-    const conflict = conflictSegment?.booking ?? null;
+      });
+      if (conflictSegment?.booking) {
+        const c = conflictSegment.booking;
+        const guestName =
+          c.guest.firstNameTH && c.guest.lastNameTH
+            ? `${c.guest.firstNameTH} ${c.guest.lastNameTH}`
+            : `${c.guest.firstName} ${c.guest.lastName}`;
+        // Sentinel error — caught in the outer try/catch and translated to 409.
+        // `::` delimited so the outer handler can rebuild the Thai message.
+        throw new Error(`DOUBLE_BOOKING::${c.bookingNumber}::${guestName}`);
+      }
 
-    if (conflict) {
-      const guestName =
-        conflict.guest.firstNameTH && conflict.guest.lastNameTH
-          ? `${conflict.guest.firstNameTH} ${conflict.guest.lastNameTH}`
-          : `${conflict.guest.firstName} ${conflict.guest.lastName}`;
-      return NextResponse.json(
-        { error: `วันที่ทับซ้อนกับการจอง ${conflict.bookingNumber} (${guestName})` },
-        { status: 409 }
-      );
-    }
-
-    // === TRANSACTION: Update booking + handle financial adjustments ===
-    const updated = await prisma.$transaction(async (tx) => {
       // Calculate nights for audit
       const originalNights = calculateNights(
         new Date(booking.checkIn),
@@ -1073,6 +1088,13 @@ export async function PATCH(request: NextRequest) {
     if (error instanceof Error && error.message === 'VERSION_MISMATCH') {
       return NextResponse.json(
         { error: 'ข้อมูลถูกเปลี่ยนแปลงโดยผู้ใช้อื่น กรุณารีเฟรชหน้าจอ' },
+        { status: 409 }
+      );
+    }
+    if (error instanceof Error && error.message.startsWith('DOUBLE_BOOKING::')) {
+      const [, bookingNumber, guestName] = error.message.split('::');
+      return NextResponse.json(
+        { error: `วันที่ทับซ้อนกับการจอง ${bookingNumber} (${guestName})` },
         { status: 409 }
       );
     }
