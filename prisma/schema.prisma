@@ -673,6 +673,7 @@ model Booking {
   contract          Contract?
   guestCredits      GuestCredit[]
   billingPeriods    BillingPeriod[]
+  utilityReadings   UtilityReading[]
 
   @@index([cityLedgerAccountId])
   @@map("bookings")
@@ -767,20 +768,28 @@ model InvoiceItem {
 model UtilityReading {
   id           String    @id @default(uuid())
   roomId       String    @map("room_id")
-  month        String // "2026-03" format
+  bookingId    String?   @map("booking_id")
+  readingDate  DateTime? @db.Date @map("reading_date")
+  month        String?   // legacy — to be removed in Task 4.6
   prevWater    Decimal   @default(0) @map("prev_water") @db.Decimal(10, 2)
   currWater    Decimal   @default(0) @map("curr_water") @db.Decimal(10, 2)
   waterRate    Decimal   @default(18) @map("water_rate") @db.Decimal(10, 2)
   prevElectric Decimal   @default(0) @map("prev_electric") @db.Decimal(10, 2)
   currElectric Decimal   @default(0) @map("curr_electric") @db.Decimal(10, 2)
   electricRate Decimal   @default(8) @map("electric_rate") @db.Decimal(10, 2)
+  notes        String?
   recorded     Boolean   @default(false)
+  recordedBy   String?   @map("recorded_by")
   recordedAt   DateTime? @map("recorded_at")
   createdAt    DateTime  @default(now()) @map("created_at")
 
-  room Room @relation(fields: [roomId], references: [id])
+  room    Room     @relation(fields: [roomId], references: [id])
+  booking Booking? @relation(fields: [bookingId], references: [id])
 
   @@unique([roomId, month])
+  @@unique([roomId, readingDate])
+  @@index([bookingId, readingDate])
+  @@index([roomId, readingDate])
   @@map("utility_readings")
 }
 
