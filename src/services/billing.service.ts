@@ -748,3 +748,52 @@ export async function approveDraft(
 
   return { invoiceId: inv.id, status: 'unpaid' };
 }
+
+// ─── rejectDraft — void the draft, clear BillingPeriod link ──────────────────
+
+export interface RejectDraftInput {
+  invoiceId:  string;
+  reason:     string;
+  rejectedBy: string;
+}
+
+export async function rejectDraft(
+  tx: Prisma.TransactionClient,
+  input: RejectDraftInput,
+): Promise<{ invoiceId: string; status: 'voided' }> {
+  // Row-lock to prevent concurrent reject/approve race
+  await tx.$queryRaw`SELECT id FROM invoices WHERE id = ${input.invoiceId} FOR UPDATE`;
+
+  const inv = await tx.invoice.findUniqueOrThrow({
+    where: { id: input.invoiceId },
+    select: { id: true, status: true, items: { select: { folioLineItemId: true } } },
+  });
+  if (inv.status !== 'draft') {
+    throw new Error(`Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`);
+  }
+
+  // Flip invoice to voided
+  await tx.invoice.update({
+    where: { id: inv.id },
+    data:  { status: 'voided' as never, notes: `Rejected: ${input.reason}` },
+  });
+
+  // Flip folio line items DRAFT → VOIDED
+  const itemIds = inv.items.map(i => i.folioLineItemId).filter((x): x is string => !!x);
+  if (itemIds.length > 0) {
+    await tx.folioLineItem.updateMany({
+      where: { id: { in: itemIds } },
+      data:  { billingStatus: 'VOIDED' as never },
+    });
+  }
+
+  // Unlink BillingPeriod so cron can recreate a fresh draft for this cycle.
+  // Using updateMany because the unique constraint is on invoiceId (nullable),
+  // so at most one row matches. updateMany avoids the null-unique-find issue.
+  await tx.billingPeriod.updateMany({
+    where: { invoiceId: inv.id },
+    data:  { invoiceId: null },
+  });
+
+  return { invoiceId: inv.id, status: 'voided' };
+}
