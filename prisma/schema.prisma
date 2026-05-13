@@ -606,6 +606,25 @@ model Guest {
   @@map("guests")
 }
 
+model BillingPeriod {
+  id          String   @id @default(uuid())
+  bookingId   String   @map("booking_id")
+  cycleIndex  Int      @map("cycle_index")
+  periodStart DateTime @db.Date @map("period_start")
+  periodEnd   DateTime @db.Date @map("period_end")
+  isPartial   Boolean  @default(false) @map("is_partial")
+  isFinal     Boolean  @default(false) @map("is_final")
+  invoiceId   String?  @unique @map("invoice_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  booking Booking  @relation(fields: [bookingId], references: [id])
+  invoice Invoice? @relation(fields: [invoiceId], references: [id])
+
+  @@unique([bookingId, cycleIndex])
+  @@index([periodStart])
+  @@map("billing_periods")
+}
+
 model Booking {
   id             String        @id @default(uuid())
   bookingNumber  String        @unique @map("booking_number")
@@ -653,6 +672,7 @@ model Booking {
   cleaningSchedules CleaningSchedule[]
   contract          Contract?
   guestCredits      GuestCredit[]
+  billingPeriods    BillingPeriod[]
 
   @@index([cityLedgerAccountId])
   @@map("bookings")
@@ -718,6 +738,7 @@ model Invoice {
   allocations       PaymentAllocation[]
   auditLogs         PaymentAuditLog[]      @relation("InvoiceAuditLogs")
   clAllocations     CityLedgerAllocation[]
+  billingPeriod     BillingPeriod?
 
   @@index([folioId])
   @@index([cityLedgerAccountId])
