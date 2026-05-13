@@ -367,6 +367,76 @@ export function calculatePenalties(
   });
 }
 
+// ─── resolveNextPeriod — pure date math for rolling/calendar cycles ───────────
+
+export interface ResolvePeriodInput {
+  bookingType: 'monthly_short' | 'monthly_long';
+  checkIn:  Date;
+  checkOut: Date;
+  cycleIndex: number;   // 1-based
+}
+
+export interface ResolvedPeriod {
+  start:     Date;
+  end:       Date;
+  isPartial: boolean;
+  isFinal:   boolean;
+}
+
+/** add N whole months to a UTC-midnight date; clamp to last day of target month */
+function addUTCMonths(d: Date, n: number): Date {
+  const r = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, 1));
+  const targetDim = new Date(Date.UTC(r.getUTCFullYear(), r.getUTCMonth() + 1, 0)).getUTCDate();
+  r.setUTCDate(Math.min(d.getUTCDate(), targetDim));
+  return r;
+}
+
+function addUTCDays(d: Date, n: number): Date {
+  const r = new Date(d); r.setUTCDate(r.getUTCDate() + n); return r;
+}
+
+function endOfUTCMonth(d: Date): Date {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
+}
+
+export function resolveNextPeriod(input: ResolvePeriodInput): ResolvedPeriod {
+  const { bookingType, checkIn, checkOut, cycleIndex } = input;
+  // Stay span is [checkIn, checkOut). The last billable day is checkOut - 1.
+  const lastBillableDay = addUTCDays(checkOut, -1);
+
+  if (bookingType === 'monthly_short') {
+    // Rolling: every cycle anchors to checkIn's day-of-month.
+    const start = cycleIndex === 1 ? checkIn : addUTCMonths(checkIn, cycleIndex - 1);
+    const fullEnd = addUTCDays(addUTCMonths(start, 1), -1);
+    const end = fullEnd > lastBillableDay ? lastBillableDay : fullEnd;
+    return { start, end, isPartial: end < fullEnd, isFinal: end >= lastBillableDay };
+  }
+
+  if (bookingType === 'monthly_long') {
+    // Calendar: cycle 1 = checkIn → end of checkIn's month.
+    //          cycle N>1 = first → end of (month of checkIn + N-1).
+    let rawStart: Date;
+    let fullEnd: Date;
+    if (cycleIndex === 1) {
+      rawStart = checkIn;
+      fullEnd  = endOfUTCMonth(checkIn);
+    } else {
+      const monthBase = addUTCMonths(
+        new Date(Date.UTC(checkIn.getUTCFullYear(), checkIn.getUTCMonth(), 1)),
+        cycleIndex - 1,
+      );
+      rawStart = monthBase;
+      fullEnd  = endOfUTCMonth(monthBase);
+    }
+    const end = fullEnd > lastBillableDay ? lastBillableDay : fullEnd;
+    // Partial if either start ≠ first-of-month OR end ≠ end-of-month.
+    const isPartial = rawStart.getUTCDate() !== 1 || end < fullEnd;
+    return { start: rawStart, end, isPartial, isFinal: end >= lastBillableDay };
+  }
+
+  throw new Error(`resolveNextPeriod: unsupported bookingType ${bookingType}`);
+}
+
 // ─── Contract Renewal ─────────────────────────────────────────────────────────
 
 export interface RenewContractInput {
