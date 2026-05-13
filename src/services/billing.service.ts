@@ -17,7 +17,7 @@
 
 import { Prisma, InvoiceType, LedgerAccount } from '@prisma/client';
 import { postLedgerPair } from './ledger.service';
-import { getFolioByBookingId, addCharge, createInvoiceFromFolio } from './folio.service';
+import { getFolioByBookingId, addCharge, createInvoiceFromFolio, recalculateFolioBalance } from './folio.service';
 import { generateMonthlyInvoiceNumber as genStandardMNNumber } from './invoice-number.service';
 
 type TxClient = Prisma.TransactionClient;
@@ -683,4 +683,68 @@ export async function renewContract(
     newCheckOut: input.newCheckOut,
     newRate,
   };
+}
+
+// ─── approveDraft — flip draft to unpaid + post ledger ────────────────────────
+
+export interface ApproveDraftInput {
+  invoiceId:  string;
+  approvedBy: string;
+}
+
+export async function approveDraft(
+  tx: Prisma.TransactionClient,
+  input: ApproveDraftInput,
+): Promise<{ invoiceId: string; status: 'unpaid' }> {
+  // Row-lock the invoice to prevent concurrent approval
+  await tx.$queryRaw`SELECT id FROM invoices WHERE id = ${input.invoiceId} FOR UPDATE`;
+
+  const inv = await tx.invoice.findUniqueOrThrow({
+    where: { id: input.invoiceId },
+    select: {
+      id: true, status: true, grandTotal: true, bookingId: true,
+      folioId: true,
+      items: { select: { folioLineItemId: true } },
+    },
+  });
+  if (inv.status !== 'draft') {
+    throw new Error(`Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`);
+  }
+
+  // Flip invoice status to unpaid
+  await tx.invoice.update({
+    where: { id: inv.id },
+    data:  { status: 'unpaid' as never },
+  });
+
+  // Flip folio items DRAFT → BILLED
+  const itemIds = inv.items.map(i => i.folioLineItemId).filter((x): x is string => !!x);
+  if (itemIds.length > 0) {
+    await tx.folioLineItem.updateMany({
+      where: { id: { in: itemIds } },
+      data:  { billingStatus: 'BILLED' as never },
+    });
+  }
+
+  // Recompute folio totals AFTER status flip (BILLED items now count)
+  const folioId = inv.folioId;
+  if (folioId) {
+    await recalculateFolioBalance(tx, folioId);
+  } else if (inv.bookingId) {
+    const folioRow = await tx.folio.findUnique({ where: { bookingId: inv.bookingId }, select: { id: true } });
+    if (folioRow) await recalculateFolioBalance(tx, folioRow.id);
+  }
+
+  // Post the ledger pair: DR AR / CR Revenue
+  await postLedgerPair(tx, {
+    debitAccount:  LedgerAccount.AR,
+    creditAccount: LedgerAccount.REVENUE,
+    amount:        Number(inv.grandTotal),
+    referenceType: 'Invoice',
+    referenceId:   inv.id,
+    description:   `Approve monthly draft invoice ${inv.id}`,
+    createdBy:     input.approvedBy,
+  });
+
+  return { invoiceId: inv.id, status: 'unpaid' };
 }
