@@ -257,6 +257,7 @@ enum FiscalPeriodStatus {
 }
 
 enum BillingStatus {
+  DRAFT      // NEW — attached to a draft Invoice, no ledger commitment
   UNBILLED
   BILLED
   PAID
