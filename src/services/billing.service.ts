@@ -437,6 +437,186 @@ export function resolveNextPeriod(input: ResolvePeriodInput): ResolvedPeriod {
   throw new Error(`resolveNextPeriod: unsupported bookingType ${bookingType}`);
 }
 
+// ─── generateDraftInvoice — create monthly draft (no ledger post) ─────────────
+
+import { getLatestReadingBefore } from './utility.service';
+
+export interface GenerateDraftInput {
+  bookingId:  string;
+  cycleIndex: number;
+  createdBy:  string;
+  /** Optional override for unit tests; defaults to "today" */
+  asOf?:      Date;
+}
+
+export interface GeneratedDraft {
+  invoiceId:    string;
+  invoiceNumber: string;
+  grandTotal:   number;
+  status:       'draft';
+  periodStart:  Date;
+  periodEnd:    Date;
+  isPartial:    boolean;
+  needsReading: boolean;
+}
+
+export async function generateDraftInvoice(
+  tx: Prisma.TransactionClient,
+  input: GenerateDraftInput,
+): Promise<GeneratedDraft> {
+  const booking = await tx.booking.findUniqueOrThrow({
+    where: { id: input.bookingId },
+    select: {
+      id: true, bookingType: true, checkIn: true, checkOut: true,
+      rate: true, guestId: true, roomId: true,
+      room: { select: { number: true } },
+    },
+  });
+  if (booking.bookingType !== 'monthly_short' && booking.bookingType !== 'monthly_long') {
+    throw new Error('generateDraftInvoice requires a monthly booking');
+  }
+
+  // Idempotent — bail if a period+invoice already exists for this cycle.
+  const existing = await tx.billingPeriod.findUnique({
+    where: { bookingId_cycleIndex: { bookingId: input.bookingId, cycleIndex: input.cycleIndex } },
+  });
+  if (existing?.invoiceId) {
+    const inv = await tx.invoice.findUniqueOrThrow({ where: { id: existing.invoiceId } });
+    return {
+      invoiceId: inv.id, invoiceNumber: inv.invoiceNumber,
+      grandTotal: Number(inv.grandTotal), status: 'draft',
+      periodStart: existing.periodStart, periodEnd: existing.periodEnd,
+      isPartial: existing.isPartial, needsReading: false,
+    };
+  }
+
+  const period = resolveNextPeriod({
+    bookingType: booking.bookingType as 'monthly_short' | 'monthly_long',
+    checkIn:  booking.checkIn,
+    checkOut: booking.checkOut,
+    cycleIndex: input.cycleIndex,
+  });
+
+  const folio = await getFolioByBookingId(tx, booking.id);
+  if (!folio) throw new Error('FOLIO_NOT_FOUND');
+
+  // 1) Rent charge — pro-rate if partial
+  const daysInCycle = Math.round(
+    (period.end.getTime() - period.start.getTime()) / 86_400_000,
+  ) + 1;
+  const fullCycleDays = period.isPartial
+    ? new Date(Date.UTC(period.start.getUTCFullYear(), period.start.getUTCMonth() + 1, 0)).getUTCDate()
+    : daysInCycle;
+  const rentAmount = period.isPartial
+    ? Math.round(Number(booking.rate) * (daysInCycle / fullCycleDays) * 100) / 100
+    : Number(booking.rate);
+
+  await addCharge(tx, {
+    folioId: folio.folioId,
+    chargeType: 'ROOM',
+    description: period.isPartial
+      ? `ค่าห้องพัก (pro-rated ${daysInCycle}/${fullCycleDays} วัน) — ห้อง ${booking.room.number}`
+      : `ค่าห้องพัก — ห้อง ${booking.room.number}`,
+    amount: rentAmount,
+    serviceDate: period.start,
+    periodEnd: period.end,
+    referenceType: 'monthly_draft',
+    referenceId:   `${booking.id}-c${input.cycleIndex}`,
+    notes: `Cycle ${input.cycleIndex} draft`,
+    createdBy: input.createdBy,
+    billingStatus: 'DRAFT',
+  });
+
+  // 2) Utility — only for cycle ≥ 2 (cycle 1 has no "previous" reading)
+  let needsReading = false;
+  if (input.cycleIndex >= 2) {
+    const curr = await getLatestReadingBefore(tx, booking.roomId, period.start);
+    const prevPeriod = await tx.billingPeriod.findUnique({
+      where: { bookingId_cycleIndex: { bookingId: booking.id, cycleIndex: input.cycleIndex - 1 } },
+    });
+    const referenceDate = prevPeriod?.periodStart ?? booking.checkIn;
+    const baseline = await getLatestReadingBefore(tx, booking.roomId, referenceDate);
+
+    if (!curr) {
+      needsReading = true;
+    } else {
+      const waterUsage    = Number(curr.currWater)    - Number(baseline?.currWater    ?? 0);
+      const electricUsage = Number(curr.currElectric) - Number(baseline?.currElectric ?? 0);
+      if (waterUsage > 0) {
+        await addCharge(tx, {
+          folioId: folio.folioId, chargeType: 'UTILITY_WATER',
+          description: `ค่าน้ำ (${waterUsage} หน่วย × ${Number(curr.waterRate)}) — ห้อง ${booking.room.number}`,
+          amount: Math.round(waterUsage * Number(curr.waterRate) * 100) / 100,
+          serviceDate: period.start,
+          referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-water`,
+          createdBy: input.createdBy, billingStatus: 'DRAFT',
+        });
+      }
+      if (electricUsage > 0) {
+        await addCharge(tx, {
+          folioId: folio.folioId, chargeType: 'UTILITY_ELECTRIC',
+          description: `ค่าไฟ (${electricUsage} หน่วย × ${Number(curr.electricRate)}) — ห้อง ${booking.room.number}`,
+          amount: Math.round(electricUsage * Number(curr.electricRate) * 100) / 100,
+          serviceDate: period.start,
+          referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-elec`,
+          createdBy: input.createdBy, billingStatus: 'DRAFT',
+        });
+      }
+    }
+  }
+
+  // 3) Create draft Invoice — invoiceType='monthly_rent', status='draft'
+  //    createInvoiceFromFolio gathers ALL DRAFT-flagged folio items.
+  const invResult = await createInvoiceFromFolio(tx, {
+    folioId: folio.folioId,
+    guestId: booking.guestId,
+    bookingId: booking.id,
+    invoiceType: 'MN',
+    dueDate: new Date(period.start.getTime() + 7 * 86_400_000),
+    billingPeriodStart: period.start,
+    billingPeriodEnd:   period.end,
+    notes: `Draft cycle ${input.cycleIndex}`,
+    createdBy: input.createdBy,
+    status: 'draft',
+    billingStatusFilter: 'DRAFT',
+  });
+  if (!invResult) throw new Error('Draft invoice creation produced no result');
+
+  // 4) Log the BillingPeriod — UPSERT (not create). A prior rejected draft
+  //    leaves a BillingPeriod row with invoiceId=null (see Task 1.5); the next
+  //    cron run must reuse that row, not create a duplicate.
+  await tx.billingPeriod.upsert({
+    where: { bookingId_cycleIndex: { bookingId: booking.id, cycleIndex: input.cycleIndex } },
+    update: {
+      periodStart: period.start,
+      periodEnd:   period.end,
+      isPartial:   period.isPartial,
+      isFinal:     period.isFinal,
+      invoiceId:   invResult.invoiceId,
+    },
+    create: {
+      bookingId:   booking.id,
+      cycleIndex:  input.cycleIndex,
+      periodStart: period.start,
+      periodEnd:   period.end,
+      isPartial:   period.isPartial,
+      isFinal:     period.isFinal,
+      invoiceId:   invResult.invoiceId,
+    },
+  });
+
+  return {
+    invoiceId:     invResult.invoiceId,
+    invoiceNumber: invResult.invoiceNumber,
+    grandTotal:    invResult.grandTotal,
+    status:        'draft',
+    periodStart:   period.start,
+    periodEnd:     period.end,
+    isPartial:     period.isPartial,
+    needsReading,
+  };
+}
+
 // ─── Contract Renewal ─────────────────────────────────────────────────────────
 
 export interface RenewContractInput {

@@ -57,6 +57,13 @@ export interface AddChargeInput {
   referenceId?: string;
   notes?: string;
   createdBy: string;
+  /**
+   * Optional billing status override.
+   * Defaults to 'UNBILLED' (standard flow).
+   * Pass 'DRAFT' for monthly draft pre-billing so these charges are
+   * excluded from folio totalCharges until the draft is approved.
+   */
+  billingStatus?: 'UNBILLED' | 'DRAFT';
 }
 
 export interface AddNightlyRoomChargesInput {
@@ -91,6 +98,17 @@ export interface CreateInvoiceFromFolioInput {
   /** Billing period for monthly invoices */
   billingPeriodStart?: Date;
   billingPeriodEnd?: Date;
+  /**
+   * Filter folio line items by billing status. Defaults to 'UNBILLED'.
+   * Pass 'DRAFT' when creating a monthly draft invoice so only draft-flagged
+   * items are gathered (not the standard UNBILLED items).
+   */
+  billingStatusFilter?: 'UNBILLED' | 'DRAFT';
+  /**
+   * Invoice status to set. Defaults to 'unpaid'.
+   * Pass 'draft' for monthly pre-billing drafts (no ledger post; items stay DRAFT).
+   */
+  status?: 'unpaid' | 'draft';
 }
 
 export interface CreateInvoiceResult {
@@ -147,7 +165,7 @@ export async function addCharge(
       quantity,
       unitPrice,
       taxType: (input.taxType ?? 'no_tax') as never,
-      billingStatus: 'UNBILLED' as never,
+      billingStatus: (input.billingStatus ?? 'UNBILLED') as never,
       serviceDate: input.serviceDate ?? null,
       periodEnd:   input.periodEnd   ?? null,
       productId: input.productId ?? null,
@@ -269,10 +287,11 @@ export async function createInvoiceFromFolio(
   tx: TxClient,
   input: CreateInvoiceFromFolioInput,
 ): Promise<CreateInvoiceResult | null> {
-  // Step 1: Gather unbilled line items
+  // Step 1: Gather line items by billing status filter (default: UNBILLED)
+  const filterStatus = input.billingStatusFilter ?? 'UNBILLED';
   const whereClause: Record<string, unknown> = {
     folioId: input.folioId,
-    billingStatus: 'UNBILLED' as never,
+    billingStatus: filterStatus as never,
   };
 
   if (input.lineItemIds && input.lineItemIds.length > 0) {
@@ -333,6 +352,9 @@ export async function createInvoiceFromFolio(
   // Step 3: Generate invoice number
   const invoiceNumber = await generateInvoiceNumber(tx, input.invoiceType);
 
+  const invoiceStatus = input.status ?? 'unpaid';
+  const isDraft = invoiceStatus === 'draft';
+
   // Step 4: Create Invoice + InvoiceItems (linked to FolioLineItems)
   const invoice = await tx.invoice.create({
     data: {
@@ -349,7 +371,7 @@ export async function createInvoiceFromFolio(
       grandTotal,
       isVatInclusive: settings.vatEnabled && settings.vatInclusive,
       paidAmount: 0,
-      status: 'unpaid',
+      status: invoiceStatus as never,
       billingPeriodStart: input.billingPeriodStart ?? null,
       billingPeriodEnd: input.billingPeriodEnd ?? null,
       notes: input.notes ?? null,
@@ -368,24 +390,30 @@ export async function createInvoiceFromFolio(
     select: { id: true, invoiceNumber: true, grandTotal: true },
   });
 
-  // Step 5: Lock FolioLineItems → BILLED
-  await tx.folioLineItem.updateMany({
-    where: {
-      id: { in: unbilledItems.map((i) => i.id) },
-    },
-    data: { billingStatus: 'BILLED' as never },
-  });
+  // Step 5: Lock FolioLineItems status.
+  // For draft invoices: items stay DRAFT (approve will flip to BILLED later).
+  // For standard invoices: flip UNBILLED → BILLED immediately.
+  if (!isDraft) {
+    await tx.folioLineItem.updateMany({
+      where: {
+        id: { in: unbilledItems.map((i) => i.id) },
+      },
+      data: { billingStatus: 'BILLED' as never },
+    });
+  }
 
-  // Step 6: Post ledger accrual — split into Revenue / Service / VAT legs
+  // Step 6: Post ledger accrual — skip for draft invoices (no ledger until approve).
   //   DR AR = CR Revenue(subtotal) + CR Service(if any) + CR VAT(if any)
-  await postInvoiceAccrual(tx, {
-    invoiceId:     invoice.id,
-    invoiceNumber: invoice.invoiceNumber,
-    revenue:       subtotal,
-    serviceCharge,
-    vatAmount,
-    createdBy:     input.createdBy,
-  });
+  if (!isDraft) {
+    await postInvoiceAccrual(tx, {
+      invoiceId:     invoice.id,
+      invoiceNumber: invoice.invoiceNumber,
+      revenue:       subtotal,
+      serviceCharge,
+      vatAmount,
+      createdBy:     input.createdBy,
+    });
+  }
 
   return {
     invoiceId: invoice.id,
@@ -649,11 +677,12 @@ export async function recalculateFolioBalance(
   tx: TxClient,
   folioId: string,
 ): Promise<{ totalCharges: number; totalPayments: number; balance: number }> {
-  // Sum all non-voided charges
+  // Sum all non-voided, non-draft charges
+  // DRAFT items are excluded — they don't count toward totalCharges until approved.
   const chargesAgg = await tx.folioLineItem.aggregate({
     where: {
       folioId,
-      billingStatus: { not: 'VOIDED' as never },
+      billingStatus: { notIn: ['VOIDED', 'DRAFT'] as never[] },
     },
     _sum: { amount: true },
   });
