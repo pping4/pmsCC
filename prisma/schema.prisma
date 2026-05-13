@@ -617,8 +617,8 @@ model BillingPeriod {
   invoiceId   String?  @unique @map("invoice_id")
   createdAt   DateTime @default(now()) @map("created_at")
 
-  booking Booking  @relation(fields: [bookingId], references: [id])
-  invoice Invoice? @relation(fields: [invoiceId], references: [id])
+  booking Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
 
   @@unique([bookingId, cycleIndex])
   @@index([periodStart])
@@ -783,8 +783,8 @@ model UtilityReading {
   recordedAt   DateTime? @map("recorded_at")
   createdAt    DateTime  @default(now()) @map("created_at")
 
-  room    Room     @relation(fields: [roomId], references: [id])
-  booking Booking? @relation(fields: [bookingId], references: [id])
+  room    Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
   @@unique([roomId, month])
   @@unique([roomId, readingDate])
