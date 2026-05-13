@@ -383,6 +383,19 @@ export async function createDraft(
     );
   }
 
+  // 1b. Enforce billingCycle ↔ BookingType binding.
+  //   monthly_short → rolling (วันชนวัน)
+  //   monthly_long  → calendar (ชนสิ้นเดือน)
+  const expectedCycle: 'rolling' | 'calendar' =
+    booking.bookingType === 'monthly_short' ? 'rolling' : 'calendar';
+
+  if (input.billingCycle !== expectedCycle) {
+    throw new ContractValidationError(
+      'INVALID_DATES',
+      `billingCycle must match BookingType (expected ${expectedCycle} for ${booking.bookingType})`,
+    );
+  }
+
   // 2. Ensure no existing contract on this booking (1:1 relation).
   const existing = await tx.contract.findUnique({
     where: { bookingId: input.bookingId },
