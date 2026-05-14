@@ -124,6 +124,7 @@ const INVOICE_TYPE_TH: Record<string, string> = {
 };
 
 const INV_STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+  draft:     { bg: '#f3f4f6', color: '#4b5563', label: '📋 รออนุมัติ' },
   unpaid:    { bg: '#fef2f2', color: '#dc2626', label: 'ค้างชำระ' },
   overdue:   { bg: '#fef2f2', color: '#b91c1c', label: 'เกินกำหนด' },
   paid:      { bg: '#f0fdf4', color: '#16a34a', label: 'ชำระแล้ว' },
@@ -141,7 +142,9 @@ const INV_STATUS_STYLE: Record<string, { bg: string; color: string; label: strin
  * 'voided' / 'cancelled' are dead invoices; never collect against those.
  */
 function isInvoiceCollectible(inv: { status: string; grandTotal: number | string; paidAmount: number | string }): boolean {
-  if (inv.status === 'voided' || inv.status === 'cancelled' || inv.status === 'paid') return false;
+  // Draft invoices are NOT collectible from the booking bill tab — they must
+  // be approved at /billing-cycle first (manager review flow, Phase MB-v2).
+  if (inv.status === 'draft' || inv.status === 'voided' || inv.status === 'cancelled' || inv.status === 'paid') return false;
   return Number(inv.grandTotal) - Number(inv.paidAmount) > 0;
 }
 
@@ -3375,6 +3378,27 @@ export default function DetailPanel({
                                 >
                                   💳 รับชำระเงิน
                                 </button>
+                              )}
+
+                              {/* Draft → cannot pay here; redirect to /billing-cycle review */}
+                              {inv.status === 'draft' && (
+                                <a
+                                  href={`/billing-cycle?invoiceId=${inv.id}`}
+                                  style={{
+                                    flex: 1,
+                                    padding: '5px 0',
+                                    fontSize: 11, fontWeight: 600,
+                                    borderRadius: 6,
+                                    border: '1.5px solid #7c3aed',
+                                    background: '#f5f3ff',
+                                    color: '#6d28d9',
+                                    fontFamily: FONT,
+                                    textDecoration: 'none',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                                  }}
+                                >
+                                  📋 อนุมัติที่ /billing-cycle
+                                </a>
                               )}
 
                               {/* Receipt reprint — only when actually fully paid; never for proforma */}
