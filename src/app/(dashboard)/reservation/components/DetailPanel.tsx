@@ -18,6 +18,7 @@ import CancelBookingDialog, { CancelConfirmInput } from './CancelBookingDialog';
 import RequestCleaningDialog from '../../housekeeping/components/RequestCleaningDialog';
 import ScheduleDialog from '../../housekeeping/components/ScheduleDialog';
 import CheckoutContractGuard from './CheckoutContractGuard';
+import { RecordReadingDialog } from '@/app/(dashboard)/billing-cycle/components/RecordReadingDialog';
 
 interface DetailPanelProps {
   booking: BookingItem | null;
@@ -238,6 +239,26 @@ export default function DetailPanel({
   const [recProducts,         setRecProducts]         = useState<{ id: string; name: string; price: number; unit?: string; code: string }[]>([]);
   const [recSearch,           setRecSearch]           = useState('');
   const [recPendingProductId, setRecPendingProductId] = useState<string | undefined>(undefined);
+
+  // ── Billing tab: meter readings (Task 6.5 — monthly bookings only) ──────
+  interface MeterReadingRow {
+    id:             string;
+    readingDate:    string;
+    prevWater:      number;
+    currWater:      number;
+    waterRate:      number;
+    prevElectric:   number;
+    currElectric:   number;
+    electricRate:   number;
+    waterUsage:     number;
+    electricUsage:  number;
+    notes:          string | null;
+    recordedBy:     string | null;
+    recordedAt:     string | null;
+  }
+  const [meterReadings,   setMeterReadings]   = useState<MeterReadingRow[]>([]);
+  const [meterLoading,    setMeterLoading]    = useState(false);
+  const [meterDialogOpen, setMeterDialogOpen] = useState(false);
 
   // ── Billing tab: inline payment form ──────────────────────────────────────
   // Phase 6.8 — track WHICH invoice is currently being paid (was a single
@@ -527,6 +548,7 @@ export default function DetailPanel({
       loadBillingInvoices(booking.id);
       if (booking.bookingType !== 'daily') {
         loadRecurringCharges(booking.id);
+        loadMeterReadings(booking.id);
       }
     }
     if (booking?.id && activeTab === 'details') {
@@ -813,6 +835,19 @@ export default function DetailPanel({
       }
     } catch { /* non-fatal */ }
     finally { setRecurringLoading(false); }
+  };
+
+  /** Load meter readings for the current booking (Task 6.5). */
+  const loadMeterReadings = async (bookingId: string) => {
+    setMeterLoading(true);
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}/readings`);
+      if (res.ok) {
+        const data = await res.json() as MeterReadingRow[];
+        setMeterReadings(Array.isArray(data) ? data : []);
+      }
+    } catch { /* non-fatal */ }
+    finally { setMeterLoading(false); }
   };
 
   /** Add a new recurring charge (Task 5.7). */
@@ -3481,6 +3516,91 @@ export default function DetailPanel({
                     </div>
                   )}
 
+                  {/* ── มิเตอร์น้ำ-ไฟ (Task 6.5 — monthly bookings only) ────── */}
+                  {booking && booking.bookingType !== 'daily' && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
+                          📊 มิเตอร์น้ำ-ไฟ
+                        </div>
+                        <button
+                          onClick={() => setMeterDialogOpen(true)}
+                          style={{
+                            fontSize: 11, fontWeight: 600,
+                            padding: '4px 10px', borderRadius: 6,
+                            border: '1.5px solid #0891b2',
+                            background: '#ecfeff',
+                            color: '#0e7490', cursor: 'pointer', fontFamily: FONT,
+                          }}
+                        >
+                          + จดมิเตอร์
+                        </button>
+                      </div>
+
+                      {/* Reading history table */}
+                      {meterLoading ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: 4 }}>กำลังโหลด...</div>
+                      ) : meterReadings.length === 0 ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: '4px 0' }}>
+                          ยังไม่มีบันทึกมิเตอร์ — กด &lsquo;+ จดมิเตอร์&rsquo; เพื่อเพิ่ม
+                        </div>
+                      ) : (
+                        <div style={{ overflowX: 'auto' }}>
+                          <table style={{
+                            width: '100%', borderCollapse: 'collapse',
+                            fontSize: 11,
+                          }}>
+                            <thead>
+                              <tr style={{ background: 'var(--surface-muted)' }}>
+                                {['วันจด', 'น้ำ', 'ไฟ', 'ผู้จด', 'หมายเหตุ'].map(h => (
+                                  <th key={h} style={{
+                                    padding: '5px 8px', textAlign: 'left',
+                                    fontWeight: 700, color: 'var(--text-secondary)',
+                                    borderBottom: '1px solid var(--border-default)',
+                                    whiteSpace: 'nowrap',
+                                  }}>
+                                    {h}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {meterReadings.map((r, idx) => (
+                                <tr key={r.id} style={{
+                                  background: idx % 2 === 0 ? 'var(--surface-card)' : 'var(--surface-subtle)',
+                                }}>
+                                  <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
+                                    {fmtDate(r.readingDate)}
+                                  </td>
+                                  <td style={{ padding: '5px 8px', color: 'var(--text-primary)' }}>
+                                    <span style={{ color: 'var(--text-muted)' }}>{r.prevWater} → {r.currWater}</span>
+                                    {' · '}
+                                    <span style={{ fontWeight: 600 }}>ใช้ {r.waterUsage} หน่วย</span>
+                                    {' · '}
+                                    <span style={{ color: '#0891b2' }}>฿{fmtBaht(r.waterUsage * r.waterRate)}</span>
+                                  </td>
+                                  <td style={{ padding: '5px 8px', color: 'var(--text-primary)' }}>
+                                    <span style={{ color: 'var(--text-muted)' }}>{r.prevElectric} → {r.currElectric}</span>
+                                    {' · '}
+                                    <span style={{ fontWeight: 600 }}>ใช้ {r.electricUsage} หน่วย</span>
+                                    {' · '}
+                                    <span style={{ color: '#d97706' }}>฿{fmtBaht(r.electricUsage * r.electricRate)}</span>
+                                  </td>
+                                  <td style={{ padding: '5px 8px', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                                    {r.recordedBy ?? '—'}
+                                  </td>
+                                  <td style={{ padding: '5px 8px', color: 'var(--text-faint)', maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {r.notes ?? '—'}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {billingLoading ? (
                     <div style={{ textAlign: 'center', padding: 32, color: '#9ca3af', fontSize: 13 }}>กำลังโหลด...</div>
                   ) : billingInvoices.length === 0 ? (
@@ -4019,6 +4139,19 @@ export default function DetailPanel({
         onConfirm={() => { if (hkDeclineTaskId) void declineHkTask(hkDeclineTaskId); }}
         onCancel={() => setHkDeclineTaskId(null)}
       />
+
+      {/* ── Meter Reading Dialog (Task 6.5) ──────────────────────────────── */}
+      {booking && room && meterDialogOpen && (
+        <RecordReadingDialog
+          bookingId={booking.id}
+          roomNumber={room.number}
+          onClose={() => setMeterDialogOpen(false)}
+          onSuccess={() => {
+            setMeterDialogOpen(false);
+            void loadMeterReadings(booking.id);
+          }}
+        />
+      )}
     </>
   );
 }
