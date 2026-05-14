@@ -42,7 +42,25 @@ function todayPrefix(): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1, 2)}${pad(d.getDate(), 2)}`;
 }
 
-// ─── Generic counter based on prefix match ──────────────────────────────────
+// ─── Generic MAX-suffix sequence (gap-safe) ─────────────────────────────────
+//
+// Using COUNT breaks when rows have been deleted (gaps), because count=N but
+// the Nth+1 slot is already taken. Instead, we read all matching numbers,
+// parse the numeric suffix from each, take the MAX, and add 1.
+// This is gap-safe and requires no schema change.  The candidate set is
+// bounded by the daily/yearly prefix, so it stays cheap (hundreds of rows).
+
+function maxSuffix(nums: string[], prefixWithDash: string): number {
+  let max = 0;
+  for (const n of nums) {
+    const tail = n.slice(prefixWithDash.length);
+    if (/^\d+$/.test(tail)) {
+      const v = parseInt(tail, 10);
+      if (v > max) max = v;
+    }
+  }
+  return max;
+}
 
 async function nextSequence(
   tx: TxClient,
@@ -50,63 +68,68 @@ async function nextSequence(
   field: string,
   prefix: string,
 ): Promise<string> {
-  // Count existing records with this prefix today
-  let count: number;
+  // prefix already ends without '-'; the stored numbers are "{prefix}-{NNNN}"
+  const withDash = `${prefix}-`;
+  let maxSeq = 0;
 
   switch (model) {
-    case 'invoice':
-      count = await tx.invoice.count({
-        where: { invoiceNumber: { startsWith: prefix } },
+    case 'invoice': {
+      const rows = await tx.invoice.findMany({
+        where:  { invoiceNumber: { startsWith: withDash } },
+        select: { invoiceNumber: true },
       });
-      break;
-    case 'payment':
-      count = await tx.payment.count({
-        where: { [field]: { startsWith: prefix } } as Record<string, unknown>,
-      });
-      break;
-    case 'folio':
-      count = await tx.folio.count({
-        where: { folioNumber: { startsWith: prefix } },
-      });
-      break;
-    case 'booking': {
-      // We need the MAX numeric suffix among bookings in this year, but a
-      // lex-desc orderBy is unreliable: any malformed booking number (e.g.
-      // a test fixture with an embedded letter like "BK-2026-T0864")
-      // sorts ABOVE numeric ones because letters > digits in ASCII, so
-      // findFirst returns the malformed row, parseInt yields NaN, and the
-      // generator resets to 0001 -- colliding with the real first booking
-      // and breaking every subsequent insert with P2002.
-      //
-      // Pull the candidates and parse each suffix in JS, skipping anything
-      // that isn't a clean integer. The candidate set is bounded by the
-      // year prefix, so this stays cheap (one cashier-year is hundreds,
-      // not millions of rows).
-      const rows = await tx.booking.findMany({
-        where:  { bookingNumber: { startsWith: prefix + '-' } },
-        select: { bookingNumber: true },
-      });
-      let maxSeq = 0;
-      for (const r of rows) {
-        const tail = r.bookingNumber.slice(prefix.length + 1);
-        if (/^\d+$/.test(tail)) {
-          const n = parseInt(tail, 10);
-          if (n > maxSeq) maxSeq = n;
-        }
-      }
-      count = maxSeq;
+      maxSeq = maxSuffix(rows.map((r) => r.invoiceNumber), withDash);
       break;
     }
-    case 'securityDeposit':
-      count = await tx.securityDeposit.count({
-        where: { depositNumber: { startsWith: prefix } },
-      });
+    case 'payment': {
+      // 'field' is either 'paymentNumber' or 'receiptNumber'
+      if (field === 'paymentNumber') {
+        const rows = await tx.payment.findMany({
+          where:  { paymentNumber: { startsWith: withDash } },
+          select: { paymentNumber: true },
+        });
+        maxSeq = maxSuffix(rows.map((r) => r.paymentNumber), withDash);
+      } else {
+        // receiptNumber — nullable on Payment, filter out nulls
+        const rows = await tx.payment.findMany({
+          where:  { receiptNumber: { startsWith: withDash } },
+          select: { receiptNumber: true },
+        });
+        maxSeq = maxSuffix(rows.map((r) => r.receiptNumber ?? ''), withDash);
+      }
       break;
+    }
+    case 'folio': {
+      const rows = await tx.folio.findMany({
+        where:  { folioNumber: { startsWith: withDash } },
+        select: { folioNumber: true },
+      });
+      maxSeq = maxSuffix(rows.map((r) => r.folioNumber), withDash);
+      break;
+    }
+    case 'booking': {
+      // Bookings use prefix = "BK-YYYY" (no trailing date), pattern "BK-YYYY-NNNN".
+      // The stored number is "{prefix}-{NNNN}", same shape as the others.
+      const rows = await tx.booking.findMany({
+        where:  { bookingNumber: { startsWith: withDash } },
+        select: { bookingNumber: true },
+      });
+      maxSeq = maxSuffix(rows.map((r) => r.bookingNumber), withDash);
+      break;
+    }
+    case 'securityDeposit': {
+      const rows = await tx.securityDeposit.findMany({
+        where:  { depositNumber: { startsWith: withDash } },
+        select: { depositNumber: true },
+      });
+      maxSeq = maxSuffix(rows.map((r) => r.depositNumber), withDash);
+      break;
+    }
     default:
       throw new Error(`Unknown model: ${model}`);
   }
 
-  return `${prefix}-${pad(count + 1)}`;
+  return `${prefix}-${pad(maxSeq + 1)}`;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -172,22 +195,27 @@ export async function generateCLAccountCode(tx: TxClient): Promise<string> {
  */
 export async function generateCLPaymentNumber(tx: TxClient): Promise<string> {
   const prefix = `CL-PAY-${todayPrefix()}`;
-  const count = await tx.cityLedgerPayment.count({
-    where: { paymentNumber: { startsWith: prefix } },
+  const withDash = `${prefix}-`;
+  const rows = await tx.cityLedgerPayment.findMany({
+    where:  { paymentNumber: { startsWith: withDash } },
+    select: { paymentNumber: true },
   });
-  return `${prefix}-${pad(count + 1)}`;
+  const maxSeq = maxSuffix(rows.map((r) => r.paymentNumber), withDash);
+  return `${prefix}-${pad(maxSeq + 1)}`;
 }
 
-/** MNT-YYYYMM-NNNN (monthly billing — uses INV-MN now) */
+/** INV-MN-YYYYMM-NNNN (monthly billing — month-scoped, gap-safe) */
 export async function generateMonthlyInvoiceNumber(
   tx: TxClient,
   billingDate: Date,
 ): Promise<string> {
   const ym = `${billingDate.getFullYear()}${pad(billingDate.getMonth() + 1, 2)}`;
   const prefix = `INV-MN-${ym}`;
-  // Count existing for this month (not just today)
-  const count = await tx.invoice.count({
-    where: { invoiceNumber: { startsWith: prefix } },
+  const withDash = `${prefix}-`;
+  const rows = await tx.invoice.findMany({
+    where:  { invoiceNumber: { startsWith: withDash } },
+    select: { invoiceNumber: true },
   });
-  return `${prefix}-${pad(count + 1)}`;
+  const maxSeq = maxSuffix(rows.map((r) => r.invoiceNumber), withDash);
+  return `${prefix}-${pad(maxSeq + 1)}`;
 }
