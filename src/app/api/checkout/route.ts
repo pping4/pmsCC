@@ -24,6 +24,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { postBadDebt } from '@/services/ledger.service';
+import { recordReading } from '@/services/utility.service';
 import { postInvoiceToCityLedger } from '@/services/cityLedger.service';
 import { z } from 'zod';
 import {
@@ -56,6 +57,13 @@ const CheckoutSchema = z.object({
   authCode:   z.string().trim().max(12).optional(),
   // Sprint 4B: cashSessionId removed from schema — server resolves it from
   // the authenticated user's open shift via getActiveSessionForUser.
+
+  // Phase 6.3 — optional final meter reading at checkout
+  finalReading: z.object({
+    currWater:    z.number().nonnegative().max(1_000_000),
+    currElectric: z.number().nonnegative().max(1_000_000),
+    notes:        z.string().max(500).optional(),
+  }).optional(),
 }).refine(
   (d) => !d.badDebt || (d.badDebt && d.badDebtNote && d.badDebtNote.length > 0),
   { message: 'ต้องระบุเหตุผลของหนี้เสีย', path: ['badDebtNote'] }
@@ -91,6 +99,7 @@ export async function POST(request: Request) {
   const {
     bookingId, notes, badDebt, badDebtNote, paymentMethod,
     receivingAccountId, terminalId, cardBrand, cardType, cardLast4, authCode,
+    finalReading,
   } = parsed.data;
   if (paymentMethod === 'transfer' && !receivingAccountId) {
     return NextResponse.json({ error: 'กรุณาเลือกบัญชีที่รับเงิน' }, { status: 422 });
@@ -199,6 +208,30 @@ export async function POST(request: Request) {
         bookingType: booking.bookingType,
       },
     });
+
+    // ── 2c. Phase 6.3: Optional final meter reading ───────────────────────
+    // Record BEFORE the final invoice is generated so the reading is available
+    // as the most-recent snapshot. Monthly checkout without a reading logs a
+    // warning but does NOT block the checkout (UX: guest is leaving).
+    const isMonthlyCheckout =
+      booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
+
+    if (finalReading) {
+      const checkoutDateUTC = new Date(now.toISOString().slice(0, 10) + 'T00:00:00.000Z');
+      await recordReading(tx, {
+        roomId:       booking.roomId,
+        bookingId:    bookingId,
+        readingDate:  checkoutDateUTC,
+        currWater:    finalReading.currWater,
+        currElectric: finalReading.currElectric,
+        notes:        finalReading.notes ?? 'Final reading at checkout',
+        recordedBy:   userId,
+      });
+    } else if (isMonthlyCheckout) {
+      console.warn(
+        `[checkout] Monthly booking ${bookingId} checked out WITHOUT a final meter reading — utility delta for last cycle may be inaccurate`,
+      );
+    }
 
     // ── 3. Folio-centric: check for unbilled items and create final invoice ─
     const folio = await getFolioByBookingId(tx, bookingId);
