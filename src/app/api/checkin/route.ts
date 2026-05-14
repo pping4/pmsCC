@@ -27,6 +27,7 @@ import { getFolioByBookingId, addCharge, addNightlyRoomCharges, createInvoiceFro
 import { createPayment } from '@/services/payment.service';
 import { logActivity } from '@/services/activityLog.service';
 import { transitionRoom } from '@/services/roomStatus.service';
+import { resolveNextPeriod } from '@/services/billing.service';
 import { fmtDate } from '@/lib/date-format';
 import { expandNightlyReceiptItems } from '@/lib/invoice-utils';
 import type { ReceiptData } from '@/components/receipt/types';
@@ -273,6 +274,18 @@ export async function POST(request: Request) {
     const isMonthly =
       booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
 
+    // Resolve cycle-1 period once (used in charge, invoice, and BillingPeriod).
+    // For daily bookings this is unused; for monthly it's the authoritative anchor
+    // that prevents the cron from double-billing the first month.
+    const ciCycle1Period = isMonthly
+      ? resolveNextPeriod({
+          bookingType: booking.bookingType as 'monthly_short' | 'monthly_long',
+          checkIn:     new Date(booking.checkIn),
+          checkOut:    new Date(booking.checkOut),
+          cycleIndex:  1,
+        })
+      : null;
+
     // ── 3a. Add ROOM charge to folio ─────────────────────────────────────────
     // Daily: always. Monthly: only when paying upfront.
     const shouldAddRoomCharge = folio && (!isMonthly || (collectUpfront && !!upfrontPaymentMethod));
@@ -303,6 +316,11 @@ export async function POST(request: Request) {
             createdBy:    userId,
           });
         } else {
+          // Monthly: period = cycle 1 (not the full stay window).
+          // ciCycle1Period is resolved above from resolveNextPeriod(cycleIndex=1).
+          // Using cycle-1 dates here ensures the FolioLineItem's serviceDate/periodEnd
+          // match the INV-CI billingPeriod and the BillingPeriod anchor that the
+          // monthly-billing cron uses to detect 'already invoiced → skip'.
           const monthlyLabel = booking.bookingType === 'monthly_short'
             ? ' (รายเดือนระยะสั้น)'
             : ' (รายเดือนระยะยาว)';
@@ -313,8 +331,8 @@ export async function POST(request: Request) {
             amount:      stayAmount,
             quantity:    1,
             unitPrice:   stayAmount,
-            serviceDate: new Date(booking.checkIn),
-            periodEnd:   new Date(booking.checkOut),
+            serviceDate: ciCycle1Period!.start,
+            periodEnd:   ciCycle1Period!.end,
             createdBy:   userId,
           });
         }
@@ -371,6 +389,12 @@ export async function POST(request: Request) {
           ? `ชำระค่าห้องพัก ณ เช็คอิน — ห้อง ${booking.room.number}`
           : `ค่าห้องพัก — ห้อง ${booking.room.number} (รอเก็บเงิน)`,
         createdBy:   userId,
+        // For monthly: constrain invoice billing period to cycle 1 so the
+        // period column shows 1-month window (not the full stay).
+        ...(ciCycle1Period && {
+          billingPeriodStart: ciCycle1Period.start,
+          billingPeriodEnd:   ciCycle1Period.end,
+        }),
       });
 
       if (stayInvoiceResult) {
@@ -520,6 +544,32 @@ export async function POST(request: Request) {
           paymentId: upfrontPaymentId,
         },
       });
+
+      // ── Register BillingPeriod(cycleIndex=1) for monthly upfront check-in ──
+      // Uses upsert to be safe if the booking route already registered cycle 1
+      // (full-pay at booking creation). Idempotent — second write just refreshes
+      // the invoiceId link without creating a duplicate row.
+      if (isMonthly && ciCycle1Period && stayInvoiceId) {
+        await tx.billingPeriod.upsert({
+          where: { bookingId_cycleIndex: { bookingId, cycleIndex: 1 } },
+          create: {
+            bookingId,
+            cycleIndex:  1,
+            periodStart: ciCycle1Period.start,
+            periodEnd:   ciCycle1Period.end,
+            isPartial:   ciCycle1Period.isPartial,
+            isFinal:     ciCycle1Period.isFinal,
+            invoiceId:   stayInvoiceId,
+          },
+          update: {
+            periodStart: ciCycle1Period.start,
+            periodEnd:   ciCycle1Period.end,
+            isPartial:   ciCycle1Period.isPartial,
+            isFinal:     ciCycle1Period.isFinal,
+            invoiceId:   stayInvoiceId,
+          },
+        });
+      }
 
       // ── Build upfront receipt using the actual collected amount ───────────
       const guestNameUp = `${booking.guest.firstName ?? ''} ${booking.guest.lastName ?? ''}`.trim();

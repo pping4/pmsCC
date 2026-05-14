@@ -9,6 +9,7 @@ import { generateBookingNumber } from '@/services/invoice-number.service';
 import { createPayment } from '@/services/payment.service';
 import { transitionRoom, canTransition } from '@/services/roomStatus.service';
 import { getActiveSessionForUser } from '@/services/cashSession.service';
+import { resolveNextPeriod } from '@/services/billing.service';
 import { fmtDate } from '@/lib/date-format';
 import type { ReceiptData } from '@/components/receipt/types';
 
@@ -305,6 +306,29 @@ export async function POST(request: NextRequest) {
             ? Math.max(1, Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24)))
             : null;
 
+          // For monthly bookings, resolve cycle 1 period now so the upfront
+          // invoice represents exactly 1 month (cycle 1), not the full stay.
+          // This prevents the monthly-billing cron from double-billing cycle 1.
+          const isMonthlyBK =
+            data.bookingType === 'monthly_short' || data.bookingType === 'monthly_long';
+          let invoicePeriodStart = checkInDate;
+          let invoicePeriodEnd   = checkOutDate;
+          let cycle1IsPartial    = false;
+          let cycle1IsFinal      = false;
+
+          if (isMonthlyBK) {
+            const cycle1 = resolveNextPeriod({
+              bookingType: data.bookingType as 'monthly_short' | 'monthly_long',
+              checkIn:  checkInDate,
+              checkOut: checkOutDate,
+              cycleIndex: 1,
+            });
+            invoicePeriodStart = cycle1.start;
+            invoicePeriodEnd   = cycle1.end;
+            cycle1IsPartial    = cycle1.isPartial;
+            cycle1IsFinal      = cycle1.isFinal;
+          }
+
           if (data.bookingType === 'daily' && nights) {
             await addNightlyRoomCharges(tx, {
               folioId,
@@ -319,14 +343,15 @@ export async function POST(request: NextRequest) {
               createdBy:    userId,
             });
           } else {
-            // Monthly: keep a single row, period spans full booking window
+            // Monthly: single row, period = cycle 1 (not the full stay window).
+            // The amount stays at booking.rate (= 1 month's rent).
             await addCharge(tx, {
               folioId,
               chargeType:  'ROOM',
               description: `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
               amount:      expectedStayAmount,
-              serviceDate: checkInDate,
-              periodEnd:   checkOutDate,
+              serviceDate: invoicePeriodStart,
+              periodEnd:   invoicePeriodEnd,
               notes:       'ชำระล่วงหน้าตอนจอง',
               createdBy:   userId,
             });
@@ -340,6 +365,12 @@ export async function POST(request: NextRequest) {
             dueDate: checkOutDate,
             notes: `ชำระเต็มจำนวน ณ วันจอง — ห้อง ${data.roomNumber}`,
             createdBy: userId,
+            // For monthly: constrain period to cycle 1 so the invoice column
+            // shows the correct 1-month window, not the entire stay.
+            ...(isMonthlyBK && {
+              billingPeriodStart: invoicePeriodStart,
+              billingPeriodEnd:   invoicePeriodEnd,
+            }),
           });
 
           // Mark as paid immediately since payment is collected at booking
@@ -393,10 +424,41 @@ export async function POST(request: NextRequest) {
               },
             });
 
+            // ── Register BillingPeriod(cycleIndex=1) for monthly bookings ──
+            // This is the critical idempotency anchor: the monthly-billing cron
+            // checks BillingPeriod.findUnique({bookingId, cycleIndex}) before
+            // generating a draft. Without this row the cron would create a
+            // second INV-MN for cycle 1, double-billing the guest.
+            // We use upsert (not create) so the booking route + check-in route
+            // can't both insert and cause a P2002 unique conflict.
+            if (isMonthlyBK) {
+              await tx.billingPeriod.upsert({
+                where: { bookingId_cycleIndex: { bookingId: created.id, cycleIndex: 1 } },
+                create: {
+                  bookingId:   created.id,
+                  cycleIndex:  1,
+                  periodStart: invoicePeriodStart,
+                  periodEnd:   invoicePeriodEnd,
+                  isPartial:   cycle1IsPartial,
+                  isFinal:     cycle1IsFinal,
+                  invoiceId:   invResult.invoiceId,
+                },
+                update: {
+                  // If a row already exists (e.g. check-in route ran first),
+                  // link it to this invoice and update dates to be consistent.
+                  periodStart: invoicePeriodStart,
+                  periodEnd:   invoicePeriodEnd,
+                  isPartial:   cycle1IsPartial,
+                  isFinal:     cycle1IsFinal,
+                  invoiceId:   invResult.invoiceId,
+                },
+              });
+            }
+
             // ── Build receipt data ────────────────────────────────────────
             // Receipt-Standardization: for daily bookings, render one item per
             // night with periodStart/periodEnd. Monthly: single row spanning
-            // the booking window. The receipt component handles both shapes.
+            // the billing window (cycle 1 only, not the full stay).
             const receiptItems: ReceiptData['items'] =
               data.bookingType === 'daily' && nights
                 ? Array.from({ length: nights }, (_, i) => {
@@ -417,8 +479,8 @@ export async function POST(request: NextRequest) {
                 : [{
                     description: `ค่าห้องพัก — ห้อง ${data.roomNumber}`,
                     amount:      invResult.grandTotal,
-                    periodStart: fmtDate(checkInDate),
-                    periodEnd:   fmtDate(checkOutDate),
+                    periodStart: fmtDate(invoicePeriodStart),
+                    periodEnd:   fmtDate(invoicePeriodEnd),
                   }];
 
             bookingReceipt = {
