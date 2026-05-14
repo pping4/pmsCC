@@ -27,7 +27,18 @@ import {
   nextBillingDate,
 } from '@/services/billing.service';
 
+// ─── Deprecation constants (Task 4.7) ─────────────────────────────────────────
+// Sunset: 90 days from 2026-05-14 → 2026-08-12
+const SUNSET_DATE = 'Wed, 12 Aug 2026 00:00:00 GMT';
+const SUCCESSOR_LINK = '</api/cron/billing-draft>; rel="successor-version"';
+
 export async function POST(request: NextRequest) {
+  // RFC 8594 deprecation warning — keep the route working for one full billing cycle,
+  // then delete. Successor: POST /api/cron/billing-draft (bearer-gated cron).
+  console.warn(
+    '[DEPRECATED] /api/billing/generate-monthly called; use /api/cron/billing-draft instead',
+  );
+
   const authSession = await getServerSession(authOptions);
   if (!authSession?.user) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -182,5 +193,10 @@ export async function POST(request: NextRequest) {
     }
   }
 
-  return NextResponse.json({ created, skipped, errors, results });
+  const response = NextResponse.json({ created, skipped, errors, results });
+  // RFC 8594 — Deprecation header signals to API clients that this endpoint is deprecated.
+  response.headers.set('Deprecation', 'true');
+  response.headers.set('Sunset', SUNSET_DATE);
+  response.headers.set('Link', SUCCESSOR_LINK);
+  return response;
 }

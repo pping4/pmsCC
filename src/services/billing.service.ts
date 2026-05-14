@@ -472,6 +472,7 @@ export interface GeneratedDraft {
   periodStart:  Date;
   periodEnd:    Date;
   isPartial:    boolean;
+  isFinal:      boolean;
   needsReading: boolean;
 }
 
@@ -512,7 +513,7 @@ export async function generateDraftInvoice(
         invoiceId: inv.id, invoiceNumber: inv.invoiceNumber,
         grandTotal: Number(inv.grandTotal), status: 'draft',
         periodStart: existing.periodStart, periodEnd: existing.periodEnd,
-        isPartial: existing.isPartial, needsReading: false,
+        isPartial: existing.isPartial, isFinal: existing.isFinal, needsReading: false,
       };
     }
     console.warn(
@@ -652,6 +653,7 @@ export async function generateDraftInvoice(
     periodStart:   period.start,
     periodEnd:     period.end,
     isPartial:     period.isPartial,
+    isFinal:       period.isFinal,
     needsReading,
   };
 }
