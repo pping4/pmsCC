@@ -201,6 +201,10 @@ export default function DetailPanel({
   const [reprintData,  setReprintData]        = useState<ReceiptData | null>(null);
   const [invoiceDoc,   setInvoiceDoc]         = useState<InvoiceDocumentData | null>(null);
 
+  // ── Billing tab: generate next cycle ──────────────────────────────────────
+  const [generateNextLoading, setGenerateNextLoading] = useState(false);
+  const [generateNextConfirm, setGenerateNextConfirm] = useState(false);
+
   // ── Billing tab: inline payment form ──────────────────────────────────────
   // Phase 6.8 — track WHICH invoice is currently being paid (was a single
   // boolean before, which expanded the form on every unpaid card simultaneously
@@ -346,6 +350,8 @@ export default function DetailPanel({
     setInvoiceDoc(null);
     setBillingInvoices([]);
     setBillingPayInvoiceId(null);
+    setGenerateNextLoading(false);
+    setGenerateNextConfirm(false);
     setBillingPayMethod('cash');
     setBillingCashSessId(null);
     setError('');
@@ -718,6 +724,44 @@ export default function DetailPanel({
       const msg = err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้';
       setError(msg);
       toast.error('โหลดใบแจ้งหนี้ไม่สำเร็จ', msg);
+    }
+  };
+
+  /** Generate next billing cycle draft for this booking (Task 5.5). */
+  const handleGenerateNextBill = async () => {
+    if (!booking || generateNextLoading) return;
+    setGenerateNextConfirm(false);
+    setGenerateNextLoading(true);
+    try {
+      const res = await fetch(`/api/bookings/${booking.id}/billing/generate-next`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({})) as {
+        ok?:           boolean;
+        invoiceId?:    string;
+        invoiceNumber?: string;
+        cycleIndex?:   number;
+        periodStart?:  string;
+        periodEnd?:    string;
+        grandTotal?:   number;
+        needsReading?: boolean;
+        error?:        string;
+        code?:         string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      await loadBillingInvoices(booking.id);
+      toast.success(
+        `สร้าง draft สำเร็จ — ${data.invoiceNumber ?? ''}`,
+        `ดูและอนุมัติได้ที่ /billing-cycle`,
+      );
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'ไม่สามารถสร้าง draft ได้';
+      toast.error('สร้างบิลไม่สำเร็จ', msg);
+    } finally {
+      setGenerateNextLoading(false);
     }
   };
 
@@ -3006,6 +3050,76 @@ export default function DetailPanel({
                           </div>
                         );
                       })}
+                    </div>
+                  )}
+
+                  {/* ── สร้างบิลรอบถัดไป (Task 5.5 — monthly bookings only) ──── */}
+                  {booking && booking.bookingType !== 'daily' && (
+                    <div style={{ marginTop: 16 }}>
+                      {generateNextConfirm ? (
+                        <div style={{
+                          padding: '10px 12px',
+                          background: '#f0fdf4',
+                          borderRadius: 8,
+                          border: '1px solid #86efac',
+                          fontSize: 12,
+                        }}>
+                          <div style={{ fontWeight: 700, color: '#15803d', marginBottom: 8 }}>
+                            ยืนยันสร้าง draft cycle ถัดไปสำหรับการจองนี้?
+                          </div>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              onClick={() => setGenerateNextConfirm(false)}
+                              style={{
+                                flex: 1, padding: '6px', borderRadius: 6,
+                                border: '1px solid #e5e7eb', background: '#fff',
+                                color: '#374151', fontSize: 11, fontWeight: 500,
+                                cursor: 'pointer', fontFamily: FONT,
+                              }}
+                            >
+                              ยกเลิก
+                            </button>
+                            <button
+                              onClick={() => void handleGenerateNextBill()}
+                              disabled={generateNextLoading}
+                              style={{
+                                flex: 2, padding: '6px', borderRadius: 6,
+                                border: 'none',
+                                background: generateNextLoading ? '#86efac' : '#16a34a',
+                                color: '#fff', fontSize: 11, fontWeight: 700,
+                                cursor: generateNextLoading ? 'wait' : 'pointer',
+                                fontFamily: FONT,
+                              }}
+                            >
+                              {generateNextLoading ? '⏳ กำลังสร้าง...' : '✅ ยืนยัน'}
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setGenerateNextConfirm(true)}
+                          disabled={generateNextLoading}
+                          className="pms-card pms-transition"
+                          style={{
+                            width: '100%',
+                            padding: '8px 16px',
+                            backgroundColor: '#16a34a',
+                            color: '#fff',
+                            border: 0,
+                            borderRadius: 6,
+                            cursor: generateNextLoading ? 'not-allowed' : 'pointer',
+                            fontSize: 12,
+                            fontWeight: 700,
+                            fontFamily: FONT,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 6,
+                          }}
+                        >
+                          🧾 สร้างบิลรอบถัดไป
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

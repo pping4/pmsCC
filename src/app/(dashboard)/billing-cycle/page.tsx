@@ -194,6 +194,10 @@ export default function BillingCyclePage() {
   const [rejectLoading, setRejectLoading] = useState(false);
   const [rejectProgress, setRejectProgress] = useState<{ done: number; total: number } | null>(null);
 
+  // ── Run cron now (admin only) ─────────────────────────────────────────────
+  const [cronConfirmOpen, setCronConfirmOpen] = useState(false);
+  const [cronRunning,     setCronRunning]     = useState(false);
+
   // ─── Redirect unauthorised users ─────────────────────────────────────────
   useEffect(() => {
     if (session === null) {
@@ -399,6 +403,35 @@ export default function BillingCyclePage() {
     );
     setSelectedIds(new Set());
     refetch();
+  };
+
+  // ─── Run cron now handler ─────────────────────────────────────────────────
+  const handleRunCron = async () => {
+    setCronConfirmOpen(false);
+    setCronRunning(true);
+    try {
+      const secret = process.env.NEXT_PUBLIC_CRON_SECRET ?? 'dev-secret';
+      const res = await fetch('/api/cron/billing-draft', {
+        method:  'POST',
+        headers: { 'Authorization': `Bearer ${secret}` },
+      });
+      const data = await res.json().catch(() => ({})) as {
+        generatedCount?: number;
+        skippedCount?:   number;
+        errorCount?:     number;
+        error?:          string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      toast.success(
+        'Cron เสร็จแล้ว',
+        `สร้าง ${data.generatedCount ?? 0} drafts · ข้าม ${data.skippedCount ?? 0} · ข้อผิดพลาด ${data.errorCount ?? 0}`,
+      );
+      refetch();
+    } catch (err) {
+      toast.error('Cron ล้มเหลว', err instanceof Error ? err.message : undefined);
+    } finally {
+      setCronRunning(false);
+    }
   };
 
   // ─── Columns ──────────────────────────────────────────────────────────────
@@ -609,6 +642,26 @@ export default function BillingCyclePage() {
             ตรวจสอบและ approve บิลรายเดือนก่อนส่งลูกค้า
           </p>
         </div>
+        {/* Run cron now — admin only */}
+        {session?.user?.role === 'admin' && (
+          <button
+            onClick={() => setCronConfirmOpen(true)}
+            disabled={cronRunning}
+            style={{
+              padding: '8px 14px',
+              borderRadius: 8,
+              border: '1.5px solid #1d4ed8',
+              background: cronRunning ? '#dbeafe' : '#eff6ff',
+              color: '#1d4ed8',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: cronRunning ? 'not-allowed' : 'pointer',
+              display: 'flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            {cronRunning ? '⏳ รัน cron...' : '▶️ Run cron now'}
+          </button>
+        )}
       </div>
 
       {/* ── KPI cards ─────────────────────────────────────────────────────── */}
@@ -899,6 +952,46 @@ export default function BillingCyclePage() {
           }}
         />
       )}
+
+      {/* ── Run Cron Confirm Dialog ───────────────────────────────────────── */}
+      <Dialog
+        open={cronConfirmOpen}
+        onClose={() => setCronConfirmOpen(false)}
+        title="Run Cron Now"
+        size="sm"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => setCronConfirmOpen(false)}
+              style={{
+                padding: '8px 18px', borderRadius: 7,
+                border: '1px solid var(--border-default)',
+                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                cursor: 'pointer', fontWeight: 600, fontSize: 13,
+              }}
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleRunCron()}
+              style={{
+                padding: '8px 18px', borderRadius: 7,
+                background: '#1d4ed8', color: '#fff', border: 'none',
+                cursor: 'pointer', fontWeight: 700, fontSize: 13,
+              }}
+            >
+              ▶️ Run cron
+            </button>
+          </>
+        }
+      >
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>
+          รัน billing cron ทันที — จะสร้าง draft invoice สำหรับทุกการจองรายเดือน
+          ที่ถึงรอบบิลแล้วและยังไม่มี draft ในระบบ
+        </p>
+      </Dialog>
     </div>
   );
 }
