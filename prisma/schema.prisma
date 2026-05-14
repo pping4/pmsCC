@@ -805,7 +805,8 @@ model Product {
   sortOrder   Int             @default(0) @map("sort_order")
   createdAt   DateTime        @default(now()) @map("created_at")
 
-  invoiceItems InvoiceItem[]
+  invoiceItems     InvoiceItem[]
+  recurringCharges RecurringCharge[]
 
   @@map("products")
 }
@@ -2257,6 +2258,7 @@ enum RecurringChargeStatus {
 model RecurringCharge {
   id          String   @id @default(uuid())
   bookingId   String   @map("booking_id")
+  productId   String?  @map("product_id")            // link to Product catalog (audit only — description+amount snapshotted at create-time)
   chargeType  FolioChargeType  @map("charge_type")  // typically EXTRA_SERVICE or OTHER
   description String                                 // "ค่าเช่า TV", "Internet", "ค่าบริการ"
   amount      Decimal  @db.Decimal(10, 2)            // baht per cycle (flat, not pro-rated by default)
@@ -2269,9 +2271,11 @@ model RecurringCharge {
   cancelledAt DateTime? @map("cancelled_at")
   cancelledBy String?  @map("cancelled_by")
 
-  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  booking Booking  @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
   @@index([bookingId, status])
   @@index([startDate, endDate])
+  @@index([productId])
   @@map("recurring_charges")
 }

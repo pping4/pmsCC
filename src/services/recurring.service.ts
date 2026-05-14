@@ -29,6 +29,7 @@ export class RecurringValidationError extends Error {
 
 export interface CreateRecurringInput {
   bookingId:   string;
+  productId?:  string;     // optional FK to Product catalog — description+amount still snapshotted at create-time
   chargeType:  'EXTRA_SERVICE' | 'OTHER';
   description: string;
   amount:      number;
@@ -54,9 +55,24 @@ export async function createRecurringCharge(tx: Tx, input: CreateRecurringInput)
   if (input.endDate && input.endDate < input.startDate) {
     throw new RecurringValidationError('INVALID_DATES', 'endDate must be >= startDate');
   }
+
+  // If productId provided, verify the Product exists and is active.
+  // We snapshot description+amount at create-time so future price changes
+  // don't retroactively change the agreed amount. productId is audit-only.
+  if (input.productId) {
+    const product = await tx.product.findUnique({
+      where:  { id: input.productId },
+      select: { active: true },
+    });
+    if (!product || !product.active) {
+      throw new RecurringValidationError('INVALID_DATES', 'Product not found or inactive');
+    }
+  }
+
   return tx.recurringCharge.create({
     data: {
       bookingId:   input.bookingId,
+      productId:   input.productId ?? null,
       chargeType:  input.chargeType,
       description: input.description,
       amount:      new Prisma.Decimal(input.amount),

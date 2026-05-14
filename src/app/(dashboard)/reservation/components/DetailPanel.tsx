@@ -215,6 +215,7 @@ export default function DetailPanel({
     endDate:     string | null;
     status:      string;
     notes:       string | null;
+    product:     { id: string; code: string; name: string } | null;
   }
   const [recurringCharges,      setRecurringCharges]      = useState<RecurringChargeRow[]>([]);
   const [recurringLoading,      setRecurringLoading]      = useState(false);
@@ -222,14 +223,18 @@ export default function DetailPanel({
   const [recurringCancelId,     setRecurringCancelId]     = useState<string | null>(null);
   const [recurringCancelBusy,   setRecurringCancelBusy]   = useState(false);
   // Add form state
-  const [rcChargeType,  setRcChargeType]  = useState<'EXTRA_SERVICE' | 'OTHER'>('EXTRA_SERVICE');
-  const [rcDescription, setRcDescription] = useState('');
-  const [rcAmount,      setRcAmount]      = useState('');
-  const [rcStartDate,   setRcStartDate]   = useState(new Date().toISOString().slice(0, 10));
-  const [rcEndDate,     setRcEndDate]     = useState('');
-  const [rcForever,     setRcForever]     = useState(true);
-  const [rcNotes,       setRcNotes]       = useState('');
-  const [rcAddBusy,     setRcAddBusy]     = useState(false);
+  const [rcChargeType,        setRcChargeType]        = useState<'EXTRA_SERVICE' | 'OTHER'>('EXTRA_SERVICE');
+  const [rcDescription,       setRcDescription]       = useState('');
+  const [rcAmount,            setRcAmount]            = useState('');
+  const [rcStartDate,         setRcStartDate]         = useState(new Date().toISOString().slice(0, 10));
+  const [rcEndDate,           setRcEndDate]           = useState('');
+  const [rcForever,           setRcForever]           = useState(true);
+  const [rcNotes,             setRcNotes]             = useState('');
+  const [rcAddBusy,           setRcAddBusy]           = useState(false);
+  // Product picker state for recurring charges
+  const [recProducts,         setRecProducts]         = useState<{ id: string; name: string; price: number; unit?: string; code: string }[]>([]);
+  const [recSearch,           setRecSearch]           = useState('');
+  const [recPendingProductId, setRecPendingProductId] = useState<string | undefined>(undefined);
 
   // ── Billing tab: inline payment form ──────────────────────────────────────
   // Phase 6.8 — track WHICH invoice is currently being paid (was a single
@@ -388,6 +393,9 @@ export default function DetailPanel({
     setRcEndDate('');
     setRcForever(true);
     setRcNotes('');
+    setRecProducts([]);
+    setRecSearch('');
+    setRecPendingProductId(undefined);
     setBillingPayMethod('cash');
     setBillingCashSessId(null);
     setError('');
@@ -437,6 +445,21 @@ export default function DetailPanel({
       .catch(() => {});
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceStep]);
+
+  // Fetch product catalogue when the recurring-charge add form opens
+  useEffect(() => {
+    if (!recurringAddOpen) return;
+    fetch('/api/products')
+      .then(r => r.json())
+      .then((products: { id: string; code: string; name: string; price: number; unit?: string; active: boolean }[]) => {
+        setRecProducts(products.filter(p => p.active).map(p => ({
+          id: p.id, code: p.code, name: p.name,
+          price: Number(p.price), unit: p.unit ?? undefined,
+        })));
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recurringAddOpen]);
 
   // Auto-fetch current open cash session for add-service payment
   useEffect(() => {
@@ -793,6 +816,7 @@ export default function DetailPanel({
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          productId:   recPendingProductId || undefined,
           chargeType:  rcChargeType,
           description: rcDescription.trim(),
           amount,
@@ -810,6 +834,9 @@ export default function DetailPanel({
       setRcForever(true);
       setRcEndDate('');
       setRcNotes('');
+      setRecProducts([]);
+      setRecSearch('');
+      setRecPendingProductId(undefined);
       await loadRecurringCharges(booking.id);
     } catch (err) {
       toast.error('เพิ่มบริการไม่สำเร็จ', err instanceof Error ? err.message : undefined);
@@ -2985,13 +3012,91 @@ export default function DetailPanel({
                               ))}
                             </div>
                           </div>
-                          {/* description */}
+
+                          {/* ── Product picker ─────────────────────────────── */}
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--text-secondary)' }}>เลือกจากแคตตาล็อก</div>
+                            {/* Search bar */}
+                            <input
+                              type="text"
+                              placeholder="🔍 ค้นหาสินค้า/บริการ..."
+                              value={recSearch}
+                              onChange={e => setRecSearch(e.target.value)}
+                              style={{
+                                width: '100%', boxSizing: 'border-box',
+                                padding: '6px 10px', borderRadius: 7,
+                                border: '1.5px solid #d1d5db', fontSize: 12,
+                                fontFamily: FONT, outline: 'none', marginBottom: 4,
+                                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                              }}
+                            />
+                            {/* Product list */}
+                            <div style={{ maxHeight: 140, overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: 7 }}>
+                              {recProducts.length === 0 ? (
+                                <div style={{ padding: '10px 12px', fontSize: 11, color: '#9ca3af', textAlign: 'center' }}>กำลังโหลด...</div>
+                              ) : (() => {
+                                const filtered = recProducts.filter(p =>
+                                  p.name.toLowerCase().includes(recSearch.toLowerCase()),
+                                );
+                                return filtered.length === 0 ? (
+                                  <div style={{ padding: '10px 12px', fontSize: 11, color: '#9ca3af', textAlign: 'center' }}>ไม่พบสินค้า</div>
+                                ) : filtered.map((p, idx) => {
+                                  const isSelected = recPendingProductId === p.id;
+                                  return (
+                                    <div
+                                      key={p.id}
+                                      onClick={() => {
+                                        setRecPendingProductId(p.id);
+                                        setRcDescription(p.name);
+                                        setRcAmount(String(p.price));
+                                      }}
+                                      style={{
+                                        padding: '6px 10px', cursor: 'pointer', fontSize: 12,
+                                        borderBottom: '1px solid #f3f4f6',
+                                        background: isSelected ? '#dcfce7' : idx % 2 === 0 ? '#fff' : 'var(--surface-subtle)',
+                                        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                      }}
+                                    >
+                                      <div>
+                                        <span style={{ fontWeight: isSelected ? 700 : 500, color: isSelected ? '#15803d' : 'var(--text-primary)' }}>
+                                          {p.name}
+                                        </span>
+                                        {p.unit && <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>/ {p.unit}</span>}
+                                        <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 6 }}>[{p.code}]</span>
+                                      </div>
+                                      <span style={{ fontSize: 11, fontWeight: 600, color: '#374151', flexShrink: 0 }}>
+                                        ฿{fmtBaht(p.price)}
+                                      </span>
+                                    </div>
+                                  );
+                                });
+                              })()}
+                            </div>
+                          </div>
+
+                          {/* ── Manual override / selected fields ──────────── */}
                           <div style={{ marginBottom: 6 }}>
-                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>ชื่อบริการ *</div>
+                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>
+                              ชื่อบริการ *
+                              {recPendingProductId && (
+                                <span style={{ fontWeight: 400, color: '#15803d', marginLeft: 6 }}>
+                                  (จากแคตตาล็อก — แก้ไขได้)
+                                </span>
+                              )}
+                            </div>
                             <input
                               type="text"
                               value={rcDescription}
-                              onChange={e => setRcDescription(e.target.value)}
+                              onChange={e => {
+                                setRcDescription(e.target.value);
+                                // Clear product link when user manually types a different name
+                                if (recPendingProductId) {
+                                  const selectedProduct = recProducts.find(p => p.id === recPendingProductId);
+                                  if (selectedProduct && e.target.value !== selectedProduct.name) {
+                                    setRecPendingProductId(undefined);
+                                  }
+                                }
+                              }}
                               placeholder="เช่น เช่า TV, Internet"
                               style={{
                                 width: '100%', boxSizing: 'border-box',
@@ -3111,7 +3216,19 @@ export default function DetailPanel({
                               }}
                             >
                               <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{rc.description}</div>
+                                <div style={{ fontWeight: 700, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                                  {rc.product && (
+                                    <span style={{
+                                      fontSize: 10, fontWeight: 700,
+                                      padding: '1px 5px', borderRadius: 4,
+                                      background: '#dbeafe', color: '#1d4ed8',
+                                      flexShrink: 0,
+                                    }}>
+                                      {rc.product.code}
+                                    </span>
+                                  )}
+                                  {rc.description}
+                                </div>
                                 <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 1 }}>
                                   ฿{fmtBaht(rc.amount)}/รอบ
                                   {' · '}เริ่ม {fmtDate(rc.startDate)}

@@ -12,6 +12,7 @@
  *
  * POST body:
  *   {
+ *     productId?:  string (UUID, optional — links to Product catalog),
  *     chargeType:  'EXTRA_SERVICE' | 'OTHER',
  *     description: string (1–200 chars),
  *     amount:      number (positive, ≤ 1_000_000),
@@ -21,6 +22,7 @@
  *   }
  *
  * Returns 201 { ok: true, id } on success.
+ * GET response includes product: { id, code, name } | null for badge display.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -70,6 +72,9 @@ export async function GET(
         createdAt:   true,
         cancelledAt: true,
         cancelledBy: true,
+        product: {
+          select: { id: true, code: true, name: true },
+        },
       },
     });
 
@@ -86,6 +91,7 @@ export async function GET(
       createdAt:   c.createdAt.toISOString(),
       cancelledAt: c.cancelledAt ? c.cancelledAt.toISOString() : null,
       cancelledBy: c.cancelledBy,
+      product:     c.product ?? null,
     }));
 
     return NextResponse.json(result);
@@ -98,6 +104,7 @@ export async function GET(
 // ─── POST Zod schema ──────────────────────────────────────────────────────────
 
 const CreateBody = z.object({
+  productId:   z.string().uuid().optional(),
   chargeType:  z.enum(['EXTRA_SERVICE', 'OTHER']),
   description: z.string().min(1).max(200),
   amount:      z.number().positive().max(1_000_000),
@@ -151,6 +158,7 @@ export async function POST(
     const result = await prisma.$transaction(async (tx) => {
       return createRecurringCharge(tx, {
         bookingId,
+        productId:   body.productId,
         chargeType:  body.chargeType,
         description: body.description,
         amount:      body.amount,
