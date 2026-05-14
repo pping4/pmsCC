@@ -153,6 +153,9 @@ export async function POST(
   }
 
   // ── 3. Double-payment guard ───────────────────────────────────────────────
+  // `now` / `nights` / `stayTotal` are declared here because they are also
+  // used further down (idempotency key, paymentDate, dueDate, addCharge for
+  // the initial monthly room line). Do NOT move them inside the guard block.
   const now = new Date();
 
   const nights =
@@ -171,19 +174,34 @@ export async function POST(
       ? Number(booking.rate) * nights
       : Number(booking.rate);
 
-  const totalAlreadyPaid = booking.invoices
-    .filter(inv => inv.status === 'paid')
-    .reduce((s, inv) => s + Number(inv.paidAmount ?? 0), 0);
+  // Skip the guard when:
+  // (a) targetInvoiceId is provided — per-invoice flow validates against the
+  //     specific invoice's outstanding balance inside the transaction, so a
+  //     cumulative-paid check here is both wrong and redundant.
+  // (b) booking is monthly — monthly stays generate multiple cycle invoices
+  //     (INV-MN-*, INV-EX, etc.) that are each paid independently.
+  //     totalAlreadyPaid legitimately exceeds stayTotal (= 1 month's rate)
+  //     after the first cycle is settled, which would falsely block cycle 2+.
+  // Daily bookings without a targetInvoiceId still get the original guard.
+  const isPerInvoiceFlow = targetInvoiceId !== undefined;
+  const isMonthly =
+    booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
 
-  if (totalAlreadyPaid >= stayTotal) {
-    return NextResponse.json(
-      {
-        error: 'การจองนี้ชำระเงินครบแล้ว',
-        alreadyPaid: totalAlreadyPaid,
-        stayTotal,
-      },
-      { status: 409 },
-    );
+  if (!isPerInvoiceFlow && !isMonthly) {
+    const totalAlreadyPaid = booking.invoices
+      .filter(inv => inv.status === 'paid')
+      .reduce((s, inv) => s + Number(inv.paidAmount ?? 0), 0);
+
+    if (totalAlreadyPaid >= stayTotal) {
+      return NextResponse.json(
+        {
+          error: 'การจองนี้ชำระเงินครบแล้ว',
+          alreadyPaid: totalAlreadyPaid,
+          stayTotal,
+        },
+        { status: 409 },
+      );
+    }
   }
 
   // ── Determine invoice type by booking status ──────────────────────────────
@@ -296,8 +314,8 @@ export async function POST(
     // from UNBILLED items would either fail (no UNBILLED rows left) or
     // double-bill the customer.  Only fall back to createInvoiceFromFolio
     // when there is genuinely no outstanding invoice.
-    const isMonthly =
-      booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
+    // Note: `isMonthly` is declared at function scope (above the transaction)
+    // and is visible here via closure. No re-declaration needed.
 
     // Phase 6.8 — when caller passes targetInvoiceId, restrict allocation to
     // THAT invoice only (per-invoice bill-tab flow). Otherwise the legacy
