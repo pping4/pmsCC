@@ -1,730 +1,962 @@
-'use client';
-
 /**
- * /billing-cycle — Monthly Billing Cycle Dashboard
+ * /billing-cycle — Manager review UI for draft monthly invoices.
  *
- * Tabs:
- *  1. Generate Invoices — trigger monthly billing, see results
- *  2. Late Penalties    — preview + apply penalties for overdue invoices
- *  3. Contract Renewal  — extend a booking's contract
+ * Phase 3, Tasks 3.1 + 3.4 (monthly billing v2).
+ *
+ * Features:
+ *  - GoogleSheetTable<DraftRow> with full per-column filter / sort / global
+ *    search / row-count / export (per CLAUDE.md §5).
+ *  - Amber row highlight + disabled checkbox for rows that need a meter reading.
+ *  - Sticky bulk-action bar when ≥1 row is selected.
+ *  - Bulk Approve via POST /api/billing/drafts/approve (ConfirmDialog).
+ *  - Bulk Reject — sequential per-row POST /api/billing/drafts/[id]/reject
+ *    with progress counter (ConfirmDialog + reason textarea).
+ *  - ExpandRow toggle (Task 3.2 ExpandRow component rendered inline).
+ *  - ✏️ Edit button → EditDraftDialog (Task 3.3).
+ *  - 📊 Reading button (amber rows) → RecordReadingDialog (Task 3.5).
+ *
+ * Auth: client 'use client'; session role checked via useSession. The APIs
+ * enforce admin|manager server-side as the authoritative gate.
  */
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+'use client';
+
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
+import { FileText, CheckCircle, XCircle, BarChart2 } from 'lucide-react';
 import { fmtDate, fmtBaht } from '@/lib/date-format';
-import { useToast } from '@/components/ui';
-import { DataTable, type ColDef } from '@/components/data-table';
+import { useToast, Dialog } from '@/components/ui';
+import {
+  GoogleSheetTable,
+  type ColDef,
+} from './components/GoogleSheetTable';
+import { ExpandRow } from './components/ExpandRow';
+import { EditDraftDialog } from './components/EditDraftDialog';
+import { RecordReadingDialog } from './components/RecordReadingDialog';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── API types ────────────────────────────────────────────────────────────────
 
-interface GenerateResult {
-  status:        'created' | 'skipped' | 'error';
-  bookingId:     string;
-  roomNumber:    string;
-  invoiceNumber?: string;
-  amount?:       number;
-  reason?:       string;
+interface PaymentBehavior {
+  onTime:      number;
+  late:        number;
+  avgDaysLate: number;
 }
 
-interface GenerateSummary {
-  created: number;
-  skipped: number;
-  errors:  number;
-  results: GenerateResult[];
-}
-
-interface PenaltyPreview {
+interface ApiDraftRow {
   invoiceId:       string;
   invoiceNumber:   string;
+  bookingId:       string | null;
+  bookingNumber:   string;
   guestName:       string;
   roomNumber:      string;
-  daysOverdue:     number;
-  originalAmount:  number;
-  penaltyAmount:   number;
-  alreadyPenalised: boolean;
+  contractNumber:  string | null;
+  cycle:           'rolling' | 'calendar';
+  cycleIndex:      number;
+  periodStart:     string;
+  periodEnd:       string;
+  rentAmount:      number;
+  waterAmount:     number;
+  electricAmount:  number;
+  grandTotal:      number;
+  needsReading:    boolean;
+  paymentBehavior: PaymentBehavior;
 }
 
-interface PenaltyData {
-  dailyRate:     number;
-  totalInvoices: number;
-  totalPenalty:  number;
-  penalties:     PenaltyPreview[];
+interface ApiDraftsResponse {
+  drafts: ApiDraftRow[];
+  total:  number;
+}
+
+// ─── Flat row fed to GoogleSheetTable ─────────────────────────────────────────
+
+interface DraftRow {
+  invoiceId:       string;
+  invoiceNumber:   string;
+  bookingId:       string;
+  bookingNumber:   string;
+  guestName:       string;
+  roomNumber:      string;
+  contractNumber:  string | null;
+  cycle:           'rolling' | 'calendar';
+  cycleLabel:      string;
+  cycleIndex:      number;
+  period:          string;      // "YYYY-MM-DD – YYYY-MM-DD"
+  periodStart:     string;
+  periodEnd:       string;
+  rentAmount:      number;
+  waterAmount:     number;
+  electricAmount:  number;
+  grandTotal:      number;
+  needsReading:    boolean;
+  payBehaviorLabel: string;     // for filter / display
+  payOnTime:       number;
+  payLate:         number;
+  payAvgDaysLate:  number;
+  /** underlying room-id for RecordReadingDialog — same booking owns the room */
+  roomId:          string | null;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function baht(n: number): string {
-  return fmtBaht(n);
-}
+const CYCLE_META: Record<'rolling' | 'calendar', { label: string; fg: string; bg: string }> = {
+  rolling:  { label: 'Rolling',  fg: '#92400e', bg: '#fffbeb' }, // amber
+  calendar: { label: 'Calendar', fg: '#6d28d9', bg: '#f5f3ff' }, // purple
+};
 
-// ─── Main Component ───────────────────────────────────────────────────────────
-
-export default function BillingCyclePage() {
-  const [tab, setTab] = useState<'generate' | 'penalties' | 'renewal'>('generate');
-
+function CycleBadge({ cycle }: { cycle: 'rolling' | 'calendar' }) {
+  const m = CYCLE_META[cycle];
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-4">
-      <h1 className="text-2xl font-bold text-gray-800">📋 รอบบิลรายเดือน</h1>
-
-      {/* Tab bar */}
-      <div className="flex gap-1 bg-gray-100 p-1 rounded-xl w-fit">
-        {([
-          { key: 'generate',  label: '🗓️ ออกบิล' },
-          { key: 'penalties', label: '⚠️ ค่าปรับ' },
-          { key: 'renewal',   label: '📝 ต่อสัญญา' },
-        ] as const).map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-              tab === t.key
-                ? 'bg-white text-blue-700 shadow-sm'
-                : 'text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {tab === 'generate'  && <GenerateTab />}
-      {tab === 'penalties' && <PenaltiesTab />}
-      {tab === 'renewal'   && <RenewalTab />}
-    </div>
+    <span style={{
+      display: 'inline-flex', alignItems: 'center',
+      padding: '2px 8px', borderRadius: 10,
+      fontSize: 11, fontWeight: 700,
+      background: m.bg, color: m.fg,
+    }}>
+      {m.label}
+    </span>
   );
 }
 
-// ─── Tab 1: Generate Monthly Invoices ─────────────────────────────────────────
-
-function GenerateTab() {
-  const toast = useToast();
-  const [loading,  setLoading]  = useState(false);
-  const [result,   setResult]   = useState<GenerateSummary | null>(null);
-  const [error,    setError]    = useState('');
-  const [date,     setDate]     = useState(new Date().toISOString().split('T')[0]);
-
-  // DataTable columns for generate results
-  type GenColKey = 'roomNumber' | 'invoiceNumber' | 'amount' | 'status' | 'reason';
-  const genColumns: ColDef<GenerateResult, GenColKey>[] = useMemo(() => [
-    {
-      key: 'roomNumber', label: 'ห้อง', minW: 80,
-      getValue: r => r.roomNumber,
-      render:   r => <span className="font-medium text-gray-700">{r.roomNumber}</span>,
-    },
-    {
-      key: 'invoiceNumber', label: 'เลขที่บิล', minW: 160,
-      getValue: r => r.invoiceNumber ?? '—',
-      render:   r => <span className="text-gray-600">{r.invoiceNumber ?? '—'}</span>,
-    },
-    {
-      key: 'amount', label: 'จำนวนเงิน', align: 'right', minW: 110,
-      getValue: r => r.amount != null ? String(Math.round(r.amount * 100)).padStart(14, '0') : '__none__',
-      getLabel: r => r.amount != null ? `฿${fmtBaht(r.amount)}` : '—',
-      aggregate: 'sum',
-      aggValue:  r => r.amount ?? 0,
-      render:    r => <span className="text-gray-700">{r.amount != null ? `฿${fmtBaht(r.amount)}` : '—'}</span>,
-    },
-    {
-      key: 'status', label: 'สถานะ', align: 'center', minW: 110,
-      getValue: r => r.status,
-      getLabel: r => r.status === 'created' ? 'สร้างแล้ว' : r.status === 'skipped' ? 'ข้าม' : 'Error',
-      render:   r => r.status === 'created'
-        ? <span className="text-xs font-medium text-green-700 bg-green-100 px-2 py-0.5 rounded-full">✅ สร้างแล้ว</span>
-        : r.status === 'skipped'
-          ? <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">⏭️ ข้าม</span>
-          : <span className="text-xs font-medium text-red-600 bg-red-50 px-2 py-0.5 rounded-full">❌ Error</span>,
-    },
-    {
-      key: 'reason', label: 'หมายเหตุ', minW: 180,
-      getValue: r => r.reason ?? '',
-      render:   r => <span className="text-xs text-gray-400">{r.reason ?? ''}</span>,
-    },
-  ], []);
-
-  const handleGenerate = async () => {
-    if (loading) return;
-    setError('');
-    setResult(null);
-    setLoading(true);
-    try {
-      const res  = await fetch('/api/billing/generate-monthly', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ billingDate: date }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
-      setResult(data as GenerateSummary);
-      toast.success('ออกบิลรายเดือนสำเร็จ', `สร้าง ${data.created} / ข้าม ${data.skipped} / ผิดพลาด ${data.errors}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
-      setError(msg);
-      toast.error('ออกบิลรายเดือนไม่สำเร็จ', msg);
-    } finally {
-      setLoading(false);
-    }
-  };
-
+function KpiCard({
+  icon, iconBg, title, value, subtitle,
+}: {
+  icon: React.ReactNode; iconBg: string;
+  title: string; value: string | number; subtitle?: string;
+}) {
   return (
-    <div className="space-y-5">
-      {/* Control panel */}
-      <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
-        <h2 className="text-sm font-semibold text-gray-700">ออกบิลรายเดือนสำหรับผู้เช่าทุกห้อง</h2>
-        <p className="text-xs text-gray-500">
-          ระบบจะออกบิลให้ผู้เช่ารายเดือนทุกรายที่ check-in อยู่ โดยใช้วันที่ออกบิลเป็นฐาน
-          การรันซ้ำจะไม่สร้างบิลซ้ำ (idempotent)
-        </p>
-
-        <div className="flex gap-3 items-end">
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">วันที่ออกบิล</label>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-            />
-          </div>
-          <button
-            onClick={handleGenerate}
-            disabled={loading}
-            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white font-medium px-6 py-2 rounded-lg text-sm transition"
-          >
-            {loading ? 'กำลังออกบิล...' : '🗓️ ออกบิลรายเดือน'}
-          </button>
+    <div className="pms-card pms-transition" style={{
+      borderRadius: 12, padding: '16px 18px',
+      border: '1px solid var(--border-default)',
+      flex: '1 1 180px', minWidth: 160,
+      display: 'flex', justifyContent: 'space-between',
+      alignItems: 'flex-start', gap: 12,
+    }}>
+      <div style={{ flex: 1 }}>
+        <div style={{
+          fontSize: 10, color: 'var(--text-muted)', fontWeight: 600,
+          marginBottom: 5, textTransform: 'uppercase', letterSpacing: 0.5,
+        }}>
+          {title}
         </div>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
+        <div style={{ fontSize: 24, fontWeight: 800, color: 'var(--text-primary)', lineHeight: 1 }}>
+          {value}
+        </div>
+        {subtitle && (
+          <div style={{ marginTop: 5, fontSize: 11, color: 'var(--text-faint)' }}>
+            {subtitle}
           </div>
         )}
       </div>
-
-      {/* Results */}
-      {result && (
-        <div className="space-y-4">
-          {/* Summary cards */}
-          <div className="grid grid-cols-3 gap-4">
-            <div className="bg-green-50 border border-green-200 rounded-xl p-4 text-center">
-              <p className="text-xs text-green-600">สร้างบิลใหม่</p>
-              <p className="text-3xl font-bold text-green-700">{result.created}</p>
-            </div>
-            <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 text-center">
-              <p className="text-xs text-gray-500">ข้ามแล้ว</p>
-              <p className="text-3xl font-bold text-gray-600">{result.skipped}</p>
-            </div>
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center">
-              <p className="text-xs text-red-500">ข้อผิดพลาด</p>
-              <p className="text-3xl font-bold text-red-600">{result.errors}</p>
-            </div>
-          </div>
-
-          {/* Detail table */}
-          <DataTable<GenerateResult, GenColKey>
-            tableKey="billing-cycle.generate"
-            rows={result.results}
-            columns={genColumns}
-            rowKey={r => r.bookingId}
-            emptyText="ไม่มีรายการ"
-          />
-        </div>
-      )}
+      <div style={{
+        width: 40, height: 40, borderRadius: 9,
+        background: iconBg,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        flexShrink: 0,
+      }}>
+        {icon}
+      </div>
     </div>
   );
 }
 
-// ─── Tab 2: Late Penalties ────────────────────────────────────────────────────
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
-function PenaltiesTab() {
-  const toast = useToast();
-  const [data,       setData]       = useState<PenaltyData | null>(null);
-  const [loading,    setLoading]    = useState(false);
-  const [applying,   setApplying]   = useState(false);
-  const [selected,   setSelected]   = useState<Set<string>>(new Set());
-  const [rateInput,  setRateInput]  = useState('1.5');     // % per month
-  const [error,      setError]      = useState('');
-  const [success,    setSuccess]    = useState('');
+export default function BillingCyclePage() {
+  const router  = useRouter();
+  const toast   = useToast();
+  const { data: session } = useSession();
 
-  const dailyRate = parseFloat(rateInput) / 100 / 30;
+  // ── Data ─────────────────────────────────────────────────────────────────
+  const [rows,       setRows]       = useState<DraftRow[]>([]);
+  const [loading,    setLoading]    = useState(true);
+  const [reloadTick, setReloadTick] = useState(0);
 
-  const fetchPreviews = useCallback(async () => {
-    setError('');
-    setLoading(true);
-    try {
-      const res  = await fetch(`/api/billing/penalties?dailyRate=${dailyRate}`);
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
-      setData(json as PenaltyData);
-      setSelected(new Set()); // reset selection
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
-      setError(msg);
-      toast.error('โหลดค่าปรับไม่สำเร็จ', msg);
-    } finally {
-      setLoading(false);
+  // ── Selection ────────────────────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // ── Expand row ───────────────────────────────────────────────────────────
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  // ── Edit dialog ──────────────────────────────────────────────────────────
+  const [editDraft, setEditDraft] = useState<DraftRow | null>(null);
+
+  // ── Record reading dialog ────────────────────────────────────────────────
+  const [readingDraft, setReadingDraft] = useState<DraftRow | null>(null);
+
+  // ── Approve confirm ───────────────────────────────────────────────────────
+  const [approveOpen,   setApproveOpen]   = useState(false);
+  const [approveLoading, setApproveLoading] = useState(false);
+
+  // ── Reject confirm ────────────────────────────────────────────────────────
+  const [rejectOpen,    setRejectOpen]    = useState(false);
+  const [rejectReason,  setRejectReason]  = useState('');
+  const [rejectLoading, setRejectLoading] = useState(false);
+  const [rejectProgress, setRejectProgress] = useState<{ done: number; total: number } | null>(null);
+
+  // ─── Redirect unauthorised users ─────────────────────────────────────────
+  useEffect(() => {
+    if (session === null) {
+      // session is null only after next-auth fully resolves with no session
+      router.replace('/login');
     }
-  }, [dailyRate, toast]);
+  }, [session, router]);
 
-  useEffect(() => { fetchPreviews(); }, [fetchPreviews]);
+  // ─── Fetch drafts ─────────────────────────────────────────────────────────
+  const fetchDrafts = useCallback(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch('/api/billing/drafts?limit=500')
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json() as Promise<ApiDraftsResponse>;
+      })
+      .then(data => {
+        if (cancelled) return;
+        const mapped: DraftRow[] = (data.drafts ?? []).map(d => ({
+          invoiceId:        d.invoiceId,
+          invoiceNumber:    d.invoiceNumber,
+          bookingId:        d.bookingId ?? '',
+          bookingNumber:    d.bookingNumber,
+          guestName:        d.guestName,
+          roomNumber:       d.roomNumber,
+          contractNumber:   d.contractNumber,
+          cycle:            d.cycle,
+          cycleLabel:       CYCLE_META[d.cycle].label,
+          cycleIndex:       d.cycleIndex,
+          period:           `${d.periodStart} – ${d.periodEnd}`,
+          periodStart:      d.periodStart,
+          periodEnd:        d.periodEnd,
+          rentAmount:       d.rentAmount,
+          waterAmount:      d.waterAmount,
+          electricAmount:   d.electricAmount,
+          grandTotal:       d.grandTotal,
+          needsReading:     d.needsReading,
+          payBehaviorLabel: d.paymentBehavior.late > 0
+            ? `จ่ายช้า ${d.paymentBehavior.late} รอบ`
+            : 'ตรงเวลา',
+          payOnTime:       d.paymentBehavior.onTime,
+          payLate:         d.paymentBehavior.late,
+          payAvgDaysLate:  d.paymentBehavior.avgDaysLate,
+          roomId:          null, // Not in API — dialog will derive from bookingId
+        }));
+        setRows(mapped);
+      })
+      .catch(err => {
+        if (cancelled) return;
+        toast.error('โหลด draft invoices ไม่สำเร็จ', err instanceof Error ? err.message : undefined);
+        setRows([]);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [toast]);
 
-  // DataTable columns for penalty preview table
-  type PenColKey = 'check' | 'roomNumber' | 'guestName' | 'invoiceNumber' | 'daysOverdue' | 'originalAmount' | 'penaltyAmount';
-  const penColumns: ColDef<PenaltyPreview, PenColKey>[] = useMemo(() => [
+  useEffect(() => {
+    const cancel = fetchDrafts();
+    return cancel;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reloadTick]);
+
+  const refetch = useCallback(() => setReloadTick(n => n + 1), []);
+
+  // ─── KPIs ──────────────────────────────────────────────────────────────────
+  const kpis = useMemo(() => {
+    const total        = rows.length;
+    const needsReading = rows.filter(r => r.needsReading).length;
+    const ready        = total - needsReading;
+    const grandSum     = rows.reduce((s, r) => s + r.grandTotal, 0);
+    return { total, needsReading, ready, grandSum };
+  }, [rows]);
+
+  // ─── Bulk selection helpers ───────────────────────────────────────────────
+  const selectableIds = useMemo(
+    () => rows.filter(r => !r.needsReading).map(r => r.invoiceId),
+    [rows],
+  );
+
+  const toggleRow = useCallback((invoiceId: string, blocked: boolean) => {
+    if (blocked) return;
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(invoiceId)) next.delete(invoiceId);
+      else next.add(invoiceId);
+      return next;
+    });
+  }, []);
+
+  const toggleAll = useCallback(() => {
+    setSelectedIds(prev =>
+      prev.size === selectableIds.length
+        ? new Set()
+        : new Set(selectableIds),
+    );
+  }, [selectableIds]);
+
+  // ─── Approved selection stats ─────────────────────────────────────────────
+  const selectedRows = useMemo(
+    () => rows.filter(r => selectedIds.has(r.invoiceId)),
+    [rows, selectedIds],
+  );
+  const selectedTotal = useMemo(
+    () => selectedRows.reduce((s, r) => s + r.grandTotal, 0),
+    [selectedRows],
+  );
+
+  // ─── Approve handler ──────────────────────────────────────────────────────
+  const handleApprove = async () => {
+    // Filter out any needsReading rows that slipped through selection
+    const approveIds = selectedRows
+      .filter(r => !r.needsReading)
+      .map(r => r.invoiceId);
+
+    if (approveIds.length === 0) {
+      toast.warning('ไม่มีรายการที่สามารถ approve ได้');
+      setApproveOpen(false);
+      return;
+    }
+
+    setApproveLoading(true);
+    try {
+      const res = await fetch('/api/billing/drafts/approve', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ invoiceIds: approveIds }),
+      });
+      const data = await res.json().catch(() => ({})) as {
+        approved?: string[];
+        skipped?:  Array<{ id: string; reason: string }>;
+        error?:    string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      const approved = data.approved?.length ?? 0;
+      const skipped  = data.skipped?.length  ?? 0;
+
+      toast.success(
+        `Approve สำเร็จ ${approved} รายการ`,
+        skipped > 0 ? `ข้าม ${skipped} รายการ (ต้องจดมิเตอร์)` : undefined,
+      );
+
+      // If some were skipped keep only those in selection
+      if (skipped > 0 && data.skipped) {
+        const skippedIds = new Set(data.skipped.map(s => s.id));
+        setSelectedIds(skippedIds);
+      } else {
+        setSelectedIds(new Set());
+      }
+
+      setApproveOpen(false);
+      refetch();
+    } catch (err) {
+      toast.error('Approve ไม่สำเร็จ', err instanceof Error ? err.message : undefined);
+    } finally {
+      setApproveLoading(false);
+    }
+  };
+
+  // ─── Reject handler ───────────────────────────────────────────────────────
+  const handleReject = async () => {
+    const ids = selectedRows.map(r => r.invoiceId);
+    if (ids.length === 0) { setRejectOpen(false); return; }
+    if (rejectReason.trim().length < 5) {
+      toast.warning('กรุณาระบุเหตุผลอย่างน้อย 5 ตัวอักษร');
+      return;
+    }
+
+    setRejectLoading(true);
+    setRejectProgress({ done: 0, total: ids.length });
+
+    let successCount = 0;
+    let failCount    = 0;
+
+    for (let i = 0; i < ids.length; i++) {
+      setRejectProgress({ done: i + 1, total: ids.length });
+      try {
+        const res = await fetch(`/api/billing/drafts/${ids[i]}/reject`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ reason: rejectReason.trim() }),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(d.error ?? `HTTP ${res.status}`);
+        }
+        successCount++;
+      } catch (err) {
+        failCount++;
+        console.error(`Reject ${ids[i]}:`, err);
+      }
+    }
+
+    setRejectLoading(false);
+    setRejectProgress(null);
+    setRejectOpen(false);
+    setRejectReason('');
+
+    toast.success(
+      `Reject สำเร็จ ${successCount} รายการ`,
+      failCount > 0 ? `ล้มเหลว ${failCount} รายการ` : undefined,
+    );
+    setSelectedIds(new Set());
+    refetch();
+  };
+
+  // ─── Columns ──────────────────────────────────────────────────────────────
+  type ColKey =
+    | 'select' | 'room' | 'cycle' | 'period'
+    | 'rent' | 'water' | 'electric' | 'total'
+    | 'payBehavior' | 'actions';
+
+  const columns: ColDef<DraftRow, ColKey>[] = useMemo(() => [
     {
-      key: 'check', label: '', minW: 36, align: 'center', noFilter: true,
+      key: 'select', label: '', minW: 44, noFilter: true, align: 'center',
       getValue: () => '',
-      render: p => (
-        <input
-          type="checkbox"
-          checked={selected.has(p.invoiceId)}
-          onChange={() => setSelected(prev => {
-            const next = new Set(prev);
-            if (next.has(p.invoiceId)) next.delete(p.invoiceId); else next.add(p.invoiceId);
-            return next;
-          })}
-          onClick={e => e.stopPropagation()}
-          className="rounded"
-        />
+      render: row => {
+        const blocked = row.needsReading;
+        return (
+          <div
+            title={blocked ? 'ต้องจดมิเตอร์ก่อน' : undefined}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <input
+              type="checkbox"
+              checked={selectedIds.has(row.invoiceId)}
+              disabled={blocked}
+              onChange={() => toggleRow(row.invoiceId, blocked)}
+              onClick={e => e.stopPropagation()}
+              style={{ cursor: blocked ? 'not-allowed' : 'pointer', accentColor: '#1e40af' }}
+            />
+          </div>
+        );
+      },
+    },
+    {
+      key: 'room', label: 'ห้อง / ผู้เช่า', minW: 200,
+      getValue: r => `${r.roomNumber} ${r.guestName} ${r.contractNumber ?? ''} ${r.invoiceNumber}`,
+      render: row => (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpandedId(prev => prev === row.bookingId ? null : row.bookingId);
+          }}
+          style={{
+            background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+            ห้อง {row.roomNumber}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{row.guestName}</div>
+          {row.contractNumber && (
+            <div style={{
+              fontSize: 10, color: 'var(--text-muted)',
+              fontFamily: 'monospace', marginTop: 1,
+            }}>
+              {row.contractNumber}
+            </div>
+          )}
+          <div style={{
+            marginTop: 2,
+            fontSize: 10,
+            color: expandedId === row.bookingId ? '#1e40af' : 'var(--text-faint)',
+          }}>
+            {expandedId === row.bookingId ? '▲ ซ่อน' : '▼ ประวัติ'}
+          </div>
+        </button>
       ),
     },
     {
-      key: 'roomNumber', label: 'ห้อง', minW: 80,
-      getValue: p => p.roomNumber,
-      render:   p => <span className="font-medium text-gray-700">{p.roomNumber}</span>,
+      key: 'cycle', label: 'รอบ', minW: 90, align: 'center',
+      getValue: r => r.cycleLabel,
+      render: row => <CycleBadge cycle={row.cycle} />,
     },
     {
-      key: 'guestName', label: 'ผู้เช่า', minW: 140,
-      getValue: p => p.guestName,
-      render:   p => <span className="text-gray-600">{p.guestName}</span>,
-    },
-    {
-      key: 'invoiceNumber', label: 'เลขที่บิล', minW: 150,
-      getValue: p => p.invoiceNumber,
-      render:   p => <span className="text-gray-500 text-xs">{p.invoiceNumber}</span>,
-    },
-    {
-      key: 'daysOverdue', label: 'เกิน (วัน)', align: 'center', minW: 90,
-      getValue: p => String(p.daysOverdue).padStart(5, '0'),
-      getLabel: p => String(p.daysOverdue),
-      render:   p => (
-        <span className={`font-bold ${p.daysOverdue > 30 ? 'text-red-600' : 'text-amber-600'}`}>
-          {p.daysOverdue}
+      key: 'period', label: 'ช่วงเวลา', minW: 180,
+      getValue: r => r.period,
+      render: row => (
+        <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
+          {fmtDate(row.periodStart)} – {fmtDate(row.periodEnd)}
         </span>
       ),
     },
     {
-      key: 'originalAmount', label: 'ยอดต้น', align: 'right', minW: 110,
-      getValue: p => String(Math.round(p.originalAmount * 100)).padStart(14, '0'),
-      getLabel: p => `฿${fmtBaht(p.originalAmount)}`,
+      key: 'rent', label: 'ค่าห้อง', align: 'right', minW: 100, noFilter: true,
+      getValue: r => String(Math.round(r.rentAmount * 100)).padStart(14, '0'),
+      getLabel: r => fmtBaht(r.rentAmount),
       aggregate: 'sum',
-      aggValue:  p => p.originalAmount,
-      render:    p => <span className="text-gray-700">฿{fmtBaht(p.originalAmount)}</span>,
+      aggValue:  r => r.rentAmount,
+      render: row => (
+        <span style={{ fontFamily: 'monospace', color: 'var(--text-primary)' }}>
+          {fmtBaht(row.rentAmount)}
+        </span>
+      ),
     },
     {
-      key: 'penaltyAmount', label: 'ค่าปรับ', align: 'right', minW: 110,
-      getValue: p => String(Math.round(p.penaltyAmount * 100)).padStart(14, '0'),
-      getLabel: p => `฿${fmtBaht(p.penaltyAmount)}`,
+      key: 'water', label: 'ค่าน้ำ', align: 'right', minW: 90, noFilter: true,
+      getValue: r => String(Math.round(r.waterAmount * 100)).padStart(14, '0'),
+      getLabel: r => fmtBaht(r.waterAmount),
       aggregate: 'sum',
-      aggValue:  p => p.penaltyAmount,
-      render:    p => <span className="font-medium text-red-600">฿{fmtBaht(p.penaltyAmount)}</span>,
+      aggValue:  r => r.waterAmount,
+      render: row => (
+        <span style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+          {row.waterAmount > 0 ? fmtBaht(row.waterAmount) : '—'}
+        </span>
+      ),
     },
-  ], [selected]);
-
-  const toggleAll = () => {
-    if (!data) return;
-    if (selected.size === data.penalties.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(data.penalties.map((p) => p.invoiceId)));
-    }
-  };
-
-  const handleApply = async () => {
-    if (applying) return;
-    if (selected.size === 0) {
-      toast.warning('กรุณาเลือกใบแจ้งหนี้อย่างน้อย 1 รายการ');
-      return;
-    }
-    setError('');
-    setSuccess('');
-    setApplying(true);
-    try {
-      const res  = await fetch('/api/billing/penalties', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          invoiceIds: Array.from(selected),
-          dailyRate,
-          penaltyNote: `ค่าปรับ — อัตรา ${rateInput}% ต่อเดือน`,
-        }),
-      });
-      const json = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
-      setSuccess(`✅ บันทึกค่าปรับ ${json.applied} รายการเรียบร้อย`);
-      toast.success('บันทึกค่าปรับสำเร็จ', `${json.applied} รายการ`);
-      fetchPreviews();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
-      setError(msg);
-      toast.error('บันทึกค่าปรับไม่สำเร็จ', msg);
-    } finally {
-      setApplying(false);
-    }
-  };
-
-  const totalSelected = data?.penalties
-    .filter((p) => selected.has(p.invoiceId))
-    .reduce((s, p) => s + p.penaltyAmount, 0) ?? 0;
-
-  return (
-    <div className="space-y-4">
-      {/* Controls */}
-      <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700">ค่าปรับสำหรับใบแจ้งหนี้เกินกำหนด</h2>
-        <div className="flex gap-3 items-end">
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">อัตราค่าปรับ (% ต่อเดือน)</label>
-            <input
-              type="number"
-              value={rateInput}
-              onChange={(e) => setRateInput(e.target.value)}
-              min="0"
-              max="100"
-              step="0.1"
-              className="w-28 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-            />
+    {
+      key: 'electric', label: 'ค่าไฟ', align: 'right', minW: 90, noFilter: true,
+      getValue: r => String(Math.round(r.electricAmount * 100)).padStart(14, '0'),
+      getLabel: r => fmtBaht(r.electricAmount),
+      aggregate: 'sum',
+      aggValue:  r => r.electricAmount,
+      render: row => (
+        <span style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>
+          {row.electricAmount > 0 ? fmtBaht(row.electricAmount) : '—'}
+        </span>
+      ),
+    },
+    {
+      key: 'total', label: 'รวม', align: 'right', minW: 110, noFilter: true,
+      getValue: r => String(Math.round(r.grandTotal * 100)).padStart(14, '0'),
+      getLabel: r => fmtBaht(r.grandTotal),
+      aggregate: 'sum',
+      aggValue:  r => r.grandTotal,
+      render: row => (
+        <span style={{ fontFamily: 'monospace', fontWeight: 700, color: 'var(--text-primary)' }}>
+          ฿{fmtBaht(row.grandTotal)}
+        </span>
+      ),
+    },
+    {
+      key: 'payBehavior', label: 'พฤติกรรมจ่าย', minW: 160,
+      getValue: r => r.payBehaviorLabel,
+      render: row => {
+        const isLate = row.payLate > 0;
+        return (
+          <div style={{ fontSize: 11 }}>
+            <span style={{ color: isLate ? '#c2410c' : '#16a34a', fontWeight: 600 }}>
+              {isLate ? '⚠️ จ่ายช้า' : '✓ ตรงเวลา'}
+            </span>
+            <span style={{ color: 'var(--text-muted)', marginLeft: 4 }}>
+              · {row.payOnTime + row.payLate} รอบ
+            </span>
+            {isLate && (
+              <span style={{ color: 'var(--text-muted)' }}>
+                {' '}· เฉลี่ย +{row.payAvgDaysLate} วัน
+              </span>
+            )}
           </div>
+        );
+      },
+    },
+    {
+      key: 'actions', label: '', minW: 80, noFilter: true, align: 'center',
+      getValue: () => '',
+      render: row => (
+        <div
+          style={{ display: 'flex', gap: 4, justifyContent: 'center' }}
+          onClick={e => e.stopPropagation()}
+        >
           <button
-            onClick={fetchPreviews}
-            disabled={loading}
-            className="bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium px-4 py-2 rounded-lg text-sm transition"
+            type="button"
+            title="แก้ไขบิล"
+            onClick={() => setEditDraft(row)}
+            style={{
+              background: 'var(--surface-subtle)',
+              border: '1px solid var(--border-default)',
+              borderRadius: 6, padding: '3px 7px',
+              cursor: 'pointer', fontSize: 14,
+            }}
           >
-            {loading ? 'กำลังโหลด...' : '🔄 คำนวณใหม่'}
+            ✏️
           </button>
-          {selected.size > 0 && (
+          {row.needsReading && (
             <button
-              onClick={handleApply}
-              disabled={applying}
-              className="bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-medium px-4 py-2 rounded-lg text-sm transition"
+              type="button"
+              title="จดมิเตอร์"
+              onClick={() => setReadingDraft(row)}
+              style={{
+                background: '#fffbeb',
+                border: '1px solid #fbbf24',
+                borderRadius: 6, padding: '3px 7px',
+                cursor: 'pointer', fontSize: 14,
+              }}
             >
-              {applying ? 'กำลังบันทึก...' : `⚠️ บันทึกค่าปรับ ${selected.size} รายการ (฿${baht(totalSelected)})`}
+              📊
             </button>
           )}
         </div>
+      ),
+    },
+  ], [selectedIds, toggleRow, expandedId]);
 
-        {error   && <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>}
-        {success && <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-2 rounded-lg text-sm">{success}</div>}
+  // ─── Render ───────────────────────────────────────────────────────────────
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+      {/* ── Page header ───────────────────────────────────────────────────── */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        flexWrap: 'wrap', gap: 10,
+      }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 800, color: 'var(--text-primary)' }}>
+            รีวิว Draft รายเดือน
+          </h1>
+          <p style={{ margin: '2px 0 0', fontSize: 12, color: 'var(--text-muted)' }}>
+            ตรวจสอบและ approve บิลรายเดือนก่อนส่งลูกค้า
+          </p>
+        </div>
       </div>
 
-      {/* Summary */}
-      {data && (
-        <div className="grid grid-cols-3 gap-4">
-          <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 text-center">
-            <p className="text-xs text-orange-600">ใบแจ้งหนี้เกินกำหนด</p>
-            <p className="text-3xl font-bold text-orange-700">{data.totalInvoices}</p>
-          </div>
-          <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center">
-            <p className="text-xs text-red-500">ค่าปรับรวม</p>
-            <p className="text-2xl font-bold text-red-700">฿{baht(data.totalPenalty)}</p>
-          </div>
-          <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
-            <p className="text-xs text-blue-600">เลือกแล้ว</p>
-            <p className="text-2xl font-bold text-blue-700">{selected.size} รายการ</p>
-          </div>
+      {/* ── KPI cards ─────────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+        <KpiCard
+          icon={<FileText size={18} color="#1d4ed8" />}
+          iconBg="#dbeafe"
+          title="Draft ทั้งหมด"
+          value={kpis.total}
+          subtitle="รายการรอรีวิว"
+        />
+        <KpiCard
+          icon={<CheckCircle size={18} color="#16a34a" />}
+          iconBg="#dcfce7"
+          title="พร้อม Approve"
+          value={kpis.ready}
+          subtitle="มีข้อมูลครบ"
+        />
+        <KpiCard
+          icon={<BarChart2 size={18} color="#d97706" />}
+          iconBg="#fef3c7"
+          title="ต้องจดมิเตอร์"
+          value={kpis.needsReading}
+          subtitle="ยังไม่มีค่าน้ำ/ไฟ"
+        />
+        <KpiCard
+          icon={<XCircle size={18} color="#6b7280" />}
+          iconBg="#f3f4f6"
+          title="ยอดรวมทั้งหมด"
+          value={`฿${fmtBaht(kpis.grandSum)}`}
+          subtitle="draft invoices"
+        />
+      </div>
+
+      {/* ── Bulk action bar ─────────────────────────────────────────────── */}
+      {selectedIds.size > 0 && (
+        <div style={{
+          position: 'sticky', top: 0, zIndex: 50,
+          background: '#1e3a8a',
+          color: '#fff',
+          borderRadius: 10,
+          padding: '10px 18px',
+          display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap',
+          boxShadow: '0 4px 20px rgba(30,58,138,0.35)',
+        }}>
+          <span style={{ fontWeight: 700, fontSize: 13 }}>
+            เลือก {selectedIds.size} รายการ · ฿{fmtBaht(selectedTotal)}
+          </span>
+          <div style={{ flex: 1 }} />
+
+          {/* Approve */}
+          <button
+            type="button"
+            onClick={() => setApproveOpen(true)}
+            style={{
+              background: '#22c55e', color: '#fff',
+              border: 'none', borderRadius: 7,
+              padding: '7px 16px', fontWeight: 700, fontSize: 13,
+              cursor: 'pointer',
+            }}
+          >
+            ✅ Approve
+          </button>
+
+          {/* Reject */}
+          <button
+            type="button"
+            onClick={() => setRejectOpen(true)}
+            style={{
+              background: '#ef4444', color: '#fff',
+              border: 'none', borderRadius: 7,
+              padding: '7px 16px', fontWeight: 700, fontSize: 13,
+              cursor: 'pointer',
+            }}
+          >
+            ❌ Reject
+          </button>
+
+          {/* PDF placeholder */}
+          <button
+            type="button"
+            onClick={() => toast.info('Coming soon', 'ดูบิลรวม PDF ยังไม่พร้อมใช้งาน')}
+            style={{
+              background: 'rgba(255,255,255,0.15)', color: '#fff',
+              border: '1px solid rgba(255,255,255,0.3)', borderRadius: 7,
+              padding: '7px 16px', fontWeight: 600, fontSize: 13,
+              cursor: 'pointer',
+            }}
+          >
+            📋 ดูบิลรวม
+          </button>
+
+          {/* Deselect all */}
+          <button
+            type="button"
+            onClick={() => setSelectedIds(new Set())}
+            style={{
+              background: 'transparent', color: 'rgba(255,255,255,0.7)',
+              border: 'none', fontSize: 13, cursor: 'pointer',
+            }}
+          >
+            ✕ ยกเลิกเลือก
+          </button>
         </div>
       )}
 
-      {/* Select-all bar */}
-      {data && data.penalties.length > 0 && (
-        <div className="flex items-center gap-2 text-xs text-gray-500">
+      {/* ── Select-all row ─────────────────────────────────────────────────── */}
+      {rows.length > 0 && !loading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-muted)' }}>
           <input
             type="checkbox"
-            checked={selected.size === data.penalties.length}
+            checked={selectableIds.length > 0 && selectedIds.size === selectableIds.length}
             onChange={toggleAll}
-            className="rounded"
+            disabled={selectableIds.length === 0}
+            style={{ cursor: selectableIds.length === 0 ? 'not-allowed' : 'pointer' }}
           />
-          เลือกทั้งหมด ({data.penalties.length})
+          <span>เลือกทั้งหมด ({selectableIds.length} รายการที่พร้อม approve)</span>
         </div>
       )}
 
-      {/* Table */}
-      {data && data.penalties.length > 0 && (
-        <DataTable<PenaltyPreview, PenColKey>
-          tableKey="billing-cycle.penalties"
-          rows={data.penalties}
-          columns={penColumns}
-          rowKey={p => p.invoiceId}
-          rowHighlight={p => selected.has(p.invoiceId) ? '#fffbeb' : undefined}
-          onRowClick={p => setSelected(prev => {
-            const next = new Set(prev);
-            if (next.has(p.invoiceId)) next.delete(p.invoiceId); else next.add(p.invoiceId);
-            return next;
-          })}
-          emptyText="ไม่มีใบเกินกำหนด"
+      {/* ── Table ─────────────────────────────────────────────────────────── */}
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 60, color: 'var(--text-faint)' }}>
+          กำลังโหลด...
+        </div>
+      ) : (
+        <GoogleSheetTable<DraftRow, ColKey>
+          tableKey="billing-cycle.drafts"
+          syncUrl
+          exportFilename="pms_billing_drafts"
+          exportSheetName="Draft Invoices"
+          rows={rows}
+          columns={columns}
+          rowKey={r => r.invoiceId}
+          defaultSort={{ col: 'room', dir: 'asc' }}
+          rowHighlight={r => r.needsReading ? '#fffbeb' : undefined}
+          emptyText="ไม่มี draft invoices ในขณะนี้"
+          summaryLabel={(f, t) => <>📋 Draft — {f}{f !== t ? `/${t}` : ''} รายการ</>}
+          summaryRight={filteredRows => {
+            const sum = filteredRows.reduce((s, r) => s + r.grandTotal, 0);
+            return (
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                รวม ฿{fmtBaht(sum)}
+              </span>
+            );
+          }}
+          groupByCols={['cycle', 'payBehavior']}
         />
       )}
 
-      {data && data.penalties.length === 0 && (
-        <div className="bg-green-50 border border-green-200 rounded-xl p-8 text-center text-green-700">
-          <p className="text-2xl mb-2">🎉</p>
-          <p className="font-medium">ไม่มีใบแจ้งหนี้เกินกำหนดชำระในขณะนี้</p>
+      {/* ── Expanded row ─────────────────────────────────────────────────── */}
+      {expandedId && (() => {
+        const dr = rows.find(r => r.bookingId === expandedId);
+        if (!dr) return null;
+        return (
+          <div style={{
+            border: '1px solid var(--border-default)',
+            borderRadius: 10,
+            overflow: 'hidden',
+            background: 'var(--surface-subtle)',
+          }}>
+            <div style={{
+              padding: '10px 16px',
+              borderBottom: '1px solid var(--border-light)',
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <span style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)' }}>
+                ประวัติ — ห้อง {dr.roomNumber} ({dr.guestName})
+              </span>
+              <button
+                type="button"
+                onClick={() => setExpandedId(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 16, color: 'var(--text-muted)' }}
+              >
+                ✕
+              </button>
+            </div>
+            <div style={{ padding: 16 }}>
+              <ExpandRow bookingId={expandedId} contractId={dr.contractNumber ?? undefined} />
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Approve ConfirmDialog ─────────────────────────────────────────── */}
+      <ApproveDialog
+        open={approveOpen}
+        count={selectedRows.filter(r => !r.needsReading).length}
+        totalAmount={selectedTotal}
+        loading={approveLoading}
+        onConfirm={handleApprove}
+        onCancel={() => setApproveOpen(false)}
+      />
+
+      {/* ── Reject Dialog (custom — needs textarea) ───────────────────────── */}
+      <Dialog
+        open={rejectOpen}
+        onClose={() => { if (!rejectLoading) { setRejectOpen(false); setRejectReason(''); } }}
+        title="Reject Draft Invoices"
+        size="md"
+        footer={
+          <>
+            <button
+              type="button"
+              onClick={() => { setRejectOpen(false); setRejectReason(''); }}
+              disabled={rejectLoading}
+              style={{
+                padding: '8px 18px', borderRadius: 7,
+                border: '1px solid var(--border-default)',
+                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                cursor: rejectLoading ? 'not-allowed' : 'pointer', fontWeight: 600,
+              }}
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleReject()}
+              disabled={rejectLoading || rejectReason.trim().length < 5}
+              style={{
+                padding: '8px 18px', borderRadius: 7,
+                background: rejectLoading || rejectReason.trim().length < 5 ? '#9ca3af' : '#ef4444',
+                color: '#fff', border: 'none',
+                cursor: rejectLoading || rejectReason.trim().length < 5 ? 'not-allowed' : 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              {rejectLoading
+                ? rejectProgress
+                  ? `กำลัง reject ${rejectProgress.done}/${rejectProgress.total}...`
+                  : 'กำลัง reject...'
+                : `❌ Reject ${selectedRows.length} รายการ`}
+            </button>
+          </>
+        }
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <p style={{ fontSize: 14, color: 'var(--text-secondary)', margin: 0 }}>
+            ต้องการ reject <strong>{selectedRows.length}</strong> รายการ ใช่หรือไม่?
+          </p>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6, display: 'block' }}>
+              เหตุผล <span style={{ color: '#ef4444' }}>*</span>
+              <span style={{ fontWeight: 400, marginLeft: 6, color: 'var(--text-faint)' }}>
+                ({rejectReason.trim().length}/500 ตัวอักษร, ขั้นต่ำ 5)
+              </span>
+            </label>
+            <textarea
+              value={rejectReason}
+              onChange={e => setRejectReason(e.target.value)}
+              maxLength={500}
+              rows={4}
+              placeholder="เช่น: ค่าไฟคำนวณผิด — กรุณาตรวจสอบมิเตอร์ใหม่"
+              style={{
+                width: '100%', boxSizing: 'border-box',
+                border: '1px solid var(--border-default)',
+                borderRadius: 8, padding: '8px 12px',
+                fontSize: 13, color: 'var(--text-primary)',
+                background: 'var(--surface-card)',
+                resize: 'vertical',
+              }}
+            />
+          </div>
         </div>
+      </Dialog>
+
+      {/* ── Edit Dialog ───────────────────────────────────────────────────── */}
+      {editDraft && (
+        <EditDraftDialog
+          draft={editDraft}
+          onClose={() => setEditDraft(null)}
+          onSuccess={() => {
+            setEditDraft(null);
+            refetch();
+          }}
+        />
+      )}
+
+      {/* ── Record Reading Dialog ─────────────────────────────────────────── */}
+      {readingDraft && (
+        <RecordReadingDialog
+          bookingId={readingDraft.bookingId}
+          roomNumber={readingDraft.roomNumber}
+          onClose={() => setReadingDraft(null)}
+          onSuccess={() => {
+            setReadingDraft(null);
+            refetch();
+          }}
+        />
       )}
     </div>
   );
 }
 
-// ─── Tab 3: Contract Renewal ──────────────────────────────────────────────────
+// ─── Approve confirmation dialog ─────────────────────────────────────────────
 
-interface ActiveBooking {
-  id:          string;
-  bookingNumber: string;
-  guestName:   string;
-  roomNumber:  string;
-  checkOut:    string;
-  rate:        number;
-  bookingType: string;
-}
-
-function RenewalTab() {
-  const toast = useToast();
-  const [bookings,  setBookings]  = useState<ActiveBooking[]>([]);
-  const [loading,   setLoading]   = useState(true);
-  const [selected,  setSelected]  = useState<ActiveBooking | null>(null);
-  const [newDate,   setNewDate]   = useState('');
-  const [newRate,   setNewRate]   = useState('');
-  const [notes,     setNotes]     = useState('');
-  const [saving,    setSaving]    = useState(false);
-  const [error,     setError]     = useState('');
-  const [success,   setSuccess]   = useState('');
-
-  // Fetch active monthly bookings
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const res  = await fetch('/api/bookings?status=checked_in&bookingType=monthly_short,monthly_long&limit=100');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const bks: ActiveBooking[] = (data.bookings ?? data ?? []).map((b: {
-          id: string;
-          bookingNumber: string;
-          guest: { firstName: string; lastName: string };
-          room: { number: string };
-          checkOut: string;
-          rate: number;
-          bookingType: string;
-        }) => ({
-          id:           b.id,
-          bookingNumber: b.bookingNumber,
-          guestName:    `${b.guest.firstName} ${b.guest.lastName}`,
-          roomNumber:   b.room.number,
-          checkOut:     b.checkOut,
-          rate:         Number(b.rate),
-          bookingType:  b.bookingType,
-        })).filter((b: ActiveBooking) => b.bookingType !== 'daily');
-        setBookings(bks);
-      } catch (e) {
-        setError('โหลดข้อมูลการจองล้มเหลว');
-        toast.error('โหลดข้อมูลการจองไม่สำเร็จ', e instanceof Error ? e.message : undefined);
-      } finally {
-        setLoading(false);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const handleSelect = (bk: ActiveBooking) => {
-    setSelected(bk);
-    setNewDate('');
-    setNewRate(String(bk.rate));
-    setNotes('');
-    setError('');
-    setSuccess('');
-  };
-
-  const handleRenew = async () => {
-    if (saving) return;
-    if (!selected) return;
-    if (!newDate) {
-      toast.warning('กรุณาระบุวันสิ้นสุดสัญญาใหม่');
-      return;
-    }
-    setError('');
-    setSuccess('');
-    setSaving(true);
-    try {
-      const res  = await fetch(`/api/bookings/${selected.id}/renew`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          newCheckOut: newDate,
-          newRate:     newRate ? parseFloat(newRate) : undefined,
-          notes,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
-      setSuccess(`✅ ต่อสัญญาห้อง ${selected.roomNumber} สำเร็จ — สิ้นสุดใหม่: ${fmtDate(data.newCheckOut)}`);
-      toast.success('ต่อสัญญาสำเร็จ', `ห้อง ${selected.roomNumber} — สิ้นสุดใหม่ ${fmtDate(data.newCheckOut)}`);
-      setSelected(null);
-      // Refresh list
-      const refresh = await fetch('/api/bookings?status=checked_in&bookingType=monthly_short,monthly_long&limit=100');
-      const freshData = await refresh.json();
-      setBookings((freshData.bookings ?? freshData ?? []).map((b: {
-        id: string;
-        bookingNumber: string;
-        guest: { firstName: string; lastName: string };
-        room: { number: string };
-        checkOut: string;
-        rate: number;
-        bookingType: string;
-      }) => ({
-        id:           b.id,
-        bookingNumber: b.bookingNumber,
-        guestName:    `${b.guest.firstName} ${b.guest.lastName}`,
-        roomNumber:   b.room.number,
-        checkOut:     b.checkOut,
-        rate:         Number(b.rate),
-        bookingType:  b.bookingType,
-      })).filter((b: ActiveBooking) => b.bookingType !== 'daily'));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาด';
-      setError(msg);
-      toast.error('ต่อสัญญาไม่สำเร็จ', msg);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="text-center text-gray-400 py-12">กำลังโหลด...</div>;
-  }
-
+function ApproveDialog({
+  open, count, totalAmount, loading, onConfirm, onCancel,
+}: {
+  open: boolean; count: number; totalAmount: number;
+  loading: boolean;
+  onConfirm: () => void | Promise<void>;
+  onCancel: () => void;
+}) {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {/* Booking list */}
-      <div className="space-y-3">
-        <h2 className="text-sm font-semibold text-gray-700">เลือกการจองที่ต้องการต่อสัญญา</h2>
-
-        {error && !selected && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>
-        )}
-        {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">{success}</div>
-        )}
-
-        {bookings.length === 0 ? (
-          <div className="text-center text-gray-400 py-8 bg-white border rounded-xl">
-            ไม่มีผู้เช่ารายเดือนที่ active อยู่
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {bookings.map((bk) => {
-              const daysLeft = Math.ceil(
-                (new Date(bk.checkOut).getTime() - Date.now()) / 86_400_000
-              );
-              return (
-                <div
-                  key={bk.id}
-                  onClick={() => handleSelect(bk)}
-                  className={`cursor-pointer bg-white border-2 rounded-xl p-4 hover:border-blue-300 transition-all ${
-                    selected?.id === bk.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
-                  }`}
-                >
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <p className="font-semibold text-gray-800">ห้อง {bk.roomNumber}</p>
-                      <p className="text-sm text-gray-500">{bk.guestName}</p>
-                      <p className="text-xs text-gray-400">{bk.bookingType === 'monthly_long' ? 'รายเดือน (ยาว)' : 'รายเดือน (สั้น)'}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs text-gray-400">สิ้นสุดสัญญา</p>
-                      <p className="text-sm font-medium text-gray-700">
-                        {fmtDate(bk.checkOut)}
-                      </p>
-                      <p className={`text-xs font-medium ${daysLeft <= 30 ? 'text-red-500' : daysLeft <= 60 ? 'text-amber-500' : 'text-green-600'}`}>
-                        {daysLeft > 0 ? `อีก ${daysLeft} วัน` : `เกินมา ${Math.abs(daysLeft)} วัน`}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="mt-2 text-xs text-gray-500">
-                    ค่าเช่า ฿{fmtBaht(bk.rate, 0)}/เดือน
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+    <Dialog
+      open={open}
+      onClose={loading ? () => {} : onCancel}
+      title="Approve Draft Invoices"
+      size="sm"
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={loading}
+            style={{
+              padding: '8px 18px', borderRadius: 7,
+              border: '1px solid var(--border-default)',
+              background: 'var(--surface-card)', color: 'var(--text-primary)',
+              cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 600,
+            }}
+          >
+            ยกเลิก
+          </button>
+          <button
+            type="button"
+            onClick={() => void onConfirm()}
+            disabled={loading}
+            style={{
+              padding: '8px 18px', borderRadius: 7,
+              background: loading ? '#9ca3af' : '#22c55e',
+              color: '#fff', border: 'none',
+              cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 700,
+            }}
+          >
+            {loading ? 'กำลัง approve...' : '✅ ยืนยัน Approve'}
+          </button>
+        </>
+      }
+    >
+      <div style={{ fontSize: 14, color: 'var(--text-secondary)' }}>
+        ต้องการ approve <strong>{count}</strong> รายการ
+        ยอดรวม <strong>฿{fmtBaht(totalAmount)}</strong> ใช่หรือไม่?
       </div>
-
-      {/* Renewal form */}
-      {selected ? (
-        <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4 self-start">
-          <h2 className="text-sm font-semibold text-gray-700">ต่อสัญญา — ห้อง {selected.roomNumber}</h2>
-          <p className="text-xs text-gray-500">ผู้เช่า: {selected.guestName}</p>
-          <p className="text-xs text-gray-500">
-            สัญญาปัจจุบันสิ้นสุด: {fmtDate(selected.checkOut)}
-          </p>
-
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">วันสิ้นสุดสัญญาใหม่ <span className="text-red-500">*</span></label>
-            <input
-              type="date"
-              value={newDate}
-              min={selected.checkOut.split('T')[0]}
-              onChange={(e) => setNewDate(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">ค่าเช่าใหม่ (฿/เดือน) — เว้นว่างถ้าคงเดิม</label>
-            <input
-              type="number"
-              value={newRate}
-              onChange={(e) => setNewRate(e.target.value)}
-              min="0"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300"
-            />
-          </div>
-
-          <div>
-            <label className="text-xs text-gray-500 mb-1 block">หมายเหตุ</label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              rows={2}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none"
-              placeholder="เช่น ต่อสัญญา 6 เดือน, ปรับราคาตามตลาด"
-            />
-          </div>
-
-          {error && selected && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm">{error}</div>
-          )}
-
-          <div className="flex gap-2">
-            <button
-              onClick={handleRenew}
-              disabled={saving || !newDate}
-              className="flex-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-medium py-2 rounded-lg text-sm transition"
-            >
-              {saving ? 'กำลังบันทึก...' : '✅ ต่อสัญญา'}
-            </button>
-            <button
-              onClick={() => setSelected(null)}
-              className="px-4 py-2 border border-gray-300 text-gray-600 rounded-lg text-sm hover:bg-gray-50"
-            >
-              ยกเลิก
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="bg-gray-50 border border-dashed border-gray-300 rounded-xl p-8 flex items-center justify-center text-gray-400 text-sm self-start">
-          เลือกการจองจากรายการทางซ้ายเพื่อต่อสัญญา
-        </div>
-      )}
-    </div>
+      <div style={{ fontSize: 12, color: 'var(--text-faint)', marginTop: 8 }}>
+        รายการที่ต้องจดมิเตอร์จะถูกข้ามโดยอัตโนมัติ
+      </div>
+    </Dialog>
   );
 }
