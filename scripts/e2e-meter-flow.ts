@@ -43,22 +43,21 @@ const CYCLE_END_ELEC  = 4000;
 const FINAL_WATER     = 230;
 const FINAL_ELECTRIC  = 4600;
 
-// Cycle 2 utility — billing.service computes:
-//   curr     = latest reading BEFORE cycle-2 start (2026-02-10) → 2026-02-09 reading (currWater=200)
-//   baseline = latest reading BEFORE cycle-1 start (2026-01-10) → null (fresh room, no prior reading)
+// Cycle 2 utility — billing.service computes (post Phase 6 baseline fix):
+//   curr = latest reading before cycle-2 start (2026-02-10) → cycle-end reading at 2026-02-09
+//   waterUsage    = curr.currWater    - curr.prevWater
+//   electricUsage = curr.currElectric - curr.prevElectric
 //
-// waterUsage  = curr.currWater(200)  - baseline(0) = 200 → 200 × 18 = 3600
-// electricUsage = curr.currElectric(4000) - baseline(0) = 4000 → 4000 × 8 = 32000
-//
-// The init reading at exactly 2026-01-10 is NOT used as baseline because billing.service
-// uses `readingDate < cycle1.periodStart` (strictly less than, not less-or-equal).
+// curr.prevWater/prevElectric were auto-snapshotted from the init reading
+// when the cycle-end reading was recorded. So:
+//   waterUsage    = 200  - 100  = 100  → 100  × 18 = 1800
+//   electricUsage = 4000 - 2000 = 2000 → 2000 × 8  = 16000
 const WATER_RATE      = 18;
 const ELECTRIC_RATE   = 8;
-// Billing uses curr from cycle-end reading vs. baseline=0 (no reading before checkIn)
-const WATER_USAGE_2   = CYCLE_END_WATER;    // 200 (vs baseline=0)
-const ELEC_USAGE_2    = CYCLE_END_ELEC;     // 4000 (vs baseline=0)
-const WATER_CHARGE_2  = WATER_USAGE_2 * WATER_RATE;    // 200 × 18 = 3600
-const ELEC_CHARGE_2   = ELEC_USAGE_2  * ELECTRIC_RATE; // 4000 × 8 = 32000
+const WATER_USAGE_2   = CYCLE_END_WATER - INIT_WATER;       // 100
+const ELEC_USAGE_2    = CYCLE_END_ELEC  - INIT_ELECTRIC;    // 2000
+const WATER_CHARGE_2  = WATER_USAGE_2 * WATER_RATE;         // 1800
+const ELEC_CHARGE_2   = ELEC_USAGE_2  * ELECTRIC_RATE;      // 16000
 
 // Cycle 2 is partial: 2026-02-10 → 2026-02-19 (checkOut-1)
 // February 2026 = 28 days. Cycle runs 10 ก.พ. → 09 มี.ค. but checkOut = 20 ก.พ. → partial.
@@ -72,8 +71,8 @@ const EXPECTED_CYCLE2 = CYCLE2_RENT + WATER_CHARGE_2 + ELEC_CHARGE_2;
 async function main() {
   console.log('\n🧪  e2e-meter-flow — full meter reading flow (Phase 6.4)\n');
   console.log(`    cycle 2 pro-rated rent: ${CYCLE2_RENT} (${CYCLE2_DAYS}/${CYCLE2_MONTH_DAYS} × 15000)`);
-  console.log(`    water: curr=${CYCLE_END_WATER} - baseline(0) = ${WATER_USAGE_2} units × ${WATER_RATE} = ${WATER_CHARGE_2}`);
-  console.log(`    electric: curr=${CYCLE_END_ELEC} - baseline(0) = ${ELEC_USAGE_2} units × ${ELECTRIC_RATE} = ${ELEC_CHARGE_2}`);
+  console.log(`    water: ${CYCLE_END_WATER} - ${INIT_WATER} (init) = ${WATER_USAGE_2} units × ${WATER_RATE} = ${WATER_CHARGE_2}`);
+  console.log(`    electric: ${CYCLE_END_ELEC} - ${INIT_ELECTRIC} (init) = ${ELEC_USAGE_2} units × ${ELECTRIC_RATE} = ${ELEC_CHARGE_2}`);
   console.log(`    expected cycle 2 total: ${EXPECTED_CYCLE2}\n`);
 
   const tag = `mflow-${Date.now().toString(36).slice(-6)}`;

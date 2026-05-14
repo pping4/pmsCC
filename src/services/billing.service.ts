@@ -565,17 +565,21 @@ export async function generateDraftInvoice(
   let needsReading = false;
   if (input.cycleIndex >= 2) {
     const curr = await getLatestReadingBefore(tx, booking.roomId, period.start);
-    const prevPeriod = await tx.billingPeriod.findUnique({
-      where: { bookingId_cycleIndex: { bookingId: booking.id, cycleIndex: input.cycleIndex - 1 } },
-    });
-    const referenceDate = prevPeriod?.periodStart ?? booking.checkIn;
-    const baseline = await getLatestReadingBefore(tx, booking.roomId, referenceDate);
 
     if (!curr) {
       needsReading = true;
     } else {
-      const waterUsage    = Number(curr.currWater)    - Number(baseline?.currWater    ?? 0);
-      const electricUsage = Number(curr.currElectric) - Number(baseline?.currElectric ?? 0);
+      // Use curr.prevWater / prevElectric — they were auto-snapshotted at
+      // recordReading time from the immediately-prior reading on this room
+      // (see utility.service.ts:recordReading). Using these avoids the
+      // strict-less-than bug in getLatestReadingBefore(cycle1.periodStart):
+      // an init reading taken AT check-in has readingDate == checkIn ==
+      // cycle1.periodStart, so a separate baseline lookup with `lt` would
+      // miss it → waterUsage would be (curr - 0) → wildly inflated charge.
+      // The auto-snapshot on the curr reading captures the init value
+      // correctly regardless of date equality.
+      const waterUsage    = Number(curr.currWater)    - Number(curr.prevWater);
+      const electricUsage = Number(curr.currElectric) - Number(curr.prevElectric);
       if (waterUsage > 0) {
         // Use Prisma.Decimal for unit × rate to avoid floating-point drift (Fix 5)
         const waterCharge = Number(

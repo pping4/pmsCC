@@ -46,40 +46,37 @@ const INIT_ELECTRIC = 2000;
 const END_WATER     = 150;
 const END_ELECTRIC  = 2500;
 
-// Cycle 2 utility calculation (billing.service logic):
-//   curr     = reading immediately before cycle-2 start (2026-02-10) → cycle-end reading at 2026-02-09
-//   baseline = reading before cycle-1 start (2026-01-10) → null for fresh room
+// Cycle 2 utility calculation (billing.service logic, post Phase 6 baseline fix):
+//   curr = reading immediately before cycle-2 start (2026-02-10) → cycle-end reading at 2026-02-09
+//   waterUsage    = curr.currWater    - curr.prevWater      (auto-snapshotted at recordReading)
+//   electricUsage = curr.currElectric - curr.prevElectric
 //
-// The init reading is AT 2026-01-10 (same as checkIn). The baseline query uses
-// `readingDate < 2026-01-10` (strictly less than) so the init reading is NOT
-// used as baseline by billing.service. For a fresh room (no prior tenant),
-// baseline = null → prevWater = 0.
+// The cycle-end reading was recorded AFTER the init reading, so its
+// prevWater/prevElectric were auto-snapshotted from the init reading's
+// currWater/currElectric (= 100 / 2000). This avoids the strict-less-than
+// bug in getLatestReadingBefore that would otherwise miss an init reading
+// taken AT check-in (readingDate == checkIn == cycle1.periodStart).
 //
-// This means the billing service computes:
-//   waterUsage = curr.currWater(150) - 0 = 150 → 150 × 18 = 2700
-//   electricUsage = curr.currElectric(2500) - 0 = 2500 → 2500 × 8 = 20000
-//
-// The init reading's VALUE lies in:
-//  (a) Record-keeping: staff can audit starting meter state
-//  (b) The cycle-end reading captures prevWater=100 (not 0) in its prevWater field
-//  (c) Enabling rooms that previously had another tenant to start a fresh billing
-//      baseline once the billing service is enhanced to query by bookingId
+//   waterUsage    = 150 - 100 = 50  → 50 × 18 = 900
+//   electricUsage = 2500 - 2000 = 500 → 500 × 8 = 4000
 //
 // Rates from billing.service defaults: water=18, electric=8
 const WATER_RATE     = 18;
 const ELECTRIC_RATE  = 8;
-// Cycle 2: billing computes from latest reading before cycle-2 start (cycle-end reading)
-// vs. baseline = latest reading before cycle-1 start (null for fresh room → 0)
-const WATER_CHARGE   = END_WATER * WATER_RATE;       // 150 × 18 = 2700
-const ELECTRIC_CHARGE = END_ELECTRIC * ELECTRIC_RATE; // 2500 × 8 = 20000
-const EXPECTED_CYCLE2_TOTAL = RATE + WATER_CHARGE + ELECTRIC_CHARGE; // 15000 + 2700 + 20000 = 37700
+const WATER_USAGE    = END_WATER - INIT_WATER;          // 50
+const ELECTRIC_USAGE = END_ELECTRIC - INIT_ELECTRIC;    // 500
+const WATER_CHARGE   = WATER_USAGE * WATER_RATE;        // 900
+const ELECTRIC_CHARGE = ELECTRIC_USAGE * ELECTRIC_RATE; // 4000
+const EXPECTED_CYCLE2_TOTAL = RATE + WATER_CHARGE + ELECTRIC_CHARGE; // 19,900
 
 async function main() {
   console.log('\n🧪  e2e-checkin-init-reading — Phase 6.2 meter baseline\n');
   console.log(`    Expected cycle 2 total: ${EXPECTED_CYCLE2_TOTAL} (rent=${RATE} + water=${WATER_CHARGE} + electric=${ELECTRIC_CHARGE})`);
-  console.log(`    Note: billing.service computes baseline = latest reading BEFORE cycle-1 start`);
-  console.log(`          init reading AT checkIn date is NOT used as baseline (lt guard)`);
-  console.log(`          prevWater on cycle-end reading IS captured from init reading\n`);
+  console.log(`    Init reading at check-in IS used as baseline via prev-snapshot:`);
+  console.log(`      cycle-end reading.prevWater = ${INIT_WATER} (auto-snapshotted)`);
+  console.log(`      cycle-end reading.prevElectric = ${INIT_ELECTRIC}`);
+  console.log(`      waterUsage = ${END_WATER} - ${INIT_WATER} = ${WATER_USAGE}`);
+  console.log(`      electricUsage = ${END_ELECTRIC} - ${INIT_ELECTRIC} = ${ELECTRIC_USAGE}\n`);
 
   const tag = `cinit-${Date.now().toString(36).slice(-6)}`;
 
@@ -252,11 +249,11 @@ async function main() {
     ok(!!elecLine,                              'cycle 2: UTILITY_ELECTRIC line item exists');
     ok(
       Number(waterLine?.amount) === WATER_CHARGE,
-      `cycle 2: water charge=${WATER_CHARGE} (curr=${END_WATER} × ${WATER_RATE}, baseline=0, got ${waterLine?.amount})`,
+      `cycle 2: water charge=${WATER_CHARGE} (usage=${WATER_USAGE} × ${WATER_RATE}, got ${waterLine?.amount})`,
     );
     ok(
       Number(elecLine?.amount) === ELECTRIC_CHARGE,
-      `cycle 2: electric charge=${ELECTRIC_CHARGE} (curr=${END_ELECTRIC} × ${ELECTRIC_RATE}, baseline=0, got ${elecLine?.amount})`,
+      `cycle 2: electric charge=${ELECTRIC_CHARGE} (usage=${ELECTRIC_USAGE} × ${ELECTRIC_RATE}, got ${elecLine?.amount})`,
     );
 
     // Confirm init reading IS reflected in cycle-end reading's prevWater (audit trail)
