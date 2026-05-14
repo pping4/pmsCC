@@ -770,7 +770,6 @@ model UtilityReading {
   roomId       String    @map("room_id")
   bookingId    String?   @map("booking_id")
   readingDate  DateTime? @db.Date @map("reading_date")
-  month        String?   // legacy — to be removed in Task 4.6
   prevWater    Decimal   @default(0) @map("prev_water") @db.Decimal(10, 2)
   currWater    Decimal   @default(0) @map("curr_water") @db.Decimal(10, 2)
   waterRate    Decimal   @default(18) @map("water_rate") @db.Decimal(10, 2)
@@ -786,7 +785,6 @@ model UtilityReading {
   room    Room     @relation(fields: [roomId], references: [id], onDelete: Restrict)
   booking Booking? @relation(fields: [bookingId], references: [id], onDelete: Restrict)
 
-  @@unique([roomId, month])
   @@unique([roomId, readingDate])
   @@index([bookingId, readingDate])
   @@index([roomId, readingDate])
