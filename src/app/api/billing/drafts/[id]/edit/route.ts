@@ -1,8 +1,8 @@
 /**
  * POST /api/billing/drafts/[id]/edit
  *
- * Inline edit of a draft invoice's amounts before approval.
- * Only works while invoice.status = 'draft'. No ledger is touched.
+ * Inline edit of a draft invoice's amounts (and optionally the cycle period)
+ * before approval. Only works while invoice.status = 'draft'. No ledger touched.
  *
  * Role: admin | manager
  *
@@ -11,18 +11,18 @@
  *     rentAmount?:     number ≥ 0,
  *     waterUsage?:     number ≥ 0,   ← units consumed (NOT baht)
  *     electricUsage?:  number ≥ 0,   ← units consumed (NOT baht)
+ *     periodStart?:    "YYYY-MM-DD"  ← new cycle start
+ *     periodEnd?:      "YYYY-MM-DD"  ← new cycle end (must be >= periodStart)
  *     notes?:          string ≤ 500,
  *   }
  *
- * Strategy:
- *   1. Load the invoice's folio line items grouped by chargeType.
- *   2. Validate that every usage/amount field has a matching FolioLineItem (422 if not).
- *   3. For waterUsage / electricUsage: look up the most recent UtilityReading for
- *      the booking's room to get the per-unit rate, then compute baht = units × rate.
- *   4. For each provided field, update the matching FolioLineItem with the computed amount.
- *   5. Recompute Invoice.grandTotal as the sum of the (updated) DRAFT line items.
+ * Period change logic (inside tx):
+ *   1. Update Invoice.billingPeriodStart / billingPeriodEnd.
+ *   2. Update the ROOM FolioLineItem's serviceDate / periodEnd.
+ *   3. Re-pro-rate rent UNLESS rentAmount was explicitly provided in this request.
+ *      newRent = bookingRate × newDays / fullCycleDays (UTC month length).
  *
- * Returns: { ok: true, newGrandTotal: number }
+ * Returns: { ok: true, newGrandTotal: number, newPeriodStart?: string, newPeriodEnd?: string }
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -40,15 +40,26 @@ const Body = z
     rentAmount:    z.number().nonnegative().optional(),
     waterUsage:    z.number().nonnegative().optional(),
     electricUsage: z.number().nonnegative().optional(),
+    periodStart:   z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    periodEnd:     z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
     notes:         z.string().max(500).optional(),
   })
   .refine(
     (d) =>
-      d.rentAmount !== undefined ||
-      d.waterUsage !== undefined ||
+      d.rentAmount    !== undefined ||
+      d.waterUsage    !== undefined ||
       d.electricUsage !== undefined ||
-      d.notes !== undefined,
-    { message: 'ต้องระบุอย่างน้อย 1 field (rentAmount, waterUsage, electricUsage, notes)' },
+      d.periodStart   !== undefined ||
+      d.periodEnd     !== undefined ||
+      d.notes         !== undefined,
+    { message: 'ต้องระบุอย่างน้อย 1 field (rentAmount, waterUsage, electricUsage, periodStart, periodEnd, notes)' },
+  )
+  .refine(
+    (d) => {
+      if (!d.periodEnd || !d.periodStart) return true;
+      return d.periodEnd >= d.periodStart;
+    },
+    { message: 'periodEnd must be >= periodStart', path: ['periodEnd'] },
   );
 
 // ─── POST ────────────────────────────────────────────────────────────────────
@@ -86,9 +97,10 @@ export async function POST(
           id: true,
           status: true,
           notes: true,
-          // We need roomId (via booking) for the utility rate lookup
+          billingPeriodStart: true,
+          billingPeriodEnd: true,
           booking: {
-            select: { roomId: true },
+            select: { roomId: true, rate: true, id: true },
           },
           items: {
             select: {
@@ -101,6 +113,8 @@ export async function POST(
                   amount: true,
                   quantity: true,
                   unitPrice: true,
+                  serviceDate: true,
+                  periodEnd: true,
                 },
               },
             },
@@ -119,19 +133,24 @@ export async function POST(
       }
 
       // Map chargeType → FolioLineItem for this invoice
-      const lineItemsByType = new Map<string, { id: string; amount: Prisma.Decimal }>();
+      const lineItemsByType = new Map<string, {
+        id: string;
+        amount: Prisma.Decimal;
+        serviceDate: Date | null;
+        periodEnd: Date | null;
+      }>();
       for (const item of inv.items) {
         if (item.folioLineItem) {
           lineItemsByType.set(item.folioLineItem.chargeType, {
-            id:     item.folioLineItem.id,
-            amount: item.folioLineItem.amount,
+            id:          item.folioLineItem.id,
+            amount:      item.folioLineItem.amount,
+            serviceDate: item.folioLineItem.serviceDate,
+            periodEnd:   item.folioLineItem.periodEnd,
           });
         }
       }
 
       // ── Guard: reject if a usage/amount field has no matching line item ────
-      // This check runs BEFORE the rate lookup so a draft that only has a ROOM
-      // line doesn't fail when only rentAmount is edited.
       const unmatched: string[] = [];
       if (body.waterUsage    !== undefined && !lineItemsByType.has('UTILITY_WATER'))   unmatched.push('waterUsage');
       if (body.electricUsage !== undefined && !lineItemsByType.has('UTILITY_ELECTRIC')) unmatched.push('electricUsage');
@@ -143,13 +162,81 @@ export async function POST(
         );
       }
 
+      // ── Period change ────────────────────────────────────────────────────────
+      let newPeriodStart: Date | undefined;
+      let newPeriodEnd: Date | undefined;
+      let periodStartStr: string | undefined;
+      let periodEndStr: string | undefined;
+
+      if (body.periodStart || body.periodEnd) {
+        // Parse as UTC midnight (consistent with rest of codebase)
+        const resolvedStart = body.periodStart
+          ? new Date(body.periodStart + 'T00:00:00.000Z')
+          : inv.billingPeriodStart ?? undefined;
+        const resolvedEnd = body.periodEnd
+          ? new Date(body.periodEnd + 'T00:00:00.000Z')
+          : inv.billingPeriodEnd ?? undefined;
+
+        if (!resolvedStart || !resolvedEnd) {
+          throw Object.assign(
+            new Error('ไม่สามารถกำหนดช่วงเวลาได้ — invoice ไม่มี billingPeriodStart/End เดิม'),
+            { statusCode: 422 },
+          );
+        }
+
+        newPeriodStart = resolvedStart;
+        newPeriodEnd   = resolvedEnd;
+        periodStartStr = body.periodStart ?? inv.billingPeriodStart?.toISOString().slice(0, 10);
+        periodEndStr   = body.periodEnd   ?? inv.billingPeriodEnd?.toISOString().slice(0, 10);
+
+        // 1. Update Invoice billing period columns
+        await tx.invoice.update({
+          where: { id: params.id },
+          data:  { billingPeriodStart: newPeriodStart, billingPeriodEnd: newPeriodEnd },
+        });
+
+        // 2. Update ROOM line's serviceDate + periodEnd
+        const roomLi = lineItemsByType.get('ROOM');
+        if (roomLi) {
+          await tx.folioLineItem.update({
+            where: { id: roomLi.id },
+            data:  { serviceDate: newPeriodStart, periodEnd: newPeriodEnd },
+          });
+
+          // 3. Re-pro-rate rent UNLESS rentAmount was explicitly provided
+          if (body.rentAmount === undefined) {
+            const bookingRate = inv.booking?.rate;
+            if (!bookingRate) {
+              throw Object.assign(
+                new Error('ไม่พบ booking rate — ไม่สามารถคำนวณค่าเช่าใหม่ได้'),
+                { statusCode: 422 },
+              );
+            }
+
+            const newDays = Math.round(
+              (newPeriodEnd.getTime() - newPeriodStart.getTime()) / 86_400_000,
+            ) + 1;
+
+            // Full cycle days = days in newPeriodStart's month (UTC)
+            const year  = newPeriodStart.getUTCFullYear();
+            const month = newPeriodStart.getUTCMonth();
+            const fullCycleDays = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+
+            const newRent = new Prisma.Decimal(bookingRate)
+              .mul(newDays)
+              .div(fullCycleDays)
+              .toDecimalPlaces(2);
+
+            await tx.folioLineItem.update({
+              where: { id: roomLi.id },
+              data:  { amount: newRent, unitPrice: newRent },
+            });
+            lineItemsByType.set('ROOM', { ...roomLi, amount: newRent });
+          }
+        }
+      }
+
       // ── Rate lookup — only needed if a utility field is being edited ────────
-      //
-      // generateDraftInvoice calls addCharge() for utilities with quantity=1
-      // and unitPrice defaulting to amount (= total baht charge, not the rate).
-      // So we cannot recover the per-unit rate from the existing line item.
-      // Instead we look up the most-recent UtilityReading for the booking's room,
-      // which is what generateDraftInvoice itself used to compute the original charge.
       let waterRate    = 0;
       let electricRate = 0;
 
@@ -187,7 +274,7 @@ export async function POST(
         electricRate = Number(reading.electricRate);
       }
 
-      // ── Apply edits ─────────────────────────────────────────────────────────
+      // ── Apply explicit amount edits ──────────────────────────────────────────
 
       if (body.rentAmount !== undefined) {
         const li = lineItemsByType.get('ROOM')!;
@@ -200,7 +287,6 @@ export async function POST(
 
       if (body.waterUsage !== undefined) {
         const li = lineItemsByType.get('UTILITY_WATER')!;
-        // Compute baht charge: units × rate (same formula as generateDraftInvoice)
         const newAmount = new Prisma.Decimal(body.waterUsage)
           .mul(waterRate)
           .toDecimalPlaces(2);
@@ -218,7 +304,6 @@ export async function POST(
 
       if (body.electricUsage !== undefined) {
         const li = lineItemsByType.get('UTILITY_ELECTRIC')!;
-        // Compute baht charge: units × rate (same formula as generateDraftInvoice)
         const newAmount = new Prisma.Decimal(body.electricUsage)
           .mul(electricRate)
           .toDecimalPlaces(2);
@@ -250,10 +335,14 @@ export async function POST(
         },
       });
 
-      return Number(newGrandTotal);
+      return {
+        newGrandTotal: Number(newGrandTotal),
+        newPeriodStart: periodStartStr,
+        newPeriodEnd:   periodEndStr,
+      };
     });
 
-    return NextResponse.json({ ok: true, newGrandTotal: result });
+    return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     if (err instanceof Error && 'statusCode' in err) {
       const code = (err as Error & { statusCode: number }).statusCode;

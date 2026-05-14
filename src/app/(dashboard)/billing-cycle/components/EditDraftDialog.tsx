@@ -1,21 +1,21 @@
 /**
- * EditDraftDialog.tsx — Billing Cycle / Task 3.3
+ * EditDraftDialog.tsx — Billing Cycle / Task 3.3 + 5.4
  *
  * Modal dialog that lets a manager inline-edit a draft invoice's amounts
- * before approval.
+ * and/or cycle period before approval.
  *
  * Fields:
- *  - rentAmount    (baht, ≥0)        — always shown
+ *  - periodStart   (date)            — cycle start (changing re-pro-rates rent)
+ *  - periodEnd     (date)            — cycle end
+ *  - rentAmount    (baht, ≥0)        — always shown; blank = auto-pro-rate from period
  *  - waterUsage    (units, ≥0)       — only if draft has UTILITY_WATER line
  *  - electricUsage (units, ≥0)       — only if draft has UTILITY_ELECTRIC line
  *  - notes         (textarea ≤500)   — always shown
  *
- * Rates are displayed as helper text below each utility input.
- * The API returns the computed newGrandTotal on success.
- *
  * POST /api/billing/drafts/[id]/edit
+ *   400 → Zod validation
  *   422 with `unmatched` → per-field error
- *   200 → { ok: true, newGrandTotal: number }
+ *   200 → { ok: true, newGrandTotal: number, newPeriodStart?: string, newPeriodEnd?: string }
  */
 
 'use client';
@@ -23,7 +23,7 @@
 import { useState } from 'react';
 import { Dialog } from '@/components/ui';
 import { useToast } from '@/components/ui';
-import { fmtBaht } from '@/lib/date-format';
+import { fmtBaht, formatPeriod } from '@/lib/date-format';
 
 // ─── DraftRow subset we need ──────────────────────────────────────────────────
 
@@ -36,6 +36,8 @@ export interface DraftRowForEdit {
   waterAmount:   number;
   electricAmount: number;
   grandTotal:    number;
+  periodStart:   string;   // "YYYY-MM-DD"
+  periodEnd:     string;   // "YYYY-MM-DD"
 }
 
 interface EditDraftDialogProps {
@@ -77,12 +79,20 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
   const hasElectric = draft.electricAmount > 0;
 
   // ── Form state ─────────────────────────────────────────────────────────────
-  const [rentAmount,    setRentAmount]    = useState(String(draft.rentAmount));
-  const [waterUsage,    setWaterUsage]    = useState('');   // units — blank = no change
-  const [electricUsage, setElectricUsage] = useState('');  // units — blank = no change
-  const [notes,         setNotes]         = useState('');
+  // Period inputs — default to the draft's existing period
+  const [periodStart,    setPeriodStart]    = useState(draft.periodStart);
+  const [periodEnd,      setPeriodEnd]      = useState(draft.periodEnd);
+  // Rent — blank means "auto-pro-rate from changed period" when period changes
+  const [rentAmount,     setRentAmount]     = useState(String(draft.rentAmount));
+  const [waterUsage,     setWaterUsage]     = useState('');   // units — blank = no change
+  const [electricUsage,  setElectricUsage]  = useState('');  // units — blank = no change
+  const [notes,          setNotes]          = useState('');
 
-  // ── Field errors (from 422 unmatched or local validation) ──────────────────
+  // Track whether user explicitly typed a rent override
+  const rentChanged = rentAmount !== String(draft.rentAmount);
+  const periodChanged = periodStart !== draft.periodStart || periodEnd !== draft.periodEnd;
+
+  // ── Field errors ──────────────────────────────────────────────────────────
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // ── Async state ────────────────────────────────────────────────────────────
@@ -95,9 +105,19 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
 
     // ── Client-side validation ──────────────────────────────────────────────
     const errs: Record<string, string> = {};
-    const parsedRent = parseFloat(rentAmount);
-    if (isNaN(parsedRent) || parsedRent < 0) {
-      errs.rentAmount = 'ค่าห้องต้องเป็นตัวเลข ≥ 0';
+
+    if (!periodStart) errs.periodStart = 'กรุณาระบุวันเริ่มต้น';
+    if (!periodEnd)   errs.periodEnd   = 'กรุณาระบุวันสิ้นสุด';
+    if (periodStart && periodEnd && periodEnd < periodStart) {
+      errs.periodEnd = 'วันสิ้นสุดต้องไม่ก่อนวันเริ่มต้น';
+    }
+
+    // Rent validation: if user typed something, validate it; blank = auto-pro-rate
+    if (rentAmount !== '') {
+      const parsedRent = parseFloat(rentAmount);
+      if (isNaN(parsedRent) || parsedRent < 0) {
+        errs.rentAmount = 'ค่าห้องต้องเป็นตัวเลข ≥ 0';
+      }
     }
     if (hasWater && waterUsage !== '') {
       const v = parseFloat(waterUsage);
@@ -116,13 +136,41 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
       return;
     }
 
-    // ── Build payload — only include fields with values ─────────────────────
-    const body: Record<string, unknown> = {
-      rentAmount: parsedRent,
-    };
+    // ── Build payload — only include fields that changed ────────────────────
+    const body: Record<string, unknown> = {};
+
+    // Period — only send if changed from original
+    if (periodChanged) {
+      body.periodStart = periodStart;
+      body.periodEnd   = periodEnd;
+    }
+
+    // Rent — only include if user explicitly typed a value
+    // (if period changed and rentAmount is still the original, we let server re-pro-rate)
+    if (rentAmount !== '' && (rentChanged || !periodChanged)) {
+      body.rentAmount = parseFloat(rentAmount);
+    } else if (!periodChanged && rentAmount !== '') {
+      // No period change, use whatever rent value is there
+      body.rentAmount = parseFloat(rentAmount);
+    }
+
     if (hasWater && waterUsage !== '') body.waterUsage = parseFloat(waterUsage);
     if (hasElectric && electricUsage !== '') body.electricUsage = parseFloat(electricUsage);
     if (notes.trim()) body.notes = notes.trim();
+
+    // Ensure at least one field is provided
+    if (Object.keys(body).length === 0) {
+      toast.warning('ไม่มีอะไรเปลี่ยนแปลง');
+      return;
+    }
+
+    // If only period changed (no rentAmount override), include rent in body
+    // only when period changed — let API do the re-pro-rate
+    if (periodChanged && body.rentAmount === undefined && !rentChanged) {
+      // intentionally omit rentAmount — API will auto-pro-rate
+    } else if (!periodChanged && body.rentAmount === undefined) {
+      // No period change, no explicit rent — that's allowed as long as other fields exist
+    }
 
     setLoading(true);
     try {
@@ -133,10 +181,12 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
       });
 
       const data = await res.json().catch(() => ({})) as {
-        ok?:          boolean;
-        newGrandTotal?: number;
-        error?:       string;
-        unmatched?:   string[];
+        ok?:             boolean;
+        newGrandTotal?:  number;
+        newPeriodStart?: string;
+        newPeriodEnd?:   string;
+        error?:          string;
+        unmatched?:      string[];
       };
 
       if (res.status === 422 && data.unmatched) {
@@ -151,11 +201,16 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
 
       if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
+      const periodLabel = data.newPeriodStart && data.newPeriodEnd
+        ? formatPeriod(data.newPeriodStart, data.newPeriodEnd)
+        : undefined;
+
       toast.success(
         'บันทึกการแก้ไขแล้ว',
-        data.newGrandTotal !== undefined
-          ? `ยอดใหม่: ฿${fmtBaht(data.newGrandTotal)}`
-          : undefined,
+        [
+          data.newGrandTotal !== undefined ? `ยอดใหม่: ฿${fmtBaht(data.newGrandTotal)}` : '',
+          periodLabel ? `ช่วง: ${periodLabel}` : '',
+        ].filter(Boolean).join(' · ') || undefined,
       );
       onSuccess();
     } catch (err) {
@@ -171,7 +226,7 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
       open
       onClose={loading ? () => {} : onClose}
       title={`แก้ไขบิล — ห้อง ${draft.roomNumber}`}
-      description={`${draft.guestName} · ${draft.invoiceNumber}`}
+      description={`${draft.guestName} · ${draft.invoiceNumber} · ${formatPeriod(draft.periodStart, draft.periodEnd)}`}
       size="md"
       footer={
         <>
@@ -218,13 +273,59 @@ export function EditDraftDialog({ draft, onClose, onSuccess }: EditDraftDialogPr
           {draft.electricAmount > 0 && <span style={{ marginLeft: 8 }}>ไฟ ฿{fmtBaht(draft.electricAmount)}</span>}
         </div>
 
+        {/* ── Period inputs (Task 5.4) ───────────────────────────────────── */}
+        <div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+            <div style={{ flex: 1 }}>
+              <LabelRow label="ตั้งแต่วันที่" />
+              <input
+                type="date"
+                value={periodStart}
+                onChange={e => setPeriodStart(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  borderColor: fieldErrors.periodStart ? '#fca5a5' : undefined,
+                }}
+              />
+              <FieldError msg={fieldErrors.periodStart} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <LabelRow label="ถึงวันที่" />
+              <input
+                type="date"
+                value={periodEnd}
+                min={periodStart}
+                onChange={e => setPeriodEnd(e.target.value)}
+                style={{
+                  ...inputStyle,
+                  borderColor: fieldErrors.periodEnd ? '#fca5a5' : undefined,
+                }}
+              />
+              <FieldError msg={fieldErrors.periodEnd} />
+            </div>
+          </div>
+          {periodChanged && (
+            <div style={{
+              marginTop: 6, fontSize: 11,
+              color: '#1d4ed8',
+              padding: '6px 10px',
+              background: '#eff6ff',
+              borderRadius: 6,
+              border: '1px solid #bfdbfe',
+            }}>
+              💡 เปลี่ยนช่วงวันที่จะคำนวณค่าเช่าใหม่ตามจำนวนวันโดยอัตโนมัติ ยกเว้นคุณกรอกค่าเช่าด้วยตัวเอง
+            </div>
+          )}
+        </div>
+
         {/* Rent amount */}
         <div>
-          <LabelRow label="ค่าห้อง (บาท)" required />
+          <LabelRow label={periodChanged ? 'ค่าห้อง (บาท) — เว้นว่างให้คำนวณอัตโนมัติ' : 'ค่าห้อง (บาท)'} />
           <input
             type="number"
             min="0"
             step="0.01"
+            placeholder={periodChanged ? 'เว้นว่างให้คำนวณตามจำนวนวัน' : ''}
             value={rentAmount}
             onChange={e => setRentAmount(e.target.value)}
             style={{
