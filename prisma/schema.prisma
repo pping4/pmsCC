@@ -674,6 +674,7 @@ model Booking {
   guestCredits      GuestCredit[]
   billingPeriods    BillingPeriod[]
   utilityReadings   UtilityReading[]
+  recurringCharges  RecurringCharge[]
 
   @@index([cityLedgerAccountId])
   @@map("bookings")
@@ -2244,4 +2245,33 @@ model TaxInvoice {
   @@index([issueDate])
   @@index([customerTaxId])
   @@map("tax_invoices")
+}
+
+// ─── Recurring charges (TV, Internet, monthly services) ───────────────────────
+
+enum RecurringChargeStatus {
+  active
+  cancelled
+}
+
+model RecurringCharge {
+  id          String   @id @default(uuid())
+  bookingId   String   @map("booking_id")
+  chargeType  FolioChargeType  @map("charge_type")  // typically EXTRA_SERVICE or OTHER
+  description String                                 // "ค่าเช่า TV", "Internet", "ค่าบริการ"
+  amount      Decimal  @db.Decimal(10, 2)            // baht per cycle (flat, not pro-rated by default)
+  startDate   DateTime @db.Date @map("start_date")
+  endDate     DateTime? @db.Date @map("end_date")    // null = forever (until booking ends)
+  status      RecurringChargeStatus @default(active)
+  notes       String?
+  createdBy   String   @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  cancelledAt DateTime? @map("cancelled_at")
+  cancelledBy String?  @map("cancelled_by")
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Restrict)
+
+  @@index([bookingId, status])
+  @@index([startDate, endDate])
+  @@map("recurring_charges")
 }
