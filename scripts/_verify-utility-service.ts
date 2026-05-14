@@ -42,10 +42,24 @@ async function main() {
       currWater: 200, currElectric: 3000, recordedBy: 'test',
     }), /readingDate cannot be in the future/);
 
+    // Throw on back-dated reading (same date as existing reading)
+    await assert.rejects(() => recordReading(tx, {
+      roomId: room.id,
+      readingDate: new Date('2026-04-30T00:00:00.000Z'),  // same date as r2
+      currWater: 166, currElectric: 2511, recordedBy: 'test',
+    }), /readingDate must be after prior reading date/);
+
+    // Throw on reading earlier than an existing reading
+    await assert.rejects(() => recordReading(tx, {
+      roomId: room.id,
+      readingDate: new Date('2026-04-01T00:00:00.000Z'),  // between r1 and r2
+      currWater: 155, currElectric: 2300, recordedBy: 'test',
+    }), /readingDate must be after prior reading date/);
+
     // Cleanup
     await tx.utilityReading.deleteMany({ where: { roomId: room.id, recordedBy: 'test' } });
   });
 
-  console.log('✓ utility.service: record + latest-before + future-guard');
+  console.log('✓ utility.service: record + latest-before + future-guard + back-date guard');
 }
 main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });

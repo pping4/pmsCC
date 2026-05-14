@@ -14,6 +14,17 @@ import { Prisma } from '@prisma/client';
 
 type Tx = Prisma.TransactionClient;
 
+// ─── Typed error class ───────────────────────────────────────────────────────
+
+export type UtilityErrorCode = 'FUTURE_DATE' | 'BACKDATED';
+
+export class UtilityValidationError extends Error {
+  constructor(public code: UtilityErrorCode, msg: string) {
+    super(msg);
+    this.name = 'UtilityValidationError';
+  }
+}
+
 export interface RecordReadingInput {
   roomId:        string;
   bookingId?:    string;
@@ -30,21 +41,45 @@ export interface RecordReadingInput {
  * Record a meter reading for a room. Automatically fills prevWater / prevElectric
  * from the most recent prior reading for this room.
  *
- * Throws if readingDate is in the future.
+ * Throws UtilityValidationError('FUTURE_DATE') if readingDate is in the future.
+ * Throws UtilityValidationError('BACKDATED') if readingDate <= the most recent
+ *   existing reading's date — back-dating would corrupt the prevWater/prevElectric
+ *   snapshot on that later reading.
+ *
+ * Uses pg_advisory_xact_lock to serialize concurrent writes for the same room,
+ * preventing two simultaneous calls from both passing the ordering check and
+ * then one overwriting the other's prev* values.
  */
 export async function recordReading(tx: Tx, input: RecordReadingInput) {
   if (input.readingDate.getTime() > Date.now()) {
-    throw new Error('readingDate cannot be in the future');
+    throw new UtilityValidationError('FUTURE_DATE', 'readingDate cannot be in the future');
   }
 
-  const prev = await tx.utilityReading.findFirst({
-    where: {
-      roomId: input.roomId,
-      readingDate: { lt: input.readingDate },
-    },
+  // Serialize concurrent reads for the same room within the transaction.
+  // hashtext() is stable per Postgres session so the same roomId always maps
+  // to the same lock slot, while different roomIds use different slots.
+  // $executeRaw avoids Prisma's void-deserialization error (pg_advisory_xact_lock returns void).
+  await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${input.roomId}))`;
+
+  // Find the most recent reading for this room (no date filter) to enforce
+  // append-only ordering. Readings must be strictly chronological because
+  // prevWater/prevElectric are snapshot values captured at insert time — a
+  // back-dated insertion cannot retroactively fix the later row's snapshot.
+  const latestReading = await tx.utilityReading.findFirst({
+    where: { roomId: input.roomId },
     orderBy: { readingDate: 'desc' },
-    select: { currWater: true, currElectric: true },
+    select: { currWater: true, currElectric: true, readingDate: true },
   });
+
+  if (latestReading && latestReading.readingDate && input.readingDate <= latestReading.readingDate) {
+    throw new UtilityValidationError(
+      'BACKDATED',
+      'readingDate must be after prior reading date',
+    );
+  }
+
+  // prev* snapshot: the reading immediately before this one (for the prevWater/prevElectric fields)
+  const prev = latestReading; // after the guard, latestReading.readingDate < input.readingDate
 
   return tx.utilityReading.create({
     data: {
