@@ -138,7 +138,40 @@ Load the relevant skill before editing — each file has a detailed checklist, a
 - [keyboard-first-flow](.claude/skills/keyboard-first-flow.md) — Ctrl+K, Esc, focus trap, ARIA
 - [google-sheet-filter-sort](.claude/skills/google-sheet-filter-sort.md) — per-column filter/sort dropdown: getValue/getLabel/counts, Enter-to-apply, composite row keys
 
-## 7. Pre-Delivery Verification (The "Stop & Check" Rule)
+## 7. Skill Transparency (announce before using)
+
+Whenever you invoke a **skill** — whether a built-in superpower
+(`brainstorming`, `writing-plans`, `subagent-driven-development`,
+`receiving-code-review`, `using-git-worktrees`, etc.) or a domain
+playbook from `.claude/skills/*.md` — **tell the user up front** in
+one short line BEFORE the substantive work begins. State what skill
+and why.
+
+Examples:
+
+> "ผมใช้ skill `brainstorming` ก่อน — ต้อง map intent กับคุณก่อนเริ่ม edit code"
+> "Invoking `writing-plans` to author the implementation plan."
+> "Loading `.claude/skills/finance-invariants.md` — มีโพสต์ ledger ใน task นี้"
+
+Why this rule exists:
+- Skills bring structured workflows with their own gates (e.g., a
+  brainstorming skill won't let you write code until the user approves
+  a design). The user needs to predict your next moves and intervene
+  if you picked the wrong skill.
+- Silent skill use feels like a black box and surprises the user when
+  the workflow steers a certain way.
+
+**Exceptions** — no announcement needed:
+- The skill was already announced earlier in the same turn and you're
+  continuing within it.
+- Purely internal hints that never produce user-visible output.
+
+**Wrong:** silently dispatching a subagent via `Task` after loading
+`requesting-code-review` without telling the user a review is happening.
+**Right:** "Sending to code-reviewer subagent now (skill:
+`requesting-code-review`)..."
+
+## 8. Pre-Delivery Verification (The "Stop & Check" Rule)
 Before outputting any code, you MUST mentally verify the following checklist:
 - [ ] **Security:** Is the action authorized? Are inputs validated with Zod?
 - [ ] **Prisma Check:** Am I using `select` to avoid data leaks? Should this be a `$transaction`?
@@ -146,7 +179,7 @@ Before outputting any code, you MUST mentally verify the following checklist:
 - [ ] **Completeness:** Does it handle edge cases (e.g., concurrent bookings)?
 - [ ] **Date formatting:** Am I using `fmtDate` / `fmtDateTime` / `fmtBaht` from `@/lib/date-format`? (No `th-TH` locale.)
 
-## 8. Active-Branch Handoff (READ FIRST for money-path work)
+## 9. Active-Branch Handoff (READ FIRST for money-path work)
 
 The `feat/receipt-standardization` branch landed a multi-phase accounting redesign
 (receipt standardization → 3-mode refund → Guest Credit lifecycle → EDC picker rollout →
