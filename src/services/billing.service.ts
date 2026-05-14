@@ -16,9 +16,24 @@
  */
 
 import { Prisma, InvoiceType, LedgerAccount } from '@prisma/client';
-import { postLedgerPair } from './ledger.service';
+import { postLedgerPair, postInvoiceAccrual } from './ledger.service';
 import { getFolioByBookingId, addCharge, createInvoiceFromFolio, recalculateFolioBalance } from './folio.service';
 import { generateMonthlyInvoiceNumber as genStandardMNNumber } from './invoice-number.service';
+
+// ─── Typed error classes ────────────────────────────────────────────────────
+
+export type BillingErrorCode =
+  | 'NOT_DRAFT'           // approve/reject called on non-draft invoice
+  | 'FOLIO_NOT_FOUND'
+  | 'BOOKING_NOT_MONTHLY'  // generateDraftInvoice called on daily booking
+  | 'PERIOD_EXISTS_PAID';  // upsert would overwrite a paid period — refuse
+
+export class BillingStateError extends Error {
+  constructor(public code: BillingErrorCode, msg: string) {
+    super(msg);
+    this.name = 'BillingStateError';
+  }
+}
 
 type TxClient = Prisma.TransactionClient;
 
@@ -464,6 +479,14 @@ export async function generateDraftInvoice(
   tx: Prisma.TransactionClient,
   input: GenerateDraftInput,
 ): Promise<GeneratedDraft> {
+  // Race guard: serialize per-booking draft generation. Two concurrent cron
+  // runs targeting the same (bookingId, cycleIndex) would otherwise both pass
+  // the existence check below, both create Invoice + InvoiceItems, and only
+  // the upsert at the end of the function would catch the conflict via
+  // @@unique([bookingId, cycleIndex]) — after burning an invoice number and
+  // wasted FolioLineItem rows that the rollback then undoes.
+  await tx.$queryRaw`SELECT id FROM bookings WHERE id = ${input.bookingId} FOR UPDATE`;
+
   const booking = await tx.booking.findUniqueOrThrow({
     where: { id: input.bookingId },
     select: {
@@ -473,7 +496,7 @@ export async function generateDraftInvoice(
     },
   });
   if (booking.bookingType !== 'monthly_short' && booking.bookingType !== 'monthly_long') {
-    throw new Error('generateDraftInvoice requires a monthly booking');
+    throw new BillingStateError('BOOKING_NOT_MONTHLY', 'generateDraftInvoice requires a monthly booking');
   }
 
   // Idempotent — bail if a period+invoice already exists for this cycle.
@@ -481,13 +504,21 @@ export async function generateDraftInvoice(
     where: { bookingId_cycleIndex: { bookingId: input.bookingId, cycleIndex: input.cycleIndex } },
   });
   if (existing?.invoiceId) {
-    const inv = await tx.invoice.findUniqueOrThrow({ where: { id: existing.invoiceId } });
-    return {
-      invoiceId: inv.id, invoiceNumber: inv.invoiceNumber,
-      grandTotal: Number(inv.grandTotal), status: 'draft',
-      periodStart: existing.periodStart, periodEnd: existing.periodEnd,
-      isPartial: existing.isPartial, needsReading: false,
-    };
+    // Guard: invoice may have been hard-deleted (onDelete: SetNull on schema).
+    // If so, fall through and recreate rather than throwing an obscure P2025.
+    const inv = await tx.invoice.findUnique({ where: { id: existing.invoiceId } });
+    if (inv) {
+      return {
+        invoiceId: inv.id, invoiceNumber: inv.invoiceNumber,
+        grandTotal: Number(inv.grandTotal), status: 'draft',
+        periodStart: existing.periodStart, periodEnd: existing.periodEnd,
+        isPartial: existing.isPartial, needsReading: false,
+      };
+    }
+    console.warn(
+      `BillingPeriod ${existing.id} references missing invoice ${existing.invoiceId}; re-creating`,
+    );
+    // Fall through — the upsert below will update the BillingPeriod with the new invoiceId.
   }
 
   const period = resolveNextPeriod({
@@ -498,9 +529,10 @@ export async function generateDraftInvoice(
   });
 
   const folio = await getFolioByBookingId(tx, booking.id);
-  if (!folio) throw new Error('FOLIO_NOT_FOUND');
+  if (!folio) throw new BillingStateError('FOLIO_NOT_FOUND', `No folio found for booking ${booking.id}`);
 
-  // 1) Rent charge — pro-rate if partial
+  // 1) Rent charge — pro-rate if partial; use Prisma.Decimal to avoid
+  //    IEEE-754 floating-point drift on division (Fix 5).
   const daysInCycle = Math.round(
     (period.end.getTime() - period.start.getTime()) / 86_400_000,
   ) + 1;
@@ -508,7 +540,7 @@ export async function generateDraftInvoice(
     ? new Date(Date.UTC(period.start.getUTCFullYear(), period.start.getUTCMonth() + 1, 0)).getUTCDate()
     : daysInCycle;
   const rentAmount = period.isPartial
-    ? Math.round(Number(booking.rate) * (daysInCycle / fullCycleDays) * 100) / 100
+    ? Number(new Prisma.Decimal(booking.rate).mul(daysInCycle).div(fullCycleDays).toDecimalPlaces(2))
     : Number(booking.rate);
 
   await addCharge(tx, {
@@ -543,20 +575,27 @@ export async function generateDraftInvoice(
       const waterUsage    = Number(curr.currWater)    - Number(baseline?.currWater    ?? 0);
       const electricUsage = Number(curr.currElectric) - Number(baseline?.currElectric ?? 0);
       if (waterUsage > 0) {
+        // Use Prisma.Decimal for unit × rate to avoid floating-point drift (Fix 5)
+        const waterCharge = Number(
+          new Prisma.Decimal(waterUsage).mul(curr.waterRate).toDecimalPlaces(2),
+        );
         await addCharge(tx, {
           folioId: folio.folioId, chargeType: 'UTILITY_WATER',
           description: `ค่าน้ำ (${waterUsage} หน่วย × ${Number(curr.waterRate)}) — ห้อง ${booking.room.number}`,
-          amount: Math.round(waterUsage * Number(curr.waterRate) * 100) / 100,
+          amount: waterCharge,
           serviceDate: period.start,
           referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-water`,
           createdBy: input.createdBy, billingStatus: 'DRAFT',
         });
       }
       if (electricUsage > 0) {
+        const electricCharge = Number(
+          new Prisma.Decimal(electricUsage).mul(curr.electricRate).toDecimalPlaces(2),
+        );
         await addCharge(tx, {
           folioId: folio.folioId, chargeType: 'UTILITY_ELECTRIC',
           description: `ค่าไฟ (${electricUsage} หน่วย × ${Number(curr.electricRate)}) — ห้อง ${booking.room.number}`,
-          amount: Math.round(electricUsage * Number(curr.electricRate) * 100) / 100,
+          amount: electricCharge,
           serviceDate: period.start,
           referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-elec`,
           createdBy: input.createdBy, billingStatus: 'DRAFT',
@@ -702,13 +741,18 @@ export async function approveDraft(
   const inv = await tx.invoice.findUniqueOrThrow({
     where: { id: input.invoiceId },
     select: {
-      id: true, status: true, grandTotal: true, bookingId: true,
+      id: true, status: true, invoiceNumber: true,
+      subtotal: true, serviceCharge: true, vatAmount: true,
+      grandTotal: true, bookingId: true,
       folioId: true,
       items: { select: { folioLineItemId: true } },
     },
   });
   if (inv.status !== 'draft') {
-    throw new Error(`Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`);
+    throw new BillingStateError(
+      'NOT_DRAFT',
+      `Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`,
+    );
   }
 
   // Flip invoice status to unpaid
@@ -735,14 +779,15 @@ export async function approveDraft(
     if (folioRow) await recalculateFolioBalance(tx, folioRow.id);
   }
 
-  // Post the ledger pair: DR AR / CR Revenue
-  await postLedgerPair(tx, {
-    debitAccount:  LedgerAccount.AR,
-    creditAccount: LedgerAccount.REVENUE,
-    amount:        Number(inv.grandTotal),
-    referenceType: 'Invoice',
-    referenceId:   inv.id,
-    description:   `Approve monthly draft invoice ${inv.id}`,
+  // Post the ledger accrual: splits into REVENUE + SERVICE_CHARGE_PAYABLE + VAT_OUTPUT legs.
+  // Using postInvoiceAccrual instead of a single postLedgerPair so that the
+  // three accounting buckets are correctly separated (Fix 2).
+  await postInvoiceAccrual(tx, {
+    invoiceId:     inv.id,
+    invoiceNumber: inv.invoiceNumber,
+    revenue:       Number(inv.subtotal),
+    serviceCharge: Number(inv.serviceCharge ?? 0),
+    vatAmount:     Number(inv.vatAmount ?? 0),
     createdBy:     input.approvedBy,
   });
 
@@ -769,7 +814,10 @@ export async function rejectDraft(
     select: { id: true, status: true, items: { select: { folioLineItemId: true } } },
   });
   if (inv.status !== 'draft') {
-    throw new Error(`Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`);
+    throw new BillingStateError(
+      'NOT_DRAFT',
+      `Invoice ${input.invoiceId} is not in draft status (was ${inv.status})`,
+    );
   }
 
   // Flip invoice to voided
