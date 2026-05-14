@@ -22,6 +22,7 @@ import { authOptions } from '@/lib/auth';
 import { prisma } from '@/lib/prisma';
 import { Prisma } from '@prisma/client';
 import { createSecurityDeposit } from '@/services/securityDeposit.service';
+import { recordReading } from '@/services/utility.service';
 import { z } from 'zod';
 import { getFolioByBookingId, addCharge, addNightlyRoomCharges, createInvoiceFromFolio, markLineItemsPaid } from '@/services/folio.service';
 import { createPayment } from '@/services/payment.service';
@@ -57,6 +58,13 @@ const CheckinSchema = z.object({
   authCode:              z.string().trim().max(12).optional(),
   // Sprint 4B: cashSessionId / depositCashSessionId are NOT accepted from the
   // client. For cash payments, the server looks up the caller's open shift.
+
+  // Phase 6.2 — initial meter reading (required for monthly bookings)
+  initialReading: z.object({
+    currWater:    z.number().nonnegative().max(1_000_000),
+    currElectric: z.number().nonnegative().max(1_000_000),
+    notes:        z.string().max(500).optional(),
+  }).optional(),
 });
 
 export async function POST(request: Request) {
@@ -90,6 +98,7 @@ export async function POST(request: Request) {
     upfrontPaymentMethod,
     receivingAccountId,
     terminalId, cardBrand, cardType, cardLast4, authCode,
+    initialReading,
   } = parsed.data;
 
   // Server-side guard: every transfer leg needs a receivingAccountId so the
@@ -179,6 +188,19 @@ export async function POST(request: Request) {
   // here. If the cashier has no open shift, those services throw a friendly
   // error which the $transaction below surfaces as a 400.
 
+  // Phase 6.2 — gate: monthly bookings MUST provide an initial meter reading
+  // so that cycle 2 utility charges have a non-zero baseline. Checked here
+  // (before opening the tx) so we return a clean 422 without any DB writes.
+  const isMonthlyBooking =
+    booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
+
+  if (isMonthlyBooking && !initialReading) {
+    return NextResponse.json(
+      { error: 'ต้องจดเลขมิเตอร์น้ำและไฟเริ่มต้นสำหรับการเข้าพักรายเดือน' },
+      { status: 422 },
+    );
+  }
+
   // Use invoiceType for reliable detection (not notes string matching)
   const existingStayInvoiceRecord = booking.invoices.find(
     (inv) => inv.invoiceType === 'daily_stay' || inv.invoiceType === 'monthly_rent'
@@ -245,6 +267,23 @@ export async function POST(request: Request) {
         bookingType: booking.bookingType,
       },
     });
+
+    // ── 2b. Record initial meter reading (Phase 6.2) ─────────────────────────
+    // Must happen BEFORE any folio/invoice logic so the reading is committed
+    // as a baseline for cycle 2+ utility calculations.
+    // Gate (monthly requires initialReading) has already run before the tx.
+    if (initialReading) {
+      const todayUTC = new Date(now.toISOString().slice(0, 10) + 'T00:00:00.000Z');
+      await recordReading(tx, {
+        roomId:       booking.roomId,
+        bookingId:    bookingId,
+        readingDate:  todayUTC,
+        currWater:    initialReading.currWater,
+        currElectric: initialReading.currElectric,
+        notes:        initialReading.notes ?? 'Initial reading at check-in',
+        recordedBy:   userId,
+      });
+    }
 
     // ── 3. Folio charges + optional upfront payment ───────────────────────────
     //

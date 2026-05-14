@@ -283,6 +283,16 @@ export default function DetailPanel({
   const [extendCard,   setExtendCard]   = useState<CardFields>({});
   const [checkoutCard, setCheckoutCard] = useState<CardFields>({});
 
+  // ── Phase 6.2: Meter reading state for check-in ──────────────────────────
+  const [meterInitWater,    setMeterInitWater]    = useState<string>('');
+  const [meterInitElectric, setMeterInitElectric] = useState<string>('');
+  const [meterInitNotes,    setMeterInitNotes]    = useState<string>('');
+
+  // ── Phase 6.3: Meter reading state for checkout ───────────────────────────
+  const [meterFinalWater,    setMeterFinalWater]    = useState<string>('');
+  const [meterFinalElectric, setMeterFinalElectric] = useState<string>('');
+  const [meterFinalNotes,    setMeterFinalNotes]    = useState<string>('');
+
   // ── Check-out payment step ────────────────────────────────────────────────
   // 'idle'      → normal action buttons
   // 'collect'   → show outstanding + payment method selection
@@ -940,6 +950,21 @@ export default function DetailPanel({
         if (checkinCard.authCode)  payload.authCode  = checkinCard.authCode;
       }
 
+      // Phase 6.2 — attach initial meter reading for monthly bookings
+      const isMonthlyBooking =
+        booking.bookingType === 'monthly_short' || booking.bookingType === 'monthly_long';
+      if (isMonthlyBooking || (meterInitWater.trim() !== '' && meterInitElectric.trim() !== '')) {
+        const w = parseFloat(meterInitWater);
+        const e = parseFloat(meterInitElectric);
+        if (!isNaN(w) && !isNaN(e)) {
+          payload.initialReading = {
+            currWater:    w,
+            currElectric: e,
+            ...(meterInitNotes.trim() && { notes: meterInitNotes.trim() }),
+          };
+        }
+      }
+
       const res = await fetch('/api/checkin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1124,6 +1149,17 @@ export default function DetailPanel({
           if (checkoutCard.cardLast4) payload.cardLast4 = checkoutCard.cardLast4;
           if (checkoutCard.authCode)  payload.authCode  = checkoutCard.authCode;
         }
+      }
+
+      // Phase 6.3 — include final meter reading if provided (any booking type)
+      const fw = parseFloat(meterFinalWater);
+      const fe = parseFloat(meterFinalElectric);
+      if (!isNaN(fw) && !isNaN(fe) && meterFinalWater.trim() !== '' && meterFinalElectric.trim() !== '') {
+        payload.finalReading = {
+          currWater:    fw,
+          currElectric: fe,
+          ...(meterFinalNotes.trim() && { notes: meterFinalNotes.trim() }),
+        };
       }
 
       const res = await fetch('/api/checkout', {
@@ -1677,6 +1713,92 @@ export default function DetailPanel({
                     </div>
                   </div>
 
+                  {/* ─── Phase 6.2: Initial Meter Reading (monthly bookings) ── */}
+                  {isMonthly && (
+                    <div style={{
+                      background: '#fffbeb',
+                      border: `1.5px solid ${
+                        (meterInitWater.trim() === '' || meterInitElectric.trim() === '')
+                          ? '#fbbf24'
+                          : '#86efac'
+                      }`,
+                      borderRadius: 10,
+                      padding: '14px 16px',
+                      marginBottom: 16,
+                    }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#92400e', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        📊 จดเลขมิเตอร์เริ่มต้น
+                        <span style={{ color: '#dc2626', fontSize: 11 }}>* จำเป็น</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#b45309', marginBottom: 10, lineHeight: 1.5, background: '#fef3c7', borderRadius: 6, padding: '6px 10px' }}>
+                        ℹ️ ค่าน้ำ-ไฟตั้งแต่เดือนที่ 2 จะคำนวณจากเลขนี้เป็น baseline
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                            เลขมิเตอร์น้ำ (หน่วย) <span style={{ color: '#dc2626' }}>*</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1000000}
+                            step={0.01}
+                            value={meterInitWater}
+                            onChange={e => setMeterInitWater(e.target.value)}
+                            placeholder="0"
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '7px 10px', borderRadius: 6,
+                              border: `1.5px solid ${meterInitWater.trim() === '' ? '#f59e0b' : '#d1fae5'}`,
+                              fontSize: 13, fontFamily: FONT,
+                              outline: 'none', color: '#1f2937',
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                            เลขมิเตอร์ไฟ (หน่วย) <span style={{ color: '#dc2626' }}>*</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1000000}
+                            step={0.01}
+                            value={meterInitElectric}
+                            onChange={e => setMeterInitElectric(e.target.value)}
+                            placeholder="0"
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '7px 10px', borderRadius: 6,
+                              border: `1.5px solid ${meterInitElectric.trim() === '' ? '#f59e0b' : '#d1fae5'}`,
+                              fontSize: 13, fontFamily: FONT,
+                              outline: 'none', color: '#1f2937',
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                          หมายเหตุ (ไม่บังคับ)
+                        </label>
+                        <textarea
+                          value={meterInitNotes}
+                          onChange={e => setMeterInitNotes(e.target.value)}
+                          placeholder="เช่น ถ่ายรูปมิเตอร์ไว้แล้ว"
+                          rows={2}
+                          maxLength={500}
+                          style={{
+                            width: '100%', boxSizing: 'border-box',
+                            padding: '7px 10px', borderRadius: 6,
+                            border: '1.5px solid #e5e7eb',
+                            fontSize: 12, fontFamily: FONT, resize: 'vertical',
+                            outline: 'none', color: '#1f2937',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* Error */}
                   {error && (
                     <div style={{ marginBottom: 12, padding: '10px 14px', background: '#fee2e2', borderRadius: 8, fontSize: 12, color: '#991b1b' }}>
@@ -1694,12 +1816,18 @@ export default function DetailPanel({
                     </button>
                     <button
                       onClick={handleCheckinConfirm}
-                      disabled={loading}
+                      disabled={loading || (isMonthly && (meterInitWater.trim() === '' || meterInitElectric.trim() === ''))}
                       style={{
-                        flex: 2, padding: '10px', borderRadius: 6, background: '#22c55e',
+                        flex: 2, padding: '10px', borderRadius: 6,
+                        background: (isMonthly && (meterInitWater.trim() === '' || meterInitElectric.trim() === ''))
+                          ? '#86efac'
+                          : '#22c55e',
                         color: '#fff', border: 'none', fontSize: 13, fontWeight: 700,
-                        cursor: loading ? 'not-allowed' : 'pointer', fontFamily: FONT,
-                        opacity: loading ? 0.6 : 1,
+                        cursor: (loading || (isMonthly && (meterInitWater.trim() === '' || meterInitElectric.trim() === '')))
+                          ? 'not-allowed' : 'pointer',
+                        fontFamily: FONT,
+                        opacity: (loading || (isMonthly && (meterInitWater.trim() === '' || meterInitElectric.trim() === '')))
+                          ? 0.6 : 1,
                         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
                       }}
                     >
@@ -1712,6 +1840,85 @@ export default function DetailPanel({
               {/* ─── CHECKOUT COLLECT STEP ───────────────────────────────────── */}
               {checkoutStep === 'collect' && (
                 <div>
+                  {/* ─── Phase 6.3: Final Meter Reading (monthly — optional) ── */}
+                  {isMonthly && (
+                    <div style={{
+                      background: '#f0f9ff',
+                      border: '1.5px solid #bae6fd',
+                      borderRadius: 10,
+                      padding: '14px 16px',
+                      marginBottom: 16,
+                    }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#0c4a6e', marginBottom: 8 }}>
+                        📊 จดเลขมิเตอร์ปิดงาน
+                        <span style={{ fontSize: 11, fontWeight: 400, color: '#0369a1', marginLeft: 8 }}>ทางเลือก — ไม่บังคับ</span>
+                      </div>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 8 }}>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                            เลขมิเตอร์น้ำ (หน่วย)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1000000}
+                            step={0.01}
+                            value={meterFinalWater}
+                            onChange={e => setMeterFinalWater(e.target.value)}
+                            placeholder="0"
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '7px 10px', borderRadius: 6,
+                              border: '1.5px solid #bae6fd',
+                              fontSize: 13, fontFamily: FONT,
+                              outline: 'none', color: '#1f2937',
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                            เลขมิเตอร์ไฟ (หน่วย)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1000000}
+                            step={0.01}
+                            value={meterFinalElectric}
+                            onChange={e => setMeterFinalElectric(e.target.value)}
+                            placeholder="0"
+                            style={{
+                              width: '100%', boxSizing: 'border-box',
+                              padding: '7px 10px', borderRadius: 6,
+                              border: '1.5px solid #bae6fd',
+                              fontSize: 13, fontFamily: FONT,
+                              outline: 'none', color: '#1f2937',
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', fontSize: 11, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+                          หมายเหตุ (ไม่บังคับ)
+                        </label>
+                        <textarea
+                          value={meterFinalNotes}
+                          onChange={e => setMeterFinalNotes(e.target.value)}
+                          placeholder="เช่น ถ่ายรูปมิเตอร์ไว้แล้ว"
+                          rows={2}
+                          maxLength={500}
+                          style={{
+                            width: '100%', boxSizing: 'border-box',
+                            padding: '7px 10px', borderRadius: 6,
+                            border: '1.5px solid #e5e7eb',
+                            fontSize: 12, fontFamily: FONT, resize: 'vertical',
+                            outline: 'none', color: '#1f2937',
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
                   {/* T14: Early-termination guard. Mounted only for non-daily
                       bookings — `disabled` short-circuits the fetch and keeps
                       `blocking=false` so the confirm button stays enabled for
