@@ -205,6 +205,32 @@ export default function DetailPanel({
   const [generateNextLoading, setGenerateNextLoading] = useState(false);
   const [generateNextConfirm, setGenerateNextConfirm] = useState(false);
 
+  // ── Billing tab: recurring charges (Task 5.7) ─────────────────────────────
+  interface RecurringChargeRow {
+    id:          string;
+    chargeType:  string;
+    description: string;
+    amount:      number;
+    startDate:   string;
+    endDate:     string | null;
+    status:      string;
+    notes:       string | null;
+  }
+  const [recurringCharges,      setRecurringCharges]      = useState<RecurringChargeRow[]>([]);
+  const [recurringLoading,      setRecurringLoading]      = useState(false);
+  const [recurringAddOpen,      setRecurringAddOpen]      = useState(false);
+  const [recurringCancelId,     setRecurringCancelId]     = useState<string | null>(null);
+  const [recurringCancelBusy,   setRecurringCancelBusy]   = useState(false);
+  // Add form state
+  const [rcChargeType,  setRcChargeType]  = useState<'EXTRA_SERVICE' | 'OTHER'>('EXTRA_SERVICE');
+  const [rcDescription, setRcDescription] = useState('');
+  const [rcAmount,      setRcAmount]      = useState('');
+  const [rcStartDate,   setRcStartDate]   = useState(new Date().toISOString().slice(0, 10));
+  const [rcEndDate,     setRcEndDate]     = useState('');
+  const [rcForever,     setRcForever]     = useState(true);
+  const [rcNotes,       setRcNotes]       = useState('');
+  const [rcAddBusy,     setRcAddBusy]     = useState(false);
+
   // ── Billing tab: inline payment form ──────────────────────────────────────
   // Phase 6.8 — track WHICH invoice is currently being paid (was a single
   // boolean before, which expanded the form on every unpaid card simultaneously
@@ -352,6 +378,16 @@ export default function DetailPanel({
     setBillingPayInvoiceId(null);
     setGenerateNextLoading(false);
     setGenerateNextConfirm(false);
+    setRecurringCharges([]);
+    setRecurringLoading(false);
+    setRecurringAddOpen(false);
+    setRecurringCancelId(null);
+    setRcDescription('');
+    setRcAmount('');
+    setRcStartDate(new Date().toISOString().slice(0, 10));
+    setRcEndDate('');
+    setRcForever(true);
+    setRcNotes('');
     setBillingPayMethod('cash');
     setBillingCashSessId(null);
     setError('');
@@ -453,6 +489,9 @@ export default function DetailPanel({
     }
     if (booking?.id && activeTab === 'billing') {
       loadBillingInvoices(booking.id);
+      if (booking.bookingType !== 'daily') {
+        loadRecurringCharges(booking.id);
+      }
     }
     if (booking?.id && activeTab === 'details') {
       loadHkForBooking(booking.id);
@@ -724,6 +763,76 @@ export default function DetailPanel({
       const msg = err instanceof Error ? err.message : 'ไม่สามารถโหลดใบแจ้งหนี้ได้';
       setError(msg);
       toast.error('โหลดใบแจ้งหนี้ไม่สำเร็จ', msg);
+    }
+  };
+
+  /** Load recurring charges for the current booking (Task 5.7). */
+  const loadRecurringCharges = async (bookingId: string) => {
+    setRecurringLoading(true);
+    try {
+      const res = await fetch(`/api/bookings/${bookingId}/recurring-charges?status=active`);
+      if (res.ok) {
+        const data = await res.json() as RecurringChargeRow[];
+        setRecurringCharges(Array.isArray(data) ? data : []);
+      }
+    } catch { /* non-fatal */ }
+    finally { setRecurringLoading(false); }
+  };
+
+  /** Add a new recurring charge (Task 5.7). */
+  const handleAddRecurring = async () => {
+    if (!booking || rcAddBusy) return;
+    const amount = parseFloat(rcAmount);
+    if (!rcDescription.trim() || isNaN(amount) || amount <= 0) {
+      toast.warning('กรุณากรอกชื่อบริการและจำนวนเงิน');
+      return;
+    }
+    setRcAddBusy(true);
+    try {
+      const res = await fetch(`/api/bookings/${booking.id}/recurring-charges`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chargeType:  rcChargeType,
+          description: rcDescription.trim(),
+          amount,
+          startDate:   rcStartDate,
+          endDate:     rcForever ? null : (rcEndDate || null),
+          notes:       rcNotes.trim() || undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      toast.success('เพิ่มบริการแล้ว', 'รอบบิลถัดไปจะมีรายการนี้');
+      setRecurringAddOpen(false);
+      setRcDescription('');
+      setRcAmount('');
+      setRcForever(true);
+      setRcEndDate('');
+      setRcNotes('');
+      await loadRecurringCharges(booking.id);
+    } catch (err) {
+      toast.error('เพิ่มบริการไม่สำเร็จ', err instanceof Error ? err.message : undefined);
+    } finally {
+      setRcAddBusy(false);
+    }
+  };
+
+  /** Cancel a recurring charge (Task 5.7). */
+  const handleCancelRecurring = async (rcId: string) => {
+    if (!booking || recurringCancelBusy) return;
+    setRecurringCancelBusy(true);
+    try {
+      const res = await fetch(`/api/recurring-charges/${rcId}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({})) as { ok?: boolean; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      toast.success('ยกเลิกบริการแล้ว');
+      setRecurringCancelId(null);
+      await loadRecurringCharges(booking.id);
+    } catch (err) {
+      toast.error('ยกเลิกบริการไม่สำเร็จ', err instanceof Error ? err.message : undefined);
+    } finally {
+      setRecurringCancelBusy(false);
     }
   };
 
@@ -2829,6 +2938,222 @@ export default function DetailPanel({
               {/* ── BILLING TAB ──────────────────────────────────────────────── */}
               {checkinStep === 'idle' && checkoutStep === 'idle' && extendStep === 'idle' && serviceStep === 'idle' && activeTab === 'billing' && (
                 <div>
+
+                  {/* ── บริการต่อเนื่อง (Task 5.7 — monthly bookings only) ───── */}
+                  {booking && booking.bookingType !== 'daily' && (
+                    <div style={{ marginBottom: 16 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
+                          🔁 บริการต่อเนื่อง
+                        </div>
+                        <button
+                          onClick={() => setRecurringAddOpen(o => !o)}
+                          style={{
+                            fontSize: 11, fontWeight: 600,
+                            padding: '4px 10px', borderRadius: 6,
+                            border: '1.5px solid #1d4ed8',
+                            background: recurringAddOpen ? '#dbeafe' : '#eff6ff',
+                            color: '#1d4ed8', cursor: 'pointer', fontFamily: FONT,
+                          }}
+                        >
+                          {recurringAddOpen ? '✕ ปิด' : '+ เพิ่มบริการ'}
+                        </button>
+                      </div>
+
+                      {/* Add form */}
+                      {recurringAddOpen && (
+                        <div style={{
+                          marginBottom: 10, padding: '12px 14px',
+                          background: '#f0f9ff', borderRadius: 8,
+                          border: '1px solid #bae6fd',
+                          fontSize: 12,
+                        }}>
+                          {/* chargeType radio */}
+                          <div style={{ marginBottom: 8 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--text-secondary)' }}>ประเภท</div>
+                            <div style={{ display: 'flex', gap: 8 }}>
+                              {([['EXTRA_SERVICE', 'บริการเสริม'], ['OTHER', 'อื่นๆ']] as const).map(([v, l]) => (
+                                <label key={v} style={{ display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer', fontSize: 12 }}>
+                                  <input
+                                    type="radio"
+                                    value={v}
+                                    checked={rcChargeType === v}
+                                    onChange={() => setRcChargeType(v)}
+                                  />
+                                  {l}
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                          {/* description */}
+                          <div style={{ marginBottom: 6 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>ชื่อบริการ *</div>
+                            <input
+                              type="text"
+                              value={rcDescription}
+                              onChange={e => setRcDescription(e.target.value)}
+                              placeholder="เช่น เช่า TV, Internet"
+                              style={{
+                                width: '100%', boxSizing: 'border-box',
+                                border: '1px solid var(--border-default)', borderRadius: 6,
+                                padding: '6px 10px', fontSize: 12,
+                                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                              }}
+                            />
+                          </div>
+                          {/* amount */}
+                          <div style={{ marginBottom: 6 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>จำนวน (บาท/รอบ) *</div>
+                            <input
+                              type="number"
+                              min="1"
+                              step="0.01"
+                              value={rcAmount}
+                              onChange={e => setRcAmount(e.target.value)}
+                              style={{
+                                width: '100%', boxSizing: 'border-box',
+                                border: '1px solid var(--border-default)', borderRadius: 6,
+                                padding: '6px 10px', fontSize: 12,
+                                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                              }}
+                            />
+                          </div>
+                          {/* startDate */}
+                          <div style={{ marginBottom: 6 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>เริ่มตั้งแต่ *</div>
+                            <input
+                              type="date"
+                              value={rcStartDate}
+                              onChange={e => setRcStartDate(e.target.value)}
+                              style={{
+                                width: '100%', boxSizing: 'border-box',
+                                border: '1px solid var(--border-default)', borderRadius: 6,
+                                padding: '6px 10px', fontSize: 12,
+                                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                              }}
+                            />
+                          </div>
+                          {/* endDate */}
+                          <div style={{ marginBottom: 8 }}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 12, marginBottom: 4 }}>
+                              <input
+                                type="checkbox"
+                                checked={rcForever}
+                                onChange={e => setRcForever(e.target.checked)}
+                              />
+                              <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>ไม่จำกัดวันสิ้นสุด</span>
+                            </label>
+                            {!rcForever && (
+                              <input
+                                type="date"
+                                value={rcEndDate}
+                                min={rcStartDate}
+                                onChange={e => setRcEndDate(e.target.value)}
+                                style={{
+                                  width: '100%', boxSizing: 'border-box',
+                                  border: '1px solid var(--border-default)', borderRadius: 6,
+                                  padding: '6px 10px', fontSize: 12,
+                                  background: 'var(--surface-card)', color: 'var(--text-primary)',
+                                }}
+                              />
+                            )}
+                          </div>
+                          {/* notes */}
+                          <div style={{ marginBottom: 10 }}>
+                            <div style={{ fontWeight: 600, marginBottom: 3, color: 'var(--text-secondary)' }}>หมายเหตุ</div>
+                            <textarea
+                              value={rcNotes}
+                              onChange={e => setRcNotes(e.target.value)}
+                              rows={2}
+                              maxLength={500}
+                              placeholder="(ไม่บังคับ)"
+                              style={{
+                                width: '100%', boxSizing: 'border-box',
+                                border: '1px solid var(--border-default)', borderRadius: 6,
+                                padding: '6px 10px', fontSize: 12, resize: 'vertical',
+                                background: 'var(--surface-card)', color: 'var(--text-primary)',
+                              }}
+                            />
+                          </div>
+                          <button
+                            onClick={() => void handleAddRecurring()}
+                            disabled={rcAddBusy}
+                            style={{
+                              width: '100%', padding: '7px',
+                              borderRadius: 6, border: 'none',
+                              background: rcAddBusy ? '#86efac' : '#16a34a',
+                              color: '#fff', fontSize: 12, fontWeight: 700,
+                              cursor: rcAddBusy ? 'wait' : 'pointer', fontFamily: FONT,
+                            }}
+                          >
+                            {rcAddBusy ? '⏳ กำลังเพิ่ม...' : '✅ เพิ่มบริการ'}
+                          </button>
+                        </div>
+                      )}
+
+                      {/* List of active recurring charges */}
+                      {recurringLoading ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: 4 }}>กำลังโหลด...</div>
+                      ) : recurringCharges.length === 0 ? (
+                        <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: '4px 0' }}>ยังไม่มีบริการต่อเนื่อง</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {recurringCharges.map((rc) => (
+                            <div
+                              key={rc.id}
+                              style={{
+                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                                padding: '8px 10px',
+                                border: '1px solid var(--border-default)',
+                                borderRadius: 7,
+                                background: 'var(--surface-card)',
+                                fontSize: 12,
+                              }}
+                            >
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontWeight: 700, color: 'var(--text-primary)' }}>{rc.description}</div>
+                                <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 1 }}>
+                                  ฿{fmtBaht(rc.amount)}/รอบ
+                                  {' · '}เริ่ม {fmtDate(rc.startDate)}
+                                  {rc.endDate ? ` ถึง ${fmtDate(rc.endDate)}` : ' · ไม่จำกัด'}
+                                </div>
+                              </div>
+                              {recurringCancelId === rc.id ? (
+                                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                                  <button
+                                    onClick={() => setRecurringCancelId(null)}
+                                    style={{ fontSize: 10, padding: '3px 8px', borderRadius: 5, border: '1px solid var(--border-default)', background: 'var(--surface-card)', cursor: 'pointer', fontFamily: FONT }}
+                                  >
+                                    ไม่
+                                  </button>
+                                  <button
+                                    onClick={() => void handleCancelRecurring(rc.id)}
+                                    disabled={recurringCancelBusy}
+                                    style={{ fontSize: 10, padding: '3px 8px', borderRadius: 5, border: 'none', background: '#dc2626', color: '#fff', cursor: 'pointer', fontWeight: 700, fontFamily: FONT }}
+                                  >
+                                    ยืนยันยกเลิก
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  onClick={() => setRecurringCancelId(rc.id)}
+                                  title="ยกเลิกบริการ"
+                                  style={{
+                                    fontSize: 12, padding: '3px 8px', borderRadius: 5,
+                                    border: '1px solid #fca5a5', background: '#fef2f2',
+                                    color: '#b91c1c', cursor: 'pointer', fontFamily: FONT, flexShrink: 0,
+                                  }}
+                                >
+                                  🛑 ยกเลิก
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {billingLoading ? (
                     <div style={{ textAlign: 'center', padding: 32, color: '#9ca3af', fontSize: 13 }}>กำลังโหลด...</div>
                   ) : billingInvoices.length === 0 ? (
