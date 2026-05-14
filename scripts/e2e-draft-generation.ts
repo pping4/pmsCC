@@ -60,7 +60,9 @@ async function main() {
     const led2 = await tx.ledgerEntry.count({
       where: { referenceType: 'Invoice', referenceId: draft1.invoiceId },
     });
-    assert.strictEqual(led2, 2, 'approval posts exactly one DR/CR pair');
+    // postInvoiceAccrual posts one DR/CR pair per non-zero leg.
+    // Test data: subtotal=15000, serviceCharge=0, vatAmount=0 → 1 pair (revenue only) = 2 entries.
+    assert.strictEqual(led2, 2, 'approval posts exactly one DR/CR pair (revenue only; SC+VAT=0)');
 
     const folioApproved = await tx.folio.findUniqueOrThrow({ where: { id: folio.id } });
     assert.strictEqual(Number(folioApproved.totalCharges), 15000, 'folio totalCharges updated on approve');
