@@ -586,6 +586,7 @@ export async function generateDraftInvoice(
           description: `ค่าน้ำ (${waterUsage} หน่วย × ${Number(curr.waterRate)}) — ห้อง ${booking.room.number}`,
           amount: waterCharge,
           serviceDate: period.start,
+          periodEnd:   period.end,  // Task 5.3: per-line period for invoice display
           referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-water`,
           createdBy: input.createdBy, billingStatus: 'DRAFT',
         });
@@ -599,6 +600,7 @@ export async function generateDraftInvoice(
           description: `ค่าไฟ (${electricUsage} หน่วย × ${Number(curr.electricRate)}) — ห้อง ${booking.room.number}`,
           amount: electricCharge,
           serviceDate: period.start,
+          periodEnd:   period.end,  // Task 5.3: per-line period for invoice display
           referenceType: 'monthly_draft', referenceId: `${booking.id}-c${input.cycleIndex}-elec`,
           createdBy: input.createdBy, billingStatus: 'DRAFT',
         });
@@ -620,7 +622,9 @@ export async function generateDraftInvoice(
       : Number(rc.amount);
     await addCharge(tx, {
       folioId: folio.folioId,
-      chargeType: rc.chargeType,
+      // rc.chargeType is FolioChargeType (full enum) but addCharge accepts the narrowed
+      // ChargeType subset. CreateRecurringInput restricts to EXTRA_SERVICE | OTHER — both valid.
+      chargeType: rc.chargeType as 'EXTRA_SERVICE' | 'OTHER',
       description: overlapDays < cycleDays
         ? `${rc.description} (${overlapDays}/${cycleDays} วัน)`
         : rc.description,

@@ -135,6 +135,19 @@ async function main() {
       `cycle 2: grandTotal=${draft2.grandTotal} (expected ${EXPECTED_TOTAL_2})`,
     );
 
+    // Task 5.3: assert periodEnd is non-null on water/electric lines (cycle >= 2)
+    const c2UtilityLines = await prisma.folioLineItem.findMany({
+      where:   { folioId: fix.folioId, billingStatus: 'DRAFT', chargeType: { in: ['UTILITY_WATER', 'UTILITY_ELECTRIC'] } },
+      select:  { chargeType: true, periodEnd: true },
+    });
+    ok(c2UtilityLines.length >= 2,        `cycle 2: found ${c2UtilityLines.length} utility lines`);
+    ok(c2UtilityLines.every((l) => l.periodEnd !== null), 'cycle 2: all utility lines have periodEnd set (Task 5.3)');
+    const waterLine = c2UtilityLines.find((l) => l.chargeType === 'UTILITY_WATER');
+    ok(
+      waterLine?.periodEnd?.toISOString().slice(0, 10) === '2026-03-09',
+      `cycle 2: water periodEnd=2026-03-09 (got ${waterLine?.periodEnd?.toISOString().slice(0, 10)})`,
+    );
+
     // ── Cycle 2: approve ─────────────────────────────────────────────────────
     console.log('Cycle 2 — approve');
     await prisma.$transaction((tx) =>
