@@ -28,7 +28,41 @@ export async function GET(request: NextRequest) {
       ...(dateFilter ? { readingDate: dateFilter } : {}),
       ...(roomId ? { roomId } : {}),
     },
-    include: { room: { include: { roomType: true } } },
+    select: {
+      id:           true,
+      readingDate:  true,
+      prevWater:    true,
+      currWater:    true,
+      waterRate:    true,
+      prevElectric: true,
+      currElectric: true,
+      electricRate: true,
+      notes:        true,
+      recorded:     true,
+      recordedBy:   true,
+      recordedAt:   true,
+      createdAt:    true,
+      room: {
+        select: {
+          id:     true,
+          number: true,
+          floor:  true,
+          roomType: { select: { name: true } },
+        },
+      },
+      booking: {
+        select: {
+          id:            true,
+          bookingNumber: true,
+          guest: {
+            select: {
+              firstName: true,
+              lastName:  true,
+            },
+          },
+        },
+      },
+    },
     orderBy: [{ readingDate: 'desc' }, { room: { number: 'asc' } }],
   });
 
