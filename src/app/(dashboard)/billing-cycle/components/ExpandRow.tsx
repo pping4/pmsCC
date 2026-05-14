@@ -19,7 +19,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { fmtDate, fmtBaht } from '@/lib/date-format';
+import { fmtDate, fmtBaht, formatPeriod } from '@/lib/date-format';
 
 // ─── API types ────────────────────────────────────────────────────────────────
 
@@ -301,7 +301,7 @@ export function ExpandRow({ bookingId, contractId }: ExpandRowProps) {
                       {inv.invoiceNumber}
                     </td>
                     <td style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>
-                      {fmtDate(inv.periodStart)} – {fmtDate(inv.periodEnd)}
+                      {formatPeriod(inv.periodStart, inv.periodEnd)}
                     </td>
                     <td style={{ padding: '5px 10px', textAlign: 'right', fontFamily: 'monospace' }}>
                       {fmtBaht(inv.rentAmount)}

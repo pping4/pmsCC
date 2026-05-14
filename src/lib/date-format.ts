@@ -134,6 +134,18 @@ export function fmtMonthLongTH(d: Date): string {
 // ─── Currency (not date, but shared utility) ──────────────────────────────────
 
 /**
+ * Format a billing period as "YYYY-MM-DD ถึง YYYY-MM-DD".
+ * Replaces ad-hoc `${fmtDate(s)} – ${fmtDate(e)}` patterns throughout the app.
+ * Accepts Date objects, ISO strings, or YYYY-MM-DD strings.
+ */
+export function formatPeriod(
+  start: Date | string | null | undefined,
+  end:   Date | string | null | undefined,
+): string {
+  return `${fmtDate(start)} ถึง ${fmtDate(end)}`;
+}
+
+/**
  * Format number as Thai Baht without symbol: "1,234.50"
  * Uses en-US grouping (comma) for consistency across all pages.
  */

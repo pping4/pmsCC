@@ -25,7 +25,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FileText, CheckCircle, XCircle, BarChart2 } from 'lucide-react';
-import { fmtDate, fmtBaht } from '@/lib/date-format';
+import { fmtDate, fmtBaht, formatPeriod } from '@/lib/date-format';
 import { useToast, Dialog } from '@/components/ui';
 import {
   GoogleSheetTable,
@@ -224,7 +224,7 @@ export default function BillingCyclePage() {
           cycle:            d.cycle,
           cycleLabel:       CYCLE_META[d.cycle].label,
           cycleIndex:       d.cycleIndex,
-          period:           `${d.periodStart} – ${d.periodEnd}`,
+          period:           formatPeriod(d.periodStart, d.periodEnd),
           periodStart:      d.periodStart,
           periodEnd:        d.periodEnd,
           rentAmount:       d.rentAmount,
@@ -477,7 +477,7 @@ export default function BillingCyclePage() {
       getValue: r => r.period,
       render: row => (
         <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'monospace' }}>
-          {fmtDate(row.periodStart)} – {fmtDate(row.periodEnd)}
+          {formatPeriod(row.periodStart, row.periodEnd)}
         </span>
       ),
     },

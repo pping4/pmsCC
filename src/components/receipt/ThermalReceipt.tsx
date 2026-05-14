@@ -27,7 +27,7 @@ import {
   PAYMENT_METHOD_LABEL,
   RECEIPT_TYPE_LABEL,
 } from '@/lib/receipt-config';
-import { fmtDate, fmtTime, fmtBaht } from '@/lib/date-format';
+import { fmtDate, fmtTime, fmtBaht, formatPeriod } from '@/lib/date-format';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -188,12 +188,12 @@ export default function ThermalReceipt({ receipt, printRef, isReprint = false }:
           {/* Date range for room / service charges */}
           {item.periodStart && item.periodEnd && (
             <div style={{ fontSize: 9, color: '#1e40af', paddingLeft: 4, fontStyle: 'italic' }}>
-              {item.periodStart} – {item.periodEnd}
+              {formatPeriod(item.periodStart, item.periodEnd)}
             </div>
           )}
           {item.periodStart && !item.periodEnd && (
             <div style={{ fontSize: 9, color: '#1e40af', paddingLeft: 4, fontStyle: 'italic' }}>
-              {item.periodStart}
+              {fmtDate(item.periodStart)}
             </div>
           )}
           {item.quantity !== undefined && item.unitPrice !== undefined && (

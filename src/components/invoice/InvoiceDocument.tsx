@@ -17,7 +17,7 @@
 
 import type { InvoiceDocumentData } from './types';
 import { PROPERTY_CONFIG } from '@/lib/receipt-config';
-import { fmtBaht } from '@/lib/date-format';
+import { fmtBaht, fmtDate, formatPeriod } from '@/lib/date-format';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -228,7 +228,7 @@ export default function InvoiceDocument({ document: doc, printRef, isReprint = f
               {hasPeriod && (
                 <tr>
                   <td style={{ color: '#666', paddingRight: 8 }}>ช่วงเวลา:</td>
-                  <td style={{ textAlign: 'right' }}>{doc.billingPeriodStart} – {doc.billingPeriodEnd}</td>
+                  <td style={{ textAlign: 'right' }}>{formatPeriod(doc.billingPeriodStart!, doc.billingPeriodEnd!)}</td>
                 </tr>
               )}
             </tbody>
@@ -326,15 +326,15 @@ export default function InvoiceDocument({ document: doc, printRef, isReprint = f
             <tr key={idx} style={{ backgroundColor: idx % 2 === 0 ? '#fff' : '#f9fafb' }}>
               <td style={{ ...tdStyle, textAlign: 'center', color: '#6b7280' }}>{idx + 1}</td>
               <td style={tdStyle}>
-                <div>{item.description}</div>
+                <div style={{ fontWeight: 600 }}>{item.description}</div>
                 {item.periodStart && item.periodEnd && (
                   <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2, fontStyle: 'italic' }}>
-                    📅 {item.periodStart} – {item.periodEnd}
+                    📅 {formatPeriod(item.periodStart, item.periodEnd)}
                   </div>
                 )}
                 {item.periodStart && !item.periodEnd && (
                   <div style={{ fontSize: 10, color: '#6b7280', marginTop: 2, fontStyle: 'italic' }}>
-                    📅 {item.periodStart}
+                    📅 {fmtDate(item.periodStart)}
                   </div>
                 )}
                 {item.taxType === 'no_tax' && (
