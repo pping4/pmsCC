@@ -19,6 +19,7 @@ import { Prisma, InvoiceType, LedgerAccount } from '@prisma/client';
 import { postLedgerPair, postInvoiceAccrual } from './ledger.service';
 import { getFolioByBookingId, addCharge, createInvoiceFromFolio, recalculateFolioBalance } from './folio.service';
 import { generateMonthlyInvoiceNumber as genStandardMNNumber } from './invoice-number.service';
+import { listForCycle } from './recurring.service';
 
 // ─── Typed error classes ────────────────────────────────────────────────────
 
@@ -605,7 +606,36 @@ export async function generateDraftInvoice(
     }
   }
 
-  // 3) Create draft Invoice — invoiceType='monthly_rent', status='draft'
+  // 3) Recurring charges (TV, Internet, ค่าบริการ) — pull active charges that
+  //    overlap this cycle and add one DRAFT line item each.
+  const recurring = await listForCycle(tx, booking.id, period.start, period.end);
+  for (const rc of recurring) {
+    // Pro-rate by overlap days if the charge's date range partially covers the cycle.
+    const effStart = rc.startDate > period.start ? rc.startDate : period.start;
+    const effEnd   = (rc.endDate && rc.endDate < period.end) ? rc.endDate : period.end;
+    const overlapDays = Math.round((effEnd.getTime() - effStart.getTime()) / 86_400_000) + 1;
+    const cycleDays   = Math.round((period.end.getTime() - period.start.getTime()) / 86_400_000) + 1;
+    const amount = overlapDays < cycleDays
+      ? Number(new Prisma.Decimal(rc.amount).mul(overlapDays).div(cycleDays).toDecimalPlaces(2))
+      : Number(rc.amount);
+    await addCharge(tx, {
+      folioId: folio.folioId,
+      chargeType: rc.chargeType,
+      description: overlapDays < cycleDays
+        ? `${rc.description} (${overlapDays}/${cycleDays} วัน)`
+        : rc.description,
+      amount,
+      serviceDate: effStart,
+      periodEnd:   effEnd,
+      referenceType: 'recurring_charge',
+      referenceId:   rc.id,
+      notes: `Cycle ${input.cycleIndex} · recurring ${rc.id}`,
+      createdBy: input.createdBy,
+      billingStatus: 'DRAFT',
+    });
+  }
+
+  // 4) Create draft Invoice — invoiceType='monthly_rent', status='draft'
   //    createInvoiceFromFolio gathers ALL DRAFT-flagged folio items.
   const invResult = await createInvoiceFromFolio(tx, {
     folioId: folio.folioId,
@@ -622,7 +652,7 @@ export async function generateDraftInvoice(
   });
   if (!invResult) throw new Error('Draft invoice creation produced no result');
 
-  // 4) Log the BillingPeriod — UPSERT (not create). A prior rejected draft
+  // 5) Log the BillingPeriod — UPSERT (not create). A prior rejected draft
   //    leaves a BillingPeriod row with invoiceId=null (see Task 1.5); the next
   //    cron run must reuse that row, not create a duplicate.
   await tx.billingPeriod.upsert({
