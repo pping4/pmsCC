@@ -24,8 +24,11 @@
  *     Next cycleIndex = max + 1 (or 1 if none yet).
  *  3. Skip bookings whose active Contract.status = 'terminated'.
  *  4. Skip if the next period hasn't started yet (periodStart > today).
- *  5. Call generateDraftInvoice() inside a per-booking $transaction with
- *     SELECT booking FOR UPDATE to prevent concurrent cron double-fire.
+ *  5. Call generateDraftInvoice() inside a per-booking $transaction.
+ *   - Concurrency: per-booking SELECT FOR UPDATE happens INSIDE
+ *     generateDraftInvoice (billing.service.ts:488). This job invokes the
+ *     service sequentially, so concurrent runs of the same booking are
+ *     serialized by that inner lock.
  *  6. On error: log to ActivityLog(severity='error') and continue.
  *  7. Returns { processed, generated, skipped, errors }.
  */
